@@ -196,12 +196,48 @@
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor), var(--SmartThemeBodyColor) 20%);
 }
 
+.rp-engine-writing-report > button.rp-engine-writing-report-alert {
+    border-color: color-mix(in srgb, #ffb84d, var(--SmartThemeBorderColor) 30%);
+    background: color-mix(in srgb, #6f2f00 42%, var(--SmartThemeBlurTintColor));
+    color: #ffe4ba;
+    font-weight: 700;
+}
+
+.rp-engine-writing-report > button.rp-engine-writing-report-alert:hover {
+    background: color-mix(in srgb, #8a3b00 50%, var(--SmartThemeBlurTintColor));
+}
+
 .rp-engine-writing-report-body {
     margin-top: 8px;
     padding: 8px;
     border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 30%);
     border-radius: 6px;
     background: rgba(0, 0, 0, 0.16);
+}
+
+.rp-engine-writing-repair-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    min-height: 30px;
+    margin-top: 8px;
+    border: 1px solid color-mix(in srgb, #ffb84d, var(--SmartThemeBorderColor) 30%);
+    border-radius: 6px;
+    background: color-mix(in srgb, #6f2f00 42%, var(--SmartThemeBlurTintColor));
+    color: #ffe4ba;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.rp-engine-writing-repair-action:hover {
+    background: color-mix(in srgb, #8a3b00 50%, var(--SmartThemeBlurTintColor));
+}
+
+.rp-engine-writing-repair-action:disabled {
+    opacity: 0.65;
+    cursor: progress;
 }
 
 .rp-engine-audit-card {

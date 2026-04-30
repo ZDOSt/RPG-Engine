@@ -59,7 +59,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.167';
+} from './engine.js?v=0.1.171';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -167,6 +167,7 @@ let writingRepairState = {
     audits: [],
 };
 let writingViolationReportOpen = false;
+let manualWritingRepairRunning = false;
 
 function settings() {
     extension_settings[EXT_ID] = extension_settings[EXT_ID] || structuredClone(DEFAULT_SETTINGS);
@@ -305,7 +306,7 @@ function buildGroundedWritingRecallPrompt() {
         '',
         'FINAL CHECK:',
         '- Remove any banned element before output.',
-        '- Violation = invalid response. Delete all invalid text and regenerate internally before final output.',
+        '- Violation = invalid response. Remove or replace invalid text internally before final output.',
     ].join('\n');
 }
 
@@ -1378,6 +1379,30 @@ async function scheduleWritingRepair(audit) {
     }
 }
 
+async function runManualWritingRepair() {
+    if (manualWritingRepairRunning) {
+        toastr.info('Writing repair is already running.', 'RP Engine');
+        return false;
+    }
+    const audit = tracker().lastWritingAudit || tracker().lastAudit?.writingAudit || null;
+    if (!writingAuditNeedsRepair(audit)) {
+        toastr.info('No current writing violation to repair.', 'RP Engine');
+        return false;
+    }
+    if (writingRepairState.attempts >= MAX_WRITING_REPAIR_ATTEMPTS) {
+        resetWritingRepairState({ keepSnapshot: true });
+    }
+    manualWritingRepairRunning = true;
+    renderPanel();
+    try {
+        writingRepairSuppressed = false;
+        return await scheduleWritingRepair(audit);
+    } finally {
+        manualWritingRepairRunning = false;
+        renderPanel();
+    }
+}
+
 async function runQuietWritingRepair(messageId, audit) {
     const message = getMessageById(messageId);
     const original = messageText(message).trim();
@@ -2208,36 +2233,24 @@ async function runGroundedWritingAudit({ messageId, response, repaired, allowReg
             deterministic.repairAttempts = writingRepairState.attempts;
             saveWritingAudit(deterministic);
             lastGroundedWritingValidationSignature = signature || makeWritingValidationSignature(messageId, response);
-            if (allowRegenerate) {
-                await scheduleWritingRepair(deterministic);
-            }
+            resetWritingRepairState({ keepSnapshot: true });
             return;
         }
 
-        const prompt = buildGroundedWritingValidatorPrompt({
-            userInput,
-            response,
-            trackerSummary: JSON.stringify(summarizeTracker(tracker())),
-        });
-        const raw = await generateQuietPromptWithTimeout({
-            quietPrompt: `${prompt}\n\nReturn exactly one compact JSON object only. No markdown, no prose, no commentary.`,
-            skipWIAN: true,
-            responseLength: 1200,
-            removeReasoning: true,
-        }, Math.min(Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000), 120000));
-        const parsed = normalizeWritingAudit(parseJsonResponse(raw), raw, response);
-        parsed.at = new Date().toISOString();
-        parsed.messageId = Number(messageId);
-        parsed.repaired = !!repaired;
-        parsed.repairAttempts = writingRepairState.attempts;
-        saveWritingAudit(parsed);
+        const audit = {
+            at: new Date().toISOString(),
+            valid: true,
+            severity: 'pass',
+            violations: [],
+            repairInstructions: '',
+            messageId: Number(messageId),
+            repaired: !!repaired,
+            repairAttempts: writingRepairState.attempts,
+            localOnly: true,
+        };
+        saveWritingAudit(audit);
         lastGroundedWritingValidationSignature = signature || makeWritingValidationSignature(messageId, response);
-
-        if (allowRegenerate && !writingRepairSuppressed && parsed.valid === false) {
-            await scheduleWritingRepair(parsed);
-        } else if (parsed.valid !== false) {
-            resetWritingRepairState({ keepSnapshot: true });
-        }
+        resetWritingRepairState({ keepSnapshot: true });
     } catch (error) {
         console.warn('[RP Engine Tracker] Grounded writing validation failed.', error);
         lastGroundedWritingValidationSignature = signature || makeWritingValidationSignature(messageId, response);
@@ -2588,7 +2601,10 @@ function renderPanel() {
         ? `<ul class="rp-engine-task-list">${data.pendingTasks.map(renderTask).join('')}</ul>`
         : '<div class="rp-engine-muted">No pending tasks tracked yet.</div>';
     const auditHtml = audit ? renderAudit(audit) : '<div class="rp-engine-muted">No audit yet.</div>';
-    const writingReportHtml = renderWritingViolationReport(tracker().lastWritingAudit || audit?.writingAudit || null);
+    const writingAudit = tracker().lastWritingAudit || audit?.writingAudit || null;
+    const writingReportHtml = renderWritingViolationReport(writingAudit);
+    const writingNeedsRepair = writingAuditNeedsRepair(writingAudit);
+    const writingButtonLabel = writingNeedsRepair ? 'Repair Writing Violations' : 'Writing Violations';
     const creatorHtml = shouldShowCharacterCreatorPrompt()
         ? `<section class="rp-engine-creator-prompt">
             <h4>New Character</h4>
@@ -2631,9 +2647,9 @@ function renderPanel() {
             ${auditHtml}
         </details>
         <section class="rp-engine-writing-report">
-            <button id="rp_engine_toggle_writing_report" type="button">
-                <i class="fa-solid fa-pen-to-square"></i>
-                Writing Violations
+            <button id="rp_engine_toggle_writing_report" class="${writingNeedsRepair ? 'rp-engine-writing-report-alert' : ''}" type="button">
+                <i class="fa-solid ${writingNeedsRepair ? 'fa-triangle-exclamation' : 'fa-pen-to-square'}"></i>
+                ${writingButtonLabel}
             </button>
             ${writingViolationReportOpen ? writingReportHtml : ''}
         </section>
@@ -2649,6 +2665,9 @@ function renderPanel() {
     root.find('#rp_engine_toggle_writing_report').off('click').on('click', () => {
         writingViolationReportOpen = !writingViolationReportOpen;
         renderPanel();
+    });
+    root.find('#rp_engine_manual_repair_writing').off('click').on('click', async () => {
+        await runManualWritingRepair();
     });
     applyPanelPosition();
 }
@@ -2892,6 +2911,12 @@ function renderWritingViolationReport(audit) {
                     ${repair.reason ? renderKv('Failure', repair.reason) : ''}
                 </div>
             ` : ''}
+            ${writingAuditNeedsRepair(audit) ? `
+                <button id="rp_engine_manual_repair_writing" class="rp-engine-writing-repair-action" type="button" ${manualWritingRepairRunning ? 'disabled' : ''}>
+                    <i class="fa-solid fa-screwdriver-wrench"></i>
+                    ${manualWritingRepairRunning ? 'Repair Running...' : 'Repair Latest Violation'}
+                </button>
+            ` : ''}
         </div>
     `;
 }
@@ -2903,6 +2928,13 @@ function writingAuditStatus(audit) {
     if (audit.valid === false) return 'Violation detected';
     if (audit.valid === null) return 'Validator error';
     return 'Clean';
+}
+
+function writingAuditNeedsRepair(audit) {
+    if (!audit) return false;
+    if (audit.repairFailed || audit.repairResult?.status === 'failed') return true;
+    if (audit.valid === false) return true;
+    return false;
 }
 
 function renderNpcAudit(npc) {
