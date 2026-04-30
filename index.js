@@ -1,0 +1,3805 @@
+﻿import {
+    chat as liveChat,
+    chat_metadata,
+    eventSource,
+    event_types,
+    extension_prompt_roles,
+    extension_prompt_types,
+    Generate,
+    name1,
+    name2,
+    saveSettingsDebounced,
+    setUserName,
+    setExtensionPrompt,
+    stopGeneration,
+    this_chid,
+} from '../../../../script.js';
+import { extension_settings, getContext, saveMetadataDebounced } from '../../../extensions.js';
+import { selected_group } from '../../../group-chats.js';
+import { persona_description_positions, power_user } from '../../../power-user.js';
+import {
+    getUserAvatars,
+    initPersona,
+    setPersonaDescription,
+    user_avatar,
+} from '../../../personas.js';
+import {
+    createNewWorldInfo,
+    createWorldInfoEntry,
+    loadWorldInfo,
+    saveWorldInfo,
+    updateWorldInfoList,
+    world_names,
+} from '../../../world-info.js';
+import {
+    DEFAULT_SETTINGS,
+    DEFAULT_RENDER_RULES,
+    DEFAULT_NAME_GENERATION_RULES,
+    DEFAULT_WRITING_STYLE,
+    CHARACTER_CREATOR_RACES,
+    METADATA_KEY,
+    NAME_STYLE_PRESETS,
+    RESOLVER_SCHEMA,
+    buildFinalNarrationPayload,
+    buildCharacterSheet,
+    buildResolverPrompt,
+    createTracker,
+    describeNpcFeeling,
+    inferFallbackExtraction,
+    markRevealedNames,
+    mergeExtractionWithFallback,
+    parseCoreStats,
+    parseNpcArchiveContent,
+    rollCharacterCreatorBasics,
+    rollCharacterCreatorStats,
+    applyCharacterCreatorReroll,
+    applyCharacterCreatorSwap,
+    reserveNameCandidates,
+    resolveTurn,
+    serializeNpcArchiveEntry,
+    summarizeTracker,
+    upsertArchivedNpc,
+} from './engine.js?v=0.1.167';
+
+const EXT_ID = 'rpEngineTracker';
+const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
+const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
+const WRITING_REPAIR_PROMPT_KEY = 'RP_ENGINE_TRACKER_WRITING_REPAIR';
+const DEFAULT_ARCHIVE_WORLD = 'RP Engine NPC Archive';
+const ARCHIVE_COMMENT_PREFIX = '[RPE NPC]';
+const MAX_WRITING_REPAIR_ATTEMPTS = 1;
+const WRITING_AUDIT_SCHEMA = {
+    type: 'object',
+    properties: {
+        valid: { type: 'boolean' },
+        severity: { type: 'string', enum: ['pass', 'minor', 'major'] },
+        violations: {
+            type: 'array',
+            items: {
+                type: 'object',
+                properties: {
+                    rule: { type: 'string' },
+                    evidence: { type: 'string' },
+                    problem: { type: 'string' },
+                },
+                required: ['rule', 'evidence', 'problem'],
+            },
+        },
+        repairInstructions: { type: 'string' },
+    },
+    required: ['valid', 'severity', 'violations', 'repairInstructions'],
+};
+const WRITING_REPAIR_SCHEMA = {
+    type: 'object',
+    properties: {
+        replacement: { type: 'string' },
+    },
+    required: ['replacement'],
+};
+const CHARACTER_CREATOR_SCHEMA = {
+    type: 'object',
+    properties: {
+        basic: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                race: { type: 'string' },
+                gender: { type: 'string' },
+                age: { type: 'string' },
+            },
+            required: ['name', 'race', 'gender', 'age'],
+        },
+        appearance: {
+            type: 'object',
+            properties: {
+                height: { type: 'string' },
+                build: { type: 'string' },
+                hair: { type: 'string' },
+                eyes: { type: 'string' },
+                skin: { type: 'string' },
+                distinctFeatures: { type: 'string' },
+            },
+            required: ['height', 'build', 'hair', 'eyes', 'skin', 'distinctFeatures'],
+        },
+        traits: {
+            type: 'array',
+            items: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string' },
+                    effect: { type: 'string' },
+                },
+                required: ['name', 'effect'],
+            },
+        },
+        abilities: {
+            type: 'array',
+            items: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string' },
+                    effect: { type: 'string' },
+                },
+                required: ['name', 'effect'],
+            },
+        },
+        inventory: { type: 'array', items: { type: 'string' } },
+        notes: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['basic', 'appearance', 'traits', 'abilities', 'inventory', 'notes'],
+};
+
+let resolving = false;
+let writingValidationRunning = false;
+let pendingWritingValidation = null;
+const writingValidationTimers = new Map();
+const activeQuietControllers = new Set();
+let writingRepairSuppressed = false;
+let lastGroundedWritingValidationSignature = '';
+let quietGenerationDepth = 0;
+let panelDragMoved = false;
+let characterCreatorState = null;
+let writingRepairState = {
+    active: false,
+    attempts: 0,
+    handoff: '',
+    trackerSnapshot: null,
+    audits: [],
+};
+let writingViolationReportOpen = false;
+
+function settings() {
+    extension_settings[EXT_ID] = extension_settings[EXT_ID] || structuredClone(DEFAULT_SETTINGS);
+    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+        if (extension_settings[EXT_ID][key] === undefined) {
+            extension_settings[EXT_ID][key] = value;
+        }
+    }
+    if (extension_settings[EXT_ID].resolverTimeoutMs === 20000) {
+        extension_settings[EXT_ID].resolverTimeoutMs = DEFAULT_SETTINGS.resolverTimeoutMs;
+    }
+    if (Number(extension_settings[EXT_ID].resolverTimeoutMs) < 60000) {
+        extension_settings[EXT_ID].resolverTimeoutMs = DEFAULT_SETTINGS.resolverTimeoutMs;
+    }
+    if (Number(extension_settings[EXT_ID].responseLength) < 1200) {
+        extension_settings[EXT_ID].responseLength = DEFAULT_SETTINGS.responseLength;
+    }
+    if (!isFinitePosition(extension_settings[EXT_ID].panelPosition)) {
+        extension_settings[EXT_ID].panelPosition = null;
+    }
+    extension_settings[EXT_ID].renderRules = DEFAULT_RENDER_RULES;
+    if (typeof extension_settings[EXT_ID].writingStyle !== 'string') {
+        extension_settings[EXT_ID].writingStyle = DEFAULT_WRITING_STYLE;
+    }
+    if (!NAME_STYLE_PRESETS[extension_settings[EXT_ID].nameStyle]) {
+        extension_settings[EXT_ID].nameStyle = DEFAULT_SETTINGS.nameStyle;
+    }
+    if (typeof extension_settings[EXT_ID].customNameStyle !== 'string') {
+        extension_settings[EXT_ID].customNameStyle = '';
+    }
+    if (typeof extension_settings[EXT_ID].npcArchiveWorld !== 'string') {
+        extension_settings[EXT_ID].npcArchiveWorld = '';
+    }
+    if (typeof extension_settings[EXT_ID].scopeNpcArchivePerChat !== 'boolean') {
+        extension_settings[EXT_ID].scopeNpcArchivePerChat = DEFAULT_SETTINGS.scopeNpcArchivePerChat;
+    }
+    for (const key of ['enableNpcArchive', 'autoCreateNpcArchive', 'pruneArchivedAbsentNpcs', 'rehydrateArchivedNpcs', 'autoRetireDeadNpcs']) {
+        if (typeof extension_settings[EXT_ID][key] !== 'boolean') {
+            extension_settings[EXT_ID][key] = Boolean(DEFAULT_SETTINGS[key]);
+        }
+    }
+    if (typeof extension_settings[EXT_ID].enableTimeTracking !== 'boolean') {
+        extension_settings[EXT_ID].enableTimeTracking = Boolean(DEFAULT_SETTINGS.enableTimeTracking);
+    }
+    if (!Number.isFinite(Number(extension_settings[EXT_ID].timeScaleWorldMinutesPerRealMinute)) || Number(extension_settings[EXT_ID].timeScaleWorldMinutesPerRealMinute) <= 0) {
+        extension_settings[EXT_ID].timeScaleWorldMinutesPerRealMinute = DEFAULT_SETTINGS.timeScaleWorldMinutesPerRealMinute;
+    }
+    if (!Number.isFinite(Number(extension_settings[EXT_ID].timeTrackingMaxRealMinutes)) || Number(extension_settings[EXT_ID].timeTrackingMaxRealMinutes) <= 0) {
+        extension_settings[EXT_ID].timeTrackingMaxRealMinutes = DEFAULT_SETTINGS.timeTrackingMaxRealMinutes;
+    }
+    for (const key of ['enableCharacterCreator', 'autoOfferCharacterCreator']) {
+        if (typeof extension_settings[EXT_ID][key] !== 'boolean') {
+            extension_settings[EXT_ID][key] = Boolean(DEFAULT_SETTINGS[key]);
+        }
+    }
+    if (extension_settings[EXT_ID].writingStyle.includes('- Core law: physical reality first.')
+        && !extension_settings[EXT_ID].writingStyle.includes('Archetype:')) {
+        extension_settings[EXT_ID].writingStyle = DEFAULT_WRITING_STYLE;
+    }
+    return extension_settings[EXT_ID];
+}
+
+function buildEarlyRulesPrompt(cfg = settings()) {
+    const sections = [
+        'AUTHORITATIVE RP OUTPUT ENGINES - EARLY SYSTEM LAYER.',
+        'These constraints govern narration style, POV, chronology, information release, user agency, and name generation.',
+        'They do not replace the Game Master role, character definitions, scenario, world info, or mechanical handoff that follow. They define how those later instructions must be rendered.',
+        'Reference only. Do not output this block.',
+    ];
+
+    if (cfg.enableRenderRules) {
+        sections.push('', DEFAULT_RENDER_RULES);
+    }
+
+    sections.push(
+        '',
+        'AUTHORITATIVE NAME GENERATION ENGINE - EARLY SYSTEM LAYER.',
+        'These rules are always active while the RP Engine Tracker handoff is active. They define when names are generated, reserved, selected, hidden, and revealed.',
+        '',
+        DEFAULT_NAME_GENERATION_RULES,
+    );
+
+    return sections.join('\n');
+}
+
+function buildGroundedWritingRecallPrompt() {
+    return [
+        'FINAL RECALL - APPLY ALL LOCKED GROUNDED WRITING FUNCTIONS BEFORE OUTPUT.',
+        'Reference only. Do not output this block.',
+        '',
+        'call olfactoryGate()',
+        '- Smell/taste locked unless explicitly invoked by {{user}}, or overpowering + visible source + immediate proximity.',
+        '- Max 1 smell/taste mention per beat or scene.',
+        '',
+        'call sensoryEnforcement()',
+        '- Narrate raw physical data only.',
+        '- Default channels: sight, sound, touch.',
+        '',
+        'call styleEnforcement()',
+        '- Utilitarian prose only.',
+        '- No ornament, emotional physics, poetic framing, decorative sensual wording, or melodrama.',
+        '',
+        'call literalismEnforcement()',
+        '- No metaphor, simile, hyperbole, idiom, dramatic ellipsis, or comparison phrasing.',
+        '',
+        'call behavioralEnforcement() and shorthandFilter()',
+        '- Show observable behavior and body mechanics only.',
+        '- No internal states, emotion labels, autonomic trope shortcuts, or stock physical shorthand.',
+        '',
+        'call materialEnforcement()',
+        '- No anthropomorphism, personification, pathetic fallacy, inanimate agency, or abstract physical agency.',
+        '',
+        'call fogOfWar()',
+        '- No omniscience, god-view, hidden motives, internal states, premature names/titles, or NPC knowledge leaks.',
+        '',
+        'call chronologyEnforcement()',
+        '- Start at T+1 from {{user}} input.',
+        '- Do not echo, paraphrase, summarize, or replay {{user}} dialogue/actions.',
+        '',
+        'call agencyEnforcement()',
+        '- Never write {{user}} speech, thoughts, feelings, decisions, intentions, voluntary actions, or voluntary reactions.',
+        '- Involuntary external physical reactions are allowed only when caused by immediate outside force; never label {{user}} emotion.',
+        '- (( )) = OOC direct answer. ((( ))) = proxy narration of only the declared user action, then return control.',
+        '',
+        'call turnEnforcement()',
+        '- When an NPC says or does something that requires {{user}} response, that NPC may not speak or act again for that turn.',
+        '- Keep same-speaker action/dialogue cohesive.',
+        '',
+        'call antiMetaEnforcement()',
+        '- Mechanics invisible unless one RESULT line is explicitly shown.',
+        '',
+        'call handoffEnforcement()',
+        '- Final beat must give {{user}} something immediate to react to.',
+        '- No meta-questions, waiting, filler ambience, or personification.',
+        '- If useful information completes the beat, stop there.',
+        '',
+        'FINAL CHECK:',
+        '- Remove any banned element before output.',
+        '- Violation = invalid response. Delete all invalid text and regenerate internally before final output.',
+    ].join('\n');
+}
+
+function syncGroundedWritingEarlyPrompt() {
+    const cfg = settings();
+    const enabled = !!cfg.enabled && !!cfg.injectHandoff;
+    setExtensionPrompt(
+        GROUNDING_PROMPT_KEY,
+        enabled ? buildEarlyRulesPrompt(cfg) : '',
+        extension_prompt_types.BEFORE_PROMPT,
+        0,
+        false,
+        extension_prompt_roles.SYSTEM,
+    );
+}
+
+function tracker() {
+    chat_metadata[METADATA_KEY] = createTracker(chat_metadata[METADATA_KEY]);
+    syncUserIdentityFromPersona(chat_metadata[METADATA_KEY]);
+    return chat_metadata[METADATA_KEY];
+}
+
+function saveTracker() {
+    chat_metadata[METADATA_KEY] = createTracker(chat_metadata[METADATA_KEY]);
+    syncUserIdentityFromPersona(chat_metadata[METADATA_KEY]);
+    chat_metadata.tainted = true;
+    saveMetadataDebounced();
+}
+
+function syncUserIdentityFromPersona(current) {
+    if (!current?.user) return;
+    const personaText = getContext().powerUserSettings?.persona_description || '';
+    const parsedName = parsePersonaName(personaText);
+    const fallbackName = String(name1 || '').trim();
+    const chosen = parsedName || (/^(user|you|\{\{user\}\})$/i.test(fallbackName) ? '' : fallbackName);
+    if (chosen) {
+        current.user.name = chosen;
+    }
+    const userStats = parseCoreStats(personaText);
+    if (userStats) {
+        current.user.stats = userStats;
+    }
+}
+
+function parsePersonaName(text) {
+    const source = String(text || '');
+    const patterns = [
+        /\b(?:full\s+name|character\s+name|persona\s+name|name)\s*[:=]\s*([^\n\r|;]+)/i,
+        /\{\{user\}\}\s*(?:is|=|:)\s*([A-Z][^\n\r|;]{1,60})/,
+    ];
+    for (const pattern of patterns) {
+        const match = source.match(pattern);
+        const candidate = cleanPersonaName(match?.[1]);
+        if (candidate) return candidate;
+    }
+    return '';
+}
+
+function cleanPersonaName(value) {
+    const text = String(value || '')
+        .replace(/\[[^\]]*]/g, '')
+        .replace(/\([^)]*\)/g, '')
+        .replace(/^["'`]+|["'`,.]+$/g, '')
+        .trim();
+    if (!text || text.length > 60) return '';
+    if (/^(unknown|none|null|n\/a|user|you|\{\{user\}\})$/i.test(text)) return '';
+    if (/\b(PHY|MND|CHA|stats?|condition|gear|inventory|personality|age|race|class)\b/i.test(text)) return '';
+    return text.replace(/\s+/g, ' ');
+}
+
+function parseJsonResponse(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+        const candidates = [
+            fenced?.[1],
+            ...extractBalancedJsonObjects(raw),
+        ].filter(Boolean);
+        for (const candidate of candidates) {
+            try {
+                return JSON.parse(candidate);
+            } catch {
+                // Try the next JSON-looking span.
+            }
+        }
+    }
+    return null;
+}
+
+function isUsefulExtraction(value) {
+    if (!value || typeof value !== 'object') return false;
+    const goal = String(value.goal || '').trim();
+    const decisiveAction = String(value.decisiveAction || '').trim();
+    if (!goal || /^(unspecified|unknown|none|null|n\/a)/i.test(goal)) return false;
+    if (!decisiveAction || /^(unspecified|unknown|none|null|n\/a)/i.test(decisiveAction)) return false;
+    return true;
+}
+
+function extractBalancedJsonObjects(raw) {
+    const spans = [];
+    let start = -1;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch === '"') {
+            inString = true;
+        } else if (ch === '{') {
+            if (depth === 0) start = i;
+            depth++;
+        } else if (ch === '}') {
+            depth--;
+            if (depth === 0 && start >= 0) {
+                spans.push(raw.slice(start, i + 1));
+                start = -1;
+            }
+        }
+    }
+
+    return spans;
+}
+
+function messageText(message) {
+    if (!message || typeof message !== 'object') return '';
+    const value = message.mes ?? message.content ?? message.text ?? message.message ?? '';
+    if (Array.isArray(value)) {
+        return value.map(part => typeof part === 'string' ? part : (part?.text || '')).join(' ');
+    }
+    return String(value || '');
+}
+
+function makeChatExcerpt(chat) {
+    const count = Number(settings().recentMessages) || DEFAULT_SETTINGS.recentMessages;
+    return chat
+        .slice(-count)
+        .map((message) => {
+            const isUser = message.is_user || message.role === 'user' || message.name === name1;
+            const role = isUser ? (name1 || 'User') : (message.name || name2 || 'Assistant');
+            const text = messageText(message).replace(/\s+/g, ' ').trim();
+            return `${role}: ${text}`;
+        })
+        .filter(x => x.trim())
+        .join('\n');
+}
+
+function getLatestUserMessage(chat) {
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const message = chat[i];
+        const roleName = String(message.name || '').trim();
+        if (message.is_user || message.role === 'user' || roleName === name1 || message.force_avatar === 'persona') {
+            const text = messageText(message).trim();
+            if (text) return text;
+        }
+    }
+    return messageText(chat.at(-1)).trim();
+}
+
+function getMessageById(messageId) {
+    const id = Number(messageId);
+    if (!Number.isFinite(id) || id < 0) return null;
+    const contextChat = getContext().chat;
+    if (Array.isArray(contextChat) && contextChat[id]) return contextChat[id];
+    if (Array.isArray(liveChat) && liveChat[id]) return liveChat[id];
+    return null;
+}
+
+function isUserMessage(message) {
+    const roleName = String(message?.name || '').trim();
+    return message?.is_user || message?.role === 'user' || roleName === name1 || message?.force_avatar === 'persona';
+}
+
+function isAssistantMessage(message) {
+    return !!message
+        && !isUserMessage(message)
+        && !message.is_system
+        && message.extra?.type !== 'narrator'
+        && !!messageText(message).trim();
+}
+
+function resolveAssistantMessageId(messageId) {
+    const id = Number(messageId);
+    const sources = [
+        Array.isArray(getContext().chat) ? getContext().chat : [],
+        Array.isArray(liveChat) ? liveChat : [],
+    ].filter(x => x.length);
+    for (const source of sources) {
+        if (Number.isFinite(id) && isAssistantMessage(source[id])) return id;
+        for (let i = source.length - 1; i >= 0; i--) {
+            if (isAssistantMessage(source[i])) return i;
+        }
+    }
+    return id;
+}
+
+function getPreviousUserMessageForId(messageId) {
+    const id = Number(messageId);
+    const sourceChat = [
+        Array.isArray(getContext().chat) ? getContext().chat : [],
+        Array.isArray(liveChat) ? liveChat : [],
+    ].find(x => x.length) || [];
+    for (let i = Math.min(id - 1, sourceChat.length - 1); i >= 0; i--) {
+        const message = sourceChat[i];
+        const roleName = String(message?.name || '').trim();
+        if (message?.is_user || message?.role === 'user' || roleName === name1 || message?.force_avatar === 'persona') {
+            const text = messageText(message).trim();
+            if (text) return text;
+        }
+    }
+    return getLatestUserMessage(sourceChat);
+}
+
+function getPreviousUserMessageStrictForId(messageId) {
+    const id = Number(messageId);
+    const sourceChat = [
+        Array.isArray(getContext().chat) ? getContext().chat : [],
+        Array.isArray(liveChat) ? liveChat : [],
+    ].find(x => x.length) || [];
+    for (let i = Math.min(id - 1, sourceChat.length - 1); i >= 0; i--) {
+        const message = sourceChat[i];
+        const roleName = String(message?.name || '').trim();
+        if (message?.is_user || message?.role === 'user' || roleName === name1 || message?.force_avatar === 'persona') {
+            return messageText(message).trim();
+        }
+    }
+    return '';
+}
+
+function makeWritingValidationSignature(messageId, response) {
+    const text = String(response || '');
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {
+        hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+    }
+    return `${Number(messageId)}:${text.length}:${hash}`;
+}
+
+async function runResolver(chat) {
+    let current = tracker();
+    const context = getContext();
+    const sourceChat = [
+        Array.isArray(context.chat) ? context.chat : [],
+        Array.isArray(liveChat) ? liveChat : [],
+        Array.isArray(chat) ? chat : [],
+    ].find(x => x.length) || [];
+    const personaText = getContext().powerUserSettings?.persona_description || '';
+    const userName = parsePersonaName(personaText) || name1;
+    const userStats = parseCoreStats(personaText);
+    if (userStats) {
+        current.user.stats = userStats;
+    }
+    if (userName) {
+        current.user.name = userName;
+    }
+    const latestUserMessage = getLatestUserMessage(sourceChat)
+        || getLatestUserMessage(liveChat)
+        || getLatestUserMessage(chat);
+    await rehydrateArchivedNpcsForText(`${latestUserMessage}\n${makeChatExcerpt(sourceChat)}`);
+    current = tracker();
+    let fallback = inferFallbackExtraction(latestUserMessage, name2, current);
+    fallback = await guardDeadArchiveReentry(fallback, latestUserMessage);
+    console.debug('[RP Engine Tracker] Resolver start', { latestUserMessage, hasFallback: Object.keys(fallback).length > 0 });
+
+    if (fallback.resolverBypass) {
+        const resolved = resolveTurn(fallback, current, { userStats });
+        applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
+        resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
+        resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
+        console.debug('[RP Engine Tracker] Resolver bypassed for deterministic fallback', resolved.packet);
+        return resolved;
+    }
+
+    const prompt = buildResolverPrompt({
+        chatExcerpt: makeChatExcerpt(sourceChat),
+        latestUserMessage,
+        tracker: current,
+        userName,
+        characterName: name2,
+    });
+
+    let response = '';
+    let parsed = null;
+    try {
+        response = await generateQuietPromptWithTimeout({
+            quietPrompt: prompt,
+            skipWIAN: false,
+            responseLength: Number(settings().responseLength) || DEFAULT_SETTINGS.responseLength,
+            jsonSchema: RESOLVER_SCHEMA,
+            removeReasoning: true,
+        }, Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs);
+        parsed = parseJsonResponse(response);
+        if (!isUsefulExtraction(parsed)) {
+            parsed = null;
+        }
+    } catch (error) {
+        console.warn('[RP Engine Tracker] Structured resolver failed or timed out.', error);
+    }
+
+    if (!parsed) {
+        try {
+            response = await generateQuietPromptWithTimeout({
+                quietPrompt: `${prompt}\n\nReturn exactly one compact JSON object only. No markdown, no prose, no commentary.`,
+                skipWIAN: false,
+                responseLength: Number(settings().responseLength) || DEFAULT_SETTINGS.responseLength,
+                removeReasoning: true,
+            }, Math.min(Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000), 120000));
+            parsed = parseJsonResponse(response);
+            if (!isUsefulExtraction(parsed)) {
+                parsed = null;
+            }
+        } catch (retryError) {
+            console.warn('[RP Engine Tracker] Plain resolver retry failed or timed out.', retryError);
+        }
+    }
+
+    if (!parsed && Object.keys(fallback).length) {
+        console.debug('[RP Engine Tracker] Using deterministic fallback extraction');
+        parsed = fallback;
+    }
+
+    if (!parsed) {
+        console.warn('[RP Engine Tracker] Resolver returned no usable structure; using fail-closed no-roll extraction.');
+        parsed = buildFailClosedExtraction(latestUserMessage, response);
+    }
+
+    parsed = mergeExtractionWithFallback(parsed, fallback);
+    parsed = await guardDeadArchiveReentry(parsed, latestUserMessage);
+    const resolved = resolveTurn(parsed, current, { userStats });
+    applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
+    resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
+    resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
+    console.debug('[RP Engine Tracker] Resolver complete', resolved.packet);
+    return resolved;
+}
+
+function trackerSnapshotForRollback(value) {
+    const snapshot = createTracker(value);
+    if (snapshot.lastAudit?.preTurnTrackerSnapshot) {
+        delete snapshot.lastAudit.preTurnTrackerSnapshot;
+    }
+    return structuredClone(snapshot);
+}
+
+function attachTurnRollback(result, triggerUserMessage, snapshot) {
+    if (!result?.tracker?.lastAudit || !snapshot) return;
+    const audit = result.tracker.lastAudit;
+    audit.triggerUserMessage = String(triggerUserMessage || '').trim();
+    audit.preTurnTrackerSnapshot = snapshot;
+    if (result.audit && result.audit !== audit) {
+        result.audit.triggerUserMessage = audit.triggerUserMessage;
+        result.audit.preTurnTrackerSnapshot = snapshot;
+    }
+}
+
+function rollbackLastTurnIfTriggerDeleted() {
+    const current = tracker();
+    const audit = current.lastAudit;
+    const trigger = String(audit?.triggerUserMessage || '').trim();
+    const snapshot = audit?.preTurnTrackerSnapshot;
+    if (!trigger || !snapshot) return false;
+
+    const sourceChat = [
+        Array.isArray(getContext().chat) ? getContext().chat : [],
+        Array.isArray(liveChat) ? liveChat : [],
+    ].find(x => x.length) || [];
+    const triggerStillExists = sourceChat.some(message => isUserMessage(message) && messageText(message).trim() === trigger);
+    if (triggerStillExists) return false;
+
+    const restored = createTracker(snapshot);
+    restored.lastAudit = {
+        at: new Date().toISOString(),
+        rollback: true,
+        reason: 'Deleted user message removed the mechanics it triggered.',
+        deletedTrigger: trigger.slice(0, 300),
+    };
+    chat_metadata[METADATA_KEY] = restored;
+    saveTracker();
+    renderPanel();
+    console.info('[RP Engine Tracker] Rolled back mechanics for deleted triggering user message.');
+    return true;
+}
+
+async function guardDeadArchiveReentry(extraction, latestUserMessage) {
+    const cfg = settings();
+    if (!cfg.enableNpcArchive || !extraction || typeof extraction !== 'object') return extraction;
+    const archive = await loadNpcArchive({ createIfMissing: false });
+    if (!archive) return extraction;
+
+    const presentFacts = Array.isArray(extraction.npcFacts)
+        ? extraction.npcFacts.filter(fact => fact?.name && fact.present !== false)
+        : [];
+    const candidates = uniqueLocal([
+        ...(Array.isArray(extraction.npcInScene) ? extraction.npcInScene : []),
+        ...presentFacts.map(fact => fact.name),
+    ].filter(Boolean));
+    if (!candidates.length) return extraction;
+
+    for (const name of candidates) {
+        const entry = findNpcArchiveEntry(archive.data, name);
+        const archived = entry ? parseNpcArchiveContent(entry.content) : null;
+        if (sanitizeArchiveStatusLocal(archived?.archiveStatus) !== 'Dead') continue;
+        if (canRehydrateArchivedNpc(archived, latestUserMessage)) continue;
+        return buildBlockedDeadReentryExtraction(archived.name || name, latestUserMessage);
+    }
+
+    return extraction;
+}
+
+function applyTimeTracking(current, previous, extraction = {}) {
+    if (!current?.scene) return;
+    const cfg = settings();
+    const clock = normalizeLocalClock(current.worldClock);
+    current.worldClock = clock;
+    clock.enabled = !!cfg.enableTimeTracking;
+    clock.scale = Number(cfg.timeScaleWorldMinutesPerRealMinute) || DEFAULT_SETTINGS.timeScaleWorldMinutesPerRealMinute;
+
+    if (!clock.enabled || extraction?.oocMode === 'STOP') {
+        clock.lastRealTimestamp = Date.now();
+        clock.lastAdvance = clock.enabled ? clock.lastAdvance : 'World time tracking off.';
+        clock.source = clock.enabled ? clock.source : 'disabled';
+        return;
+    }
+
+    const now = Date.now();
+    const explicitTime = String(extraction?.scene?.time || '').trim();
+    const explicitDelta = Number(extraction?.timeDeltaMinutes || 0);
+    const previousClock = normalizeLocalClock(previous?.worldClock);
+    const currentParsed = parseSceneTimeToMinutes(current.scene.time);
+    const previousParsed = parseSceneTimeToMinutes(previous?.scene?.time);
+    const previousAbs = Number.isFinite(previousClock.absoluteMinutes) ? previousClock.absoluteMinutes : previousParsed;
+
+    if (explicitTime) {
+        if (Number.isFinite(currentParsed)) {
+            clock.absoluteMinutes = preserveWorldDay(previousAbs, currentParsed);
+            clock.lastAdvance = `Explicit time set: ${current.scene.time}`;
+            clock.source = 'explicit-time';
+        } else {
+            clock.absoluteMinutes = Number.isFinite(previousAbs) ? previousAbs : null;
+            clock.lastAdvance = `Explicit time noted: ${current.scene.time}`;
+            clock.source = 'explicit-time-label';
+        }
+        clock.lastRealTimestamp = now;
+        return;
+    }
+
+    if (Number.isFinite(explicitDelta) && explicitDelta !== 0) {
+        const base = Number.isFinite(previousAbs) ? previousAbs : currentParsed;
+        if (Number.isFinite(base)) {
+            clock.absoluteMinutes = Math.max(0, Math.round(base + explicitDelta));
+            current.scene.time = formatSceneMinutes(clock.absoluteMinutes);
+            clock.lastAdvance = `Explicit skip ${formatSignedDuration(explicitDelta)}${extraction?.timeSkipReason ? `: ${extraction.timeSkipReason}` : ''}`;
+            clock.source = 'explicit-skip';
+        } else {
+            clock.absoluteMinutes = null;
+            clock.lastAdvance = `Explicit skip ${formatSignedDuration(explicitDelta)}${extraction?.timeSkipReason ? `: ${extraction.timeSkipReason}` : ''}`;
+            clock.source = 'explicit-skip-unanchored';
+        }
+        clock.lastRealTimestamp = now;
+        return;
+    }
+
+    if (!Number.isFinite(clock.absoluteMinutes) && Number.isFinite(currentParsed)) {
+        clock.absoluteMinutes = preserveWorldDay(previousAbs, currentParsed);
+        clock.lastAdvance = `Clock initialized at ${current.scene.time}.`;
+        clock.source = 'parsed-scene-time';
+        clock.lastRealTimestamp = now;
+        return;
+    }
+
+    if (Number.isFinite(previousClock.lastRealTimestamp) && Number.isFinite(previousAbs)) {
+        const elapsedRealMinutes = Math.max(0, (now - previousClock.lastRealTimestamp) / 60000);
+        const cappedRealMinutes = Math.min(elapsedRealMinutes, Number(cfg.timeTrackingMaxRealMinutes) || DEFAULT_SETTINGS.timeTrackingMaxRealMinutes);
+        const worldDelta = Math.floor(cappedRealMinutes * clock.scale);
+        if (worldDelta > 0) {
+            clock.absoluteMinutes = Math.max(0, Math.round(previousAbs + worldDelta));
+            current.scene.time = formatSceneMinutes(clock.absoluteMinutes);
+            clock.lastAdvance = `Auto ${formatSignedDuration(worldDelta)} from ${cappedRealMinutes.toFixed(1)} real min.`;
+            clock.source = elapsedRealMinutes > cappedRealMinutes ? 'auto-capped' : 'auto';
+        } else {
+            clock.absoluteMinutes = previousAbs;
+            clock.lastAdvance = 'No world-time advance this turn.';
+            clock.source = 'auto';
+        }
+    } else if (!Number.isFinite(clock.absoluteMinutes) && Number.isFinite(previousAbs)) {
+        clock.absoluteMinutes = previousAbs;
+        clock.lastAdvance = 'Clock carried from prior scene time.';
+        clock.source = 'carry';
+    } else if (!current.scene.time) {
+        clock.lastAdvance = 'Clock waiting for a parseable scene time or explicit time skip.';
+        clock.source = 'unset';
+    }
+
+    clock.lastRealTimestamp = now;
+}
+
+function normalizeLocalClock(clock) {
+    const input = clock && typeof clock === 'object' ? clock : {};
+    const absoluteMinutes = Number(input.absoluteMinutes);
+    const lastRealTimestamp = Number(input.lastRealTimestamp);
+    const scale = Number(input.scale);
+    return {
+        enabled: input.enabled !== false,
+        absoluteMinutes: Number.isFinite(absoluteMinutes) ? Math.round(absoluteMinutes) : null,
+        lastRealTimestamp: Number.isFinite(lastRealTimestamp) ? lastRealTimestamp : null,
+        scale: Number.isFinite(scale) && scale > 0 ? scale : DEFAULT_SETTINGS.timeScaleWorldMinutesPerRealMinute,
+        lastAdvance: String(input.lastAdvance || ''),
+        source: String(input.source || 'unset'),
+    };
+}
+
+function parseSceneTimeToMinutes(value) {
+    const source = String(value || '').trim().toLowerCase();
+    if (!source) return null;
+    const named = {
+        midnight: 0,
+        dawn: 6 * 60,
+        sunrise: 6 * 60,
+        morning: 8 * 60,
+        noon: 12 * 60,
+        midday: 12 * 60,
+        afternoon: 15 * 60,
+        dusk: 18 * 60,
+        sunset: 18 * 60,
+        evening: 19 * 60,
+        night: 22 * 60,
+    };
+    for (const [word, minutes] of Object.entries(named)) {
+        if (new RegExp(`\\b${word}\\b`, 'i').test(source)) return minutes;
+    }
+    const matches = [...source.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?\b/gi)]
+        .filter(match => match[2] || match[3] || Number(match[1]) <= 24);
+    const clockMatch = matches.at(-1);
+    if (!clockMatch) return null;
+    let hour = Number(clockMatch[1]);
+    const minute = Number(clockMatch[2] || 0);
+    if (!Number.isFinite(hour) || hour < 0 || hour > 24 || !Number.isFinite(minute) || minute < 0 || minute > 59) return null;
+    const suffix = (clockMatch[3] || '').replace(/\./g, '').toLowerCase();
+    if (suffix === 'pm' && hour < 12) hour += 12;
+    if (suffix === 'am' && hour === 12) hour = 0;
+    if (!suffix && hour === 24) hour = 0;
+    if (hour > 23) return null;
+    return hour * 60 + minute;
+}
+
+function preserveWorldDay(previousAbs, dayMinute) {
+    if (!Number.isFinite(dayMinute)) return null;
+    if (!Number.isFinite(previousAbs)) return dayMinute;
+    const day = Math.floor(previousAbs / 1440);
+    const sameDay = day * 1440 + dayMinute;
+    if (sameDay + 720 < previousAbs) return sameDay + 1440;
+    if (sameDay - 720 > previousAbs) return Math.max(0, sameDay - 1440);
+    return sameDay;
+}
+
+function formatSceneMinutes(totalMinutes) {
+    const total = Math.max(0, Math.round(Number(totalMinutes) || 0));
+    const day = Math.floor(total / 1440);
+    const minuteOfDay = total % 1440;
+    const hour = Math.floor(minuteOfDay / 60);
+    const minute = minuteOfDay % 60;
+    const label = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    return day > 0 ? `Day ${day + 1} ${label}` : label;
+}
+
+function formatSignedDuration(minutes) {
+    const sign = Number(minutes) >= 0 ? '+' : '-';
+    const abs = Math.abs(Math.round(Number(minutes) || 0));
+    const hours = Math.floor(abs / 60);
+    const mins = abs % 60;
+    const parts = [];
+    if (hours) parts.push(`${hours}h`);
+    if (mins || !parts.length) parts.push(`${mins}m`);
+    return `${sign}${parts.join(' ')}`;
+}
+
+function buildBlockedDeadReentryExtraction(npcName, latestUserMessage) {
+    const name = String(npcName || 'NPC').trim() || 'NPC';
+    const evidence = String(latestUserMessage || '').trim().slice(0, 300);
+    return {
+        ooc: 'N',
+        oocMode: 'IC',
+        oocInstruction: '',
+        goal: `${name} remains archived as Dead`,
+        goalKind: 'Normal',
+        goalEvidence: evidence,
+        decisiveAction: `${name} remains archived as Dead`,
+        decisiveActionEvidence: evidence,
+        outcomeOnSuccess: '',
+        outcomeOnFailure: '',
+        actionTargets: [],
+        oppTargetsNpc: [],
+        oppTargetsEnv: [],
+        benefitedObservers: [],
+        harmedObservers: [],
+        npcInScene: [],
+        hasStakes: 'N',
+        stakesEvidence: 'Archived dead NPC was mentioned without explicit ghost, undead, or resurrection wording; re-entry blocked.',
+        actionCount: 1,
+        userStat: 'MND',
+        userStatEvidence: '',
+        oppStat: 'ENV',
+        oppStatEvidence: '',
+        hostilePhysicalHarm: 'N',
+        newEncounter: 'N',
+        timeDeltaMinutes: 0,
+        timeSkipReason: '',
+        systemOnlyUpdate: 'Y',
+        systemOnlyUpdateReason: 'Dead archived NPC cannot be returned to the active scene unless the user explicitly frames it as ghost, undead, resurrection, or revival.',
+        scene: { location: '', time: '', weather: '' },
+        npcFacts: [],
+        inventoryDeltas: [],
+        taskDeltas: [],
+    };
+}
+
+function buildFailClosedExtraction(latestUserMessage, response = '') {
+    const text = String(latestUserMessage || '').trim().slice(0, 300);
+    const evidence = String(response || '').trim().slice(0, 300);
+    return {
+        ooc: 'N',
+        oocMode: 'IC',
+        oocInstruction: '',
+        goal: text || 'unresolved action',
+        goalKind: 'Normal',
+        goalEvidence: text || evidence,
+        decisiveAction: text || 'unresolved action',
+        decisiveActionEvidence: text || evidence,
+        outcomeOnSuccess: '',
+        outcomeOnFailure: '',
+        actionTargets: [],
+        oppTargetsNpc: [],
+        oppTargetsEnv: [],
+        benefitedObservers: [],
+        harmedObservers: [],
+        npcInScene: [],
+        hasStakes: 'N',
+        stakesEvidence: 'Resolver failed closed; no explicit structured stakes were available.',
+        actionCount: 1,
+        userStat: 'MND',
+        userStatEvidence: '',
+        oppStat: 'ENV',
+        oppStatEvidence: '',
+        hostilePhysicalHarm: 'N',
+        newEncounter: 'N',
+        timeDeltaMinutes: 0,
+        timeSkipReason: '',
+        scene: { location: '', time: '', weather: '' },
+        npcFacts: [],
+        inventoryDeltas: [],
+        taskDeltas: [],
+    };
+}
+
+async function generateQuietPromptWithTimeout(params = {}, ms = DEFAULT_SETTINGS.resolverTimeoutMs) {
+    const timeoutMs = Number(ms) || DEFAULT_SETTINGS.resolverTimeoutMs;
+    const controller = new AbortController();
+    activeQuietControllers.add(controller);
+    const timer = setTimeout(() => {
+        controller.abort(new Error(`Timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    quietGenerationDepth += 1;
+    try {
+        const result = await Generate('quiet', {
+            quiet_prompt: params.quietPrompt ?? '',
+            quietToLoud: params.quietToLoud ?? false,
+            skipWIAN: params.skipWIAN ?? false,
+            force_name2: true,
+            quietImage: params.quietImage ?? null,
+            quietName: params.quietName ?? null,
+            force_chid: params.forceChId ?? null,
+            jsonSchema: params.jsonSchema ?? null,
+            signal: controller.signal,
+        });
+        return params.removeReasoning === false ? String(result || '') : stripReasoningBlocks(result);
+    } finally {
+        quietGenerationDepth = Math.max(0, quietGenerationDepth - 1);
+        clearTimeout(timer);
+        activeQuietControllers.delete(controller);
+    }
+}
+
+function stripReasoningBlocks(value) {
+    return String(value || '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+        .trim();
+}
+
+async function ensureNpcArchiveWorld({ createIfMissing = true } = {}) {
+    const cfg = settings();
+    if (!cfg.enableNpcArchive) return null;
+
+    await updateWorldInfoList();
+    const names = Array.isArray(world_names) ? world_names : [];
+    if (cfg.npcArchiveWorld && names.includes(cfg.npcArchiveWorld)) {
+        return cfg.npcArchiveWorld;
+    }
+    if (names.includes(DEFAULT_ARCHIVE_WORLD)) {
+        cfg.npcArchiveWorld = DEFAULT_ARCHIVE_WORLD;
+        saveSettingsDebounced();
+        syncExtensionSettingsBlock();
+        return cfg.npcArchiveWorld;
+    }
+    if (!createIfMissing || !cfg.autoCreateNpcArchive) {
+        return null;
+    }
+
+    const created = await createNewWorldInfo(DEFAULT_ARCHIVE_WORLD, { interactive: false });
+    await updateWorldInfoList();
+    const afterCreate = Array.isArray(world_names) ? world_names : [];
+    if (created && afterCreate.includes(DEFAULT_ARCHIVE_WORLD)) {
+        cfg.npcArchiveWorld = DEFAULT_ARCHIVE_WORLD;
+        saveSettingsDebounced();
+        syncExtensionSettingsBlock();
+        return cfg.npcArchiveWorld;
+    }
+    return null;
+}
+
+async function loadNpcArchive({ createIfMissing = true } = {}) {
+    const worldName = await ensureNpcArchiveWorld({ createIfMissing });
+    if (!worldName) return null;
+    const data = await loadWorldInfo(worldName);
+    if (!data || typeof data !== 'object') return null;
+    data.entries = data.entries && typeof data.entries === 'object' ? data.entries : {};
+    return { worldName, data };
+}
+
+function findNpcArchiveEntry(data, npcName) {
+    const wanted = normalizeNameLocal(npcName);
+    const wantedKey = normalizeNameLocal(archiveEntryKey(npcName));
+    for (const entry of Object.values(data.entries || {})) {
+        const parsed = parseNpcArchiveContent(entry.content);
+        if (parsed && !archiveEntryMatchesCurrentChat(parsed)) continue;
+        const keys = Array.isArray(entry.key) ? entry.key : [];
+        const names = [
+            parsed?.name,
+            ...(parsed?.aliases || []),
+            ...keys,
+            String(entry.comment || '').replace(ARCHIVE_COMMENT_PREFIX, '').trim(),
+        ].filter(Boolean);
+        if (names.some(name => normalizeNameLocal(name) === wanted || normalizeNameLocal(name) === wantedKey)) return entry;
+    }
+    return null;
+}
+
+async function syncNpcArchive(result) {
+    const cfg = settings();
+    if (!cfg.enableNpcArchive || !result?.tracker?.npcs) return;
+    const archive = await loadNpcArchive({ createIfMissing: true });
+    if (!archive) return;
+
+    const { worldName, data } = archive;
+    const presentIds = new Set(result.tracker.presentNpcIds || []);
+    for (const npc of Object.values(result.tracker.npcs || {})) {
+        if (!npc?.name) continue;
+        const entry = findNpcArchiveEntry(data, npc.name) || createWorldInfoEntry(worldName, data);
+        if (!entry) continue;
+        const previous = parseNpcArchiveContent(entry.content) || {};
+        const chatId = currentArchiveChatId();
+        const archiveOwner = currentArchiveOwnerKey();
+        const entryKey = archiveEntryKey(npc.name, chatId);
+        const mergedNpc = {
+            ...previous,
+            ...npc,
+            chatId,
+            archiveOwner,
+            archiveEntryKey: entryKey,
+            aliases: uniqueLocal([npc.name, ...(previous.aliases || []), ...(npc.aliases || [])]),
+            present: presentIds.has(npc.id),
+            archiveStatus: archiveStatusForNpc(npc, previous, cfg),
+            lastKnownLocation: result.tracker.scene?.location || previous.lastKnownLocation || npc.lastKnownLocation || '',
+            knowsUser: preferKnownValue(npc.knowsUser, previous.knowsUser),
+            personality: preferKnownValue(npc.personality, previous.personality),
+            continuity: preferKnownValue(npc.continuity, previous.continuity),
+            pending: preferKnownValue(npc.pending, previous.pending, 'none'),
+            misc: preferKnownValue(npc.misc, previous.misc, 'none'),
+        };
+        entry.comment = `${ARCHIVE_COMMENT_PREFIX} ${archiveOwner} / ${chatId} / ${npc.name}`;
+        entry.key = settings().scopeNpcArchivePerChat
+            ? uniqueLocal([entryKey, ...(mergedNpc.aliases || []).map(alias => archiveEntryKey(alias, chatId))])
+            : uniqueLocal([npc.name, ...(mergedNpc.aliases || [])]);
+        entry.keysecondary = [];
+        entry.content = serializeNpcArchiveEntry(mergedNpc, {
+            chatId,
+            archiveOwner,
+            archiveEntryKey: entryKey,
+            location: result.tracker.scene?.location,
+            audit: result.audit,
+        });
+        entry.disable = false;
+        entry.constant = false;
+        entry.selective = true;
+        entry.order = Number.isFinite(Number(entry.order)) ? entry.order : 100;
+    }
+    await saveWorldInfo(worldName, data, true);
+
+    if (cfg.pruneArchivedAbsentNpcs) {
+        const pruned = createTracker(result.tracker);
+        for (const [id] of Object.entries(pruned.npcs || {})) {
+            if (!presentIds.has(id)) {
+                delete pruned.npcs[id];
+            }
+        }
+        pruned.presentNpcIds = pruned.presentNpcIds.filter(id => pruned.npcs[id]);
+        result.tracker = pruned;
+    }
+}
+
+async function pruneForgottenNpcs() {
+    const archive = await loadNpcArchive({ createIfMissing: false });
+    if (!archive) {
+        toastr.warning('No NPC archive Lorebook is available.', 'RP Engine');
+        return 0;
+    }
+    let count = 0;
+    for (const [uid, entry] of Object.entries(archive.data.entries || {})) {
+        const parsed = parseNpcArchiveContent(entry.content);
+        if (parsed && !archiveEntryMatchesCurrentChat(parsed)) continue;
+        if (parsed?.archiveStatus === 'Forgotten') {
+            delete archive.data.entries[uid];
+            count += 1;
+        }
+    }
+    if (count) {
+        await saveWorldInfo(archive.worldName, archive.data, true);
+    }
+    toastr[count ? 'success' : 'info'](
+        count ? `Pruned ${count} forgotten NPC archive entr${count === 1 ? 'y' : 'ies'}.` : 'No forgotten NPC entries to prune.',
+        'RP Engine',
+    );
+    return count;
+}
+
+function deletedArchiveChatIdFromEvent(payload) {
+    if (typeof payload === 'string' || typeof payload === 'number') return sanitizeArchiveChatId(payload);
+    if (!payload || typeof payload !== 'object') return '';
+    const source = payload.detail && typeof payload.detail === 'object' ? payload.detail : payload;
+    return sanitizeArchiveChatId(
+        source.chatId
+        || source.id
+        || source.name
+        || source.fileName
+        || source.file_name
+        || source.chatfile
+        || source.chat,
+    );
+}
+
+function archiveEntryBelongsToDeletedChat(entry, deletedChatId, ownerKey = currentArchiveOwnerKey()) {
+    const wantedChat = sanitizeArchiveChatId(deletedChatId);
+    if (!wantedChat || wantedChat === 'unsaved-chat') return false;
+    const wantedOwner = String(ownerKey || '').trim();
+    const parsed = parseNpcArchiveContent(entry?.content);
+    if (parsed?.chatId) {
+        const chatMatches = sanitizeArchiveChatId(parsed.chatId) === wantedChat;
+        if (!chatMatches) return false;
+        const storedOwner = String(parsed.archiveOwner || '').trim();
+        return !storedOwner || storedOwner === 'unknown' || !wantedOwner || storedOwner === wantedOwner;
+    }
+    const keys = Array.isArray(entry?.key) ? entry.key : [];
+    if (keys.some(key => {
+        const text = String(key || '');
+        return text.startsWith(`RPE:${wantedChat}:`) || (text.startsWith('RPE:') && text.includes(`:${wantedChat}:`));
+    })) return true;
+    const comment = String(entry?.comment || '');
+    return comment.includes(`${ARCHIVE_COMMENT_PREFIX} ${wantedChat} /`)
+        || comment.includes(`${ARCHIVE_COMMENT_PREFIX} ${wantedOwner} / ${wantedChat} /`);
+}
+
+async function deleteNpcArchiveEntriesForChat(payload) {
+    const cfg = settings();
+    if (!cfg.enableNpcArchive || !cfg.scopeNpcArchivePerChat) return 0;
+    const deletedChatId = deletedArchiveChatIdFromEvent(payload);
+    if (!deletedChatId || deletedChatId === 'unsaved-chat') return 0;
+    const archive = await loadNpcArchive({ createIfMissing: false });
+    if (!archive) return 0;
+
+    const ownerKey = currentArchiveOwnerKey();
+    let count = 0;
+    for (const [uid, entry] of Object.entries(archive.data.entries || {})) {
+        if (!archiveEntryBelongsToDeletedChat(entry, deletedChatId, ownerKey)) continue;
+        delete archive.data.entries[uid];
+        count += 1;
+    }
+    if (count) {
+        await saveWorldInfo(archive.worldName, archive.data, true);
+        console.info(`[RP Engine] Removed ${count} NPC archive entr${count === 1 ? 'y' : 'ies'} for deleted chat "${deletedChatId}".`);
+    }
+    return count;
+}
+
+async function rehydrateArchivedNpcsForText(text) {
+    const cfg = settings();
+    if (!cfg.enableNpcArchive || !cfg.rehydrateArchivedNpcs || !String(text || '').trim()) return;
+    const archive = await loadNpcArchive({ createIfMissing: false });
+    if (!archive) return;
+
+    let current = tracker();
+    let changed = false;
+    for (const entry of Object.values(archive.data.entries || {})) {
+        const archived = parseNpcArchiveContent(entry.content);
+        if (!archived?.name) continue;
+        if (!archiveEntryMatchesCurrentChat(archived)) continue;
+        if (!canRehydrateArchivedNpc(archived, text)) continue;
+        const names = uniqueLocal([archived.name, ...(archived.aliases || []), ...(Array.isArray(entry.key) ? entry.key : [])]);
+        if (!names.some(name => mentionedByText(text, name))) continue;
+        const before = JSON.stringify(current.npcs || {});
+        current = upsertArchivedNpc(current, archived, true);
+        changed = changed || JSON.stringify(current.npcs || {}) !== before;
+    }
+    if (changed) {
+        chat_metadata[METADATA_KEY] = current;
+        saveTracker();
+    }
+}
+
+function archiveStatusForNpc(npc, previous, cfg) {
+    const explicit = ['Active', 'Inactive', 'Dead', 'Retired', 'Forgotten'].includes(npc?.archiveStatus) ? npc.archiveStatus : '';
+    const prior = sanitizeArchiveStatusLocal(previous.archiveStatus);
+    const condition = String(npc?.condition || previous?.condition || '').toLowerCase();
+    if (explicit && explicit !== 'Active') return explicit;
+    if (prior === 'Forgotten') return 'Forgotten';
+    if (cfg.autoRetireDeadNpcs && /\b(dead|deceased|slain|killed|destroyed)\b/.test(condition)) return 'Dead';
+    if (prior === 'Dead' && !/\b(alive|revived|resurrected|returned from the dead|ghost|undead|spirit)\b/.test(condition)) return 'Dead';
+    return explicit || prior || 'Active';
+}
+
+function canRehydrateArchivedNpc(archived, text) {
+    const status = sanitizeArchiveStatusLocal(archived?.archiveStatus);
+    const source = String(text || '');
+    if (status === 'Forgotten') return false;
+    if (status === 'Dead') {
+        return /\b(ghost|spirit|undead|reanimated|resurrected|revived|returns? from the dead|risen)\b/i.test(source);
+    }
+    if (status === 'Retired' || status === 'Inactive') {
+        return /\b(returns?|comes? back|arrives?|reappears?|reintroduced|back in|back into)\b/i.test(source);
+    }
+    return true;
+}
+
+function sanitizeArchiveStatusLocal(value) {
+    return ['Active', 'Inactive', 'Dead', 'Retired', 'Forgotten'].includes(value) ? value : 'Active';
+}
+
+function mentionedByText(text, name) {
+    const value = String(name || '').trim();
+    if (!value) return false;
+    return new RegExp(`(^|[^\\p{L}\\p{N}_])${escapeRegExpLocal(value)}($|[^\\p{L}\\p{N}_])`, 'iu').test(String(text || ''));
+}
+
+function resetWritingRepairState({ clearPrompt = true, keepSnapshot = false } = {}) {
+    writingRepairState = {
+        active: false,
+        attempts: 0,
+        handoff: keepSnapshot ? writingRepairState.handoff : '',
+        trackerSnapshot: keepSnapshot ? writingRepairState.trackerSnapshot : null,
+        audits: [],
+    };
+    if (clearPrompt) {
+        setExtensionPrompt(WRITING_REPAIR_PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+    }
+}
+
+function clearWritingValidationQueue() {
+    for (const timer of writingValidationTimers.values()) {
+        clearTimeout(timer);
+    }
+    writingValidationTimers.clear();
+    pendingWritingValidation = null;
+}
+
+function abortActiveQuietPrompts(reason = 'Quiet prompt aborted.') {
+    for (const controller of activeQuietControllers) {
+        try {
+            controller.abort(new Error(reason));
+        } catch {
+            // Ignore stale controllers; the finally block removes them.
+        }
+    }
+    activeQuietControllers.clear();
+}
+
+function stopWritingRepairAutomation(reason = 'Generation stopped by user.') {
+    writingRepairSuppressed = true;
+    clearWritingValidationQueue();
+    abortActiveQuietPrompts(reason);
+    resetWritingRepairState();
+    console.info(`[RP Engine Tracker] Grounded Writing repair automation stopped. ${reason}`);
+}
+
+function saveRepairSnapshot(handoff, trackerSnapshot) {
+    writingRepairState = {
+        active: false,
+        attempts: 0,
+        handoff: String(handoff || ''),
+        trackerSnapshot: trackerSnapshot ? structuredClone(trackerSnapshot) : null,
+        audits: [],
+    };
+    setExtensionPrompt(WRITING_REPAIR_PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+}
+
+function isRepairRegeneration(type) {
+    return writingRepairState.active && String(type || '').toLowerCase() === 'regenerate';
+}
+
+function latestUserMessageFromAvailableChats(chat) {
+    return getLatestUserMessage(getContext().chat || [])
+        || getLatestUserMessage(liveChat)
+        || getLatestUserMessage(chat);
+}
+
+function isSameTurnRegeneration(type, chat) {
+    if (String(type || '').toLowerCase() !== 'regenerate') return false;
+    if (!writingRepairState.handoff || !writingRepairState.trackerSnapshot) return false;
+    const latestUserMessage = latestUserMessageFromAvailableChats(chat);
+    const triggerUserMessage = writingRepairState.trackerSnapshot?.lastAudit?.triggerUserMessage
+        || tracker()?.lastAudit?.triggerUserMessage
+        || '';
+    return !!latestUserMessage && !!triggerUserMessage && latestUserMessage === triggerUserMessage;
+}
+
+function preserveSameTurnHandoffForRegeneration() {
+    setExtensionPrompt(PROMPT_KEY, writingRepairState.handoff, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
+    chat_metadata[METADATA_KEY] = structuredClone(writingRepairState.trackerSnapshot);
+    saveTracker();
+    renderPanel();
+}
+
+async function scheduleWritingRepair(audit) {
+    if (writingRepairSuppressed) {
+        markWritingRepairFailed(audit, 'Grounded Writing repair was not started because generation was stopped by the user.', null);
+        return false;
+    }
+    const messageId = Number(audit?.messageId);
+    if (!Number.isFinite(messageId) || messageId < 0) {
+        markWritingRepairFailed(audit, 'Grounded Writing failed, but no assistant message was available for in-place repair.', null);
+        return false;
+    }
+    if (writingRepairState.attempts >= MAX_WRITING_REPAIR_ATTEMPTS) {
+        markWritingRepairFailed(audit, `Grounded Writing failed after ${MAX_WRITING_REPAIR_ATTEMPTS} quiet repair attempt. Mechanics were not rerolled.`, null);
+        return false;
+    }
+
+    writingRepairState.attempts += 1;
+    writingRepairState.audits.push(audit);
+    toastr.warning(`Grounded Writing Engine rejected a phrase. Quiet repair ${writingRepairState.attempts}/${MAX_WRITING_REPAIR_ATTEMPTS}.`, 'RP Engine');
+    if (writingRepairSuppressed) return false;
+
+    try {
+        return await runQuietWritingRepair(messageId, audit);
+    } catch (error) {
+        markWritingRepairFailed(audit, String(error?.message || error), null);
+        return false;
+    }
+}
+
+async function runQuietWritingRepair(messageId, audit) {
+    const message = getMessageById(messageId);
+    const original = messageText(message).trim();
+    if (!message || !original) {
+        markWritingRepairFailed(audit, 'Assistant message was missing before quiet repair could edit it in place.', null);
+        return false;
+    }
+
+    const userInput = getPreviousUserMessageStrictForId(messageId);
+    const target = chooseWritingRepairTarget(original, audit);
+    const prompt = buildQuietWritingRepairPrompt({
+        audit,
+        original,
+        target,
+        userInput,
+        attempt: writingRepairState.attempts,
+    });
+    const raw = await generateQuietPromptWithTimeout({
+        quietPrompt: `${prompt}\n\nReturn exactly one compact JSON object only. No markdown, no prose, no commentary.`,
+        skipWIAN: true,
+        responseLength: target.mode === 'full' ? 1800 : 500,
+        removeReasoning: true,
+    }, Math.min(Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000), 120000));
+    const parsed = parseJsonResponse(raw);
+    const replacement = cleanRepairReplacement(parsed?.replacement || raw);
+    if (!replacement) {
+        markWritingRepairFailed(audit, 'Quiet repair returned an empty replacement.', target);
+        return false;
+    }
+
+    const repairedText = applyWritingRepairReplacement(original, target, replacement);
+    if (!repairedText || repairedText === original) {
+        markWritingRepairFailed(audit, 'Quiet repair could not replace the offending text in place.', target);
+        return false;
+    }
+
+    const obviousFailure = deterministicWritingPrecheck(repairedText, userInput, tracker());
+    if (obviousFailure.valid === false) {
+        markWritingRepairFailed(audit, 'Quiet repair still contains a direct deterministic Grounded Writing violation.', target, replacement);
+        return false;
+    }
+
+    await replaceAssistantMessageText(messageId, repairedText);
+    saveWritingRepairResult(audit, {
+        status: 'repaired',
+        mode: target.mode,
+        original: target.text || original,
+        replacement,
+        attempt: writingRepairState.attempts,
+    });
+    lastGroundedWritingValidationSignature = makeWritingValidationSignature(messageId, repairedText);
+    resetWritingRepairState({ keepSnapshot: true });
+    toastr.success('Grounded Writing violation repaired in place.', 'RP Engine');
+    return true;
+}
+
+function markWritingRepairFailed(audit, reason, target = null, replacement = '') {
+    const current = tracker();
+    const failedAudit = {
+        ...(audit || {}),
+        at: new Date().toISOString(),
+        valid: false,
+        severity: 'failed_after_repair',
+        repairFailed: true,
+        repairAttempts: writingRepairState.attempts,
+        repairInstructions: reason,
+        repairResult: {
+            status: 'failed',
+            mode: target?.mode || 'unknown',
+            original: target?.text || '',
+            replacement: replacement || '',
+            reason,
+            attempt: writingRepairState.attempts,
+        },
+        violations: [
+            ...(Array.isArray(audit?.violations) ? audit.violations : []),
+            { rule: 'Grounded Writing Repair', evidence: '', problem: reason },
+        ],
+    };
+    current.lastWritingAudit = failedAudit;
+    current.lastAudit = current.lastAudit || {};
+    current.lastAudit.writingAudit = failedAudit;
+    chat_metadata[METADATA_KEY] = current;
+    saveTracker();
+    renderPanel();
+    setExtensionPrompt(WRITING_REPAIR_PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+    clearWritingValidationQueue();
+    toastr.error(reason, 'RP Engine');
+    resetWritingRepairState({ clearPrompt: false });
+}
+
+function hasActiveRoleplayChat() {
+    return this_chid !== undefined || !!selected_group;
+}
+
+function shouldSkipNeutralAssistantChat() {
+    const characterName = String(name2 || '').trim().toLowerCase();
+    return !hasActiveRoleplayChat() && (!characterName || characterName === 'assistant');
+}
+
+async function interceptor(chat, _contextSize, _abort, type) {
+    const cfg = settings();
+    if (!cfg.enabled || resolving || type === 'quiet') {
+        return;
+    }
+
+    if (shouldSkipNeutralAssistantChat()) {
+        setExtensionPrompt(PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+        resetWritingRepairState();
+        console.debug('[RP Engine Tracker] Skipping RP handoff outside a character/group chat.');
+        return;
+    }
+
+    if (isRepairRegeneration(type)) {
+        console.debug('[RP Engine Tracker] Skipping resolver during Grounded Writing repair regeneration; preserving saved handoff.');
+        if (writingRepairState.handoff) {
+            setExtensionPrompt(PROMPT_KEY, writingRepairState.handoff, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
+        }
+        if (writingRepairState.trackerSnapshot) {
+            chat_metadata[METADATA_KEY] = structuredClone(writingRepairState.trackerSnapshot);
+            saveTracker();
+        }
+        return;
+    }
+
+    if (isSameTurnRegeneration(type, chat)) {
+        console.debug('[RP Engine Tracker] Reusing saved handoff for same-turn regenerate; mechanics were not rerolled.');
+        preserveSameTurnHandoffForRegeneration();
+        return;
+    }
+
+    resolving = true;
+    try {
+        writingRepairSuppressed = false;
+        const rollbackSnapshot = trackerSnapshotForRollback(tracker());
+        const triggerUserMessage = latestUserMessageFromAvailableChats(chat);
+        const result = await runResolver(chat);
+        attachTurnRollback(result, triggerUserMessage, rollbackSnapshot);
+        await syncNpcArchive(result);
+        chat_metadata[METADATA_KEY] = result.tracker;
+
+        if (cfg.injectHandoff) {
+            const namePayload = reserveNameCandidates(result.tracker, 4, {
+                style: cfg.nameStyle,
+                customStyle: cfg.customNameStyle,
+            });
+            chat_metadata[METADATA_KEY] = result.tracker;
+            saveTracker();
+            const handoff = buildFinalNarrationPayload({
+                packet: result.packet,
+                npcHandoffs: result.npcHandoffs,
+                chaosHandoff: result.chaosHandoff,
+                proactivityHandoff: result.proactivityHandoff,
+                aggressionResults: result.aggressionResults,
+                namePayload,
+                renderRules: cfg.enableRenderRules ? buildGroundedWritingRecallPrompt() : '',
+                writingStyle: cfg.enableWritingStyle ? cfg.writingStyle : '',
+            });
+            syncGroundedWritingEarlyPrompt();
+            setExtensionPrompt(PROMPT_KEY, handoff, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
+            saveRepairSnapshot(handoff, result.tracker);
+        } else {
+            saveTracker();
+            setExtensionPrompt(PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+            syncGroundedWritingEarlyPrompt();
+            resetWritingRepairState();
+        }
+
+        renderPanel();
+    } catch (error) {
+        console.error('[RP Engine Tracker] Interceptor failed.', error);
+        const failed = tracker();
+        failed.lastAudit = {
+            at: new Date().toISOString(),
+            error: String(error?.message || error),
+            latestUserMessage: getLatestUserMessage(getContext().chat || []) || getLatestUserMessage(liveChat || []) || getLatestUserMessage(chat || []),
+        };
+        chat_metadata[METADATA_KEY] = failed;
+        saveTracker();
+        renderPanel();
+        toastr.error('Resolver failed. See browser console.', 'RP Engine Tracker');
+        setExtensionPrompt(PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+    } finally {
+        resolving = false;
+    }
+}
+
+globalThis.rpEngineTrackerInterceptor = interceptor;
+
+function buildGroundedWritingValidatorPrompt({ userInput, response, trackerSummary }) {
+    return [
+        'GroundedWritingValidator(response, input, context)',
+        'Task: audit the assistant response against the hardwired Grounded Writing Engine.',
+        'Return the JSON object immediately. No prose. No markdown. No explanation.',
+        '',
+        'Return schema:',
+        '{"valid":true|false,"severity":"pass|minor|major","violations":[{"rule":"...","evidence":"short exact phrase or paraphrase","problem":"..."}],"repairInstructions":"short direct instruction for regeneration"}',
+        '',
+        'Core audit standards:',
+        '- IMPORTANT: reject only direct, visible violations. Do not reject a reply merely because it is plain, terse, emotionally restrained, or not written in the preferred style.',
+        '- A violation needs a specific phrase or sentence from <VISIBLE_RESPONSE> as evidence. If you cannot quote the offending visible text, return valid=true.',
+        '- Camera/microphone standard: if a camera or microphone could capture it from the scene position, it is generally legal narration. Prefer concrete physical detail, but do not reject visible expressions, visible posture, tone, normal physical adjectives, or audible dialogue flavor unless the exact text directly violates a locked ban.',
+        '- Character dialogue is more permissive than narrator prose. NPCs may use folklore, idiom, superstition, metaphor, or flavor in spoken lines. Do not reject quoted dialogue for literalism/style unless it violates user agency, consent/mechanics, or exposes hidden system rules.',
+        '- Do not infer hidden intent from legal concrete behavior. Small observable gestures are legal unless they are one of the banned shorthand categories or they take over user agency.',
+        '- Enforce POV-locked epistemology: no hidden motives, mindreading, unknown causes, or knowledge unavailable from the user position.',
+        '- Enforce strict behaviorism without flattening emotion: emotion should be physically demonstrated through observable action, not removed.',
+        '- Allowed emotional tells include visible facial expression, gaze changes, looking away, hand movement, nervous object handling, stance changes, distance changes, lip/tongue movement, hesitation, pressure, recoil, speech disruption, posture, contact, timing, or other physical behavior with scene effect.',
+        '- Reject lazy emotional shorthand, canned hesitation/anxiety micro-beats, negative-expression shorthand, facial/breath micro-beat punctuation, metaphorized emotion, and stock autonomic cues such as blush, flush, cheeks heating, ears reddening, heart fluttering/pounding, stomach dropping, breath hitching or exhaling through the nose as emotional punctuation, temple pulses ticking/throbbing, veins throbbing, eyes darkening/softening/sharpening/flashing as emotion labels, gaze sharpening/hardening/softening/locking/going cold, warmth/coldness/light/shadow/music in eyes/gaze/voice, jaws shifting/setting/clenching/working/tightening, lips parting without consequence, mouths opening and closing, throat bobbing/tightening, visible or emphatic swallowing as emotional shorthand, whitening/pale knuckles as tension shorthand, fingers twitching, and equivalents.',
+        '- Metaphorized emotion means treating voice, eyes, gaze, warmth, coldness, music, light, shadow, softness, or hardness as emotional substances. Bad: "the warmth that lived there is gone"; bad: "no music left in her voice"; bad: "her gaze went cold". Replace with concrete action, speech content, distance, object handling, or a clean stop.',
+        '- Negative-expression shorthand means absence used as emotion instead of action: "she does not smile", "she does not look away", "without blinking", "his smile does not reach his eyes", and equivalent non-events. If the character simply does not do something, omit it unless it changes the scene materially.',
+        '- Observable small gestures are allowed. Do not reject a visible hand, gaze, lip, tongue, stance, or posture detail merely because it is small. Reject it only if it is stock shorthand, decorative filler, or used to smuggle hidden emotion without consequence.',
+        '- Small physical tells are valid when they produce or reveal concrete scene behavior: changed distance, object use, posture, timing, pressure, contact, speech content, movement, or an immediate tactical/social consequence.',
+        '- Enforce literalism: no metaphor, simile, hyperbole, idiom, personification, poetic framing, atmospheric abstraction, or abstractions acting like physical agents; names, words, answers, truth, silence, quiet, tension, and moments cannot land, settle, fall, hang, ripple, press, cut, or move like/as physical objects.',
+        '- Reject melodrama as a category: no theatrical emotional physics, no abstract pressure/weight/electricity/shattering, and no air/silence/quiet/tension/moment/room/world/name/words/truth acting alive or physical.',
+        '- Do not write feelings as weather, gravity, heat, electricity, rupture, collapse, impact, pressure, or suspended time. Render emotion through concrete behavior, spoken words, and directly perceivable physical events.',
+        '',
+        'Violation category definitions and examples:',
+        '- PERSONIFICATION / ABSTRACT PHYSICAL AGENCY: Abstractions, language, silence, tension, rooms, weather, moments, truth, names, and words cannot act, move, feel, hold, breathe, settle, land, press, cut, wait, watch, or react. Bad: "The name settled into the quiet." Bad: "The silence held its breath." Good: "\"The temple is called Eryndor.\" Seraphina stops speaking."',
+        '- METAPHOR / SIMILE: Do not replace the visible event with a poetic image or comparison. Bad: "The name landed soft as a leaf on still water." Bad: "The truth hit her like a blow." Good: "Seraphina says the name once." Good: "She steps back once and grips the table edge."',
+        '- PATHETIC FALLACY: Do not make weather, darkness, air, rooms, silence, or atmosphere mirror emotion or intent. Bad: "The room waited." Bad: "The dark pressed in around them." Good: "The room is dark except for the lamp on the table."',
+        '- MELODRAMA / EMOTIONAL PHYSICS: Do not render feelings, words, truth, silence, or tension as weight, gravity, electricity, heat, rupture, collapse, impact, pressure, or suspended time. Bad: "The moment shattered." Bad: "Her words carried the weight of a confession." Good: "She does not answer for three seconds."',
+        '- LAZY EMOTIONAL SHORTHAND: Do not use stock autonomic, negative-expression, breath-punctuation, facial-microbeat, metaphorized emotion, or canned hesitation cues as emotion labels. Bad: "Her cheeks flushed." Bad: "Her throat bobbed." Bad: "Her jaw set." Bad: "Her jaw shifts once, muscle tensing along the bone." Bad: "She exhales through her nose." Bad: "She does not smile." Bad: "She does not look away." Bad: "The warmth that lived there is gone." Bad: "No music is left in her voice." Bad: "Her knuckles whitened." Good: "She looks away and moves the cup behind the ledger."',
+        '- USER AGENCY VIOLATION: Do not repeat, paraphrase, continue, decide, speak, or act for the user unless the input used triple parentheses. Bad: "As you ask, she..." Bad: "You step closer." Good: begin with the NPC response or consequence.',
+        '- Enforce sensory gates against lazy ambient smell/taste shortcuts. Do not reject dialogue about smell, directions involving smell, or a physically specific overpowering nearby source.',
+        '- Enforce ability integration: write observable effects only, no system terms, ability labels, or causation explanations unless spoken aloud.',
+        '- Enforce turn boundary: do not write user speech, thoughts, feelings, intentions, decisions, voluntary reactions, silence, or new/continued action; do not recap, echo, paraphrase, summarize, re-perform, continue, or add choices to the user action. Normal IC replies begin at T+1: consequence, result, NPC reaction, environmental change, or new stimulus immediately after the user action.',
+        '- User agency distinction: externally caused, involuntary physical or sensory effects may be narrated because the user cannot choose them. Legal examples: being shoved, grabbed, knocked back, startled by a sudden shout, woken by noise, blinded by impact or light, ears ringing after an explosion, vision going white after a blow. Illegal examples: deciding to step back, choosing to turn, speaking, thinking, feeling fear, or continuing the user action.',
+        '- Reject subjective disorientation written as scene physics or metaphor unless the scene physically supports it. Bad: "The ground tilted." Good if impact caused it: "Your vision went white for half a second." Good if earthquake/ship/deck physically moves: "The floor lurched under both boots."',
+        '- The only exception is proxy narration: if the latest user input is fully wrapped in triple parentheses (((...))), user-action narration is allowed because the user authorized proxy narration. Double parentheses ((...)) are OOC stop-and-answer, not proxy.',
+        '- For normal IC input, reject first-sentence framing like "As you...", "When you...", "You say...", "You move...", or "You reach..." when it repeats or continues the user-declared action instead of showing consequence/reaction.',
+        '- Final beat must be actionable as concrete dialogue the user can answer, a direct question requiring a reply, a concrete action requiring response, or useful information that lets the user choose the next move.',
+        '- If an NPC says or does something that requires the user response, that NPC may not speak or act again for that turn. No filler from that same NPC, no forced resolution, no answering for the user.',
+        '- A completed simple answer can satisfy the final beat by itself. Do not append idle waiting, still-waiting tags, waiting-for-you-to-act tags, posture, silence, or atmospheric filler after useful information.',
+        '- Dialogue from an NPC may state that NPC\'s own claims, thoughts, uncertainty, or boundaries. That is not mindreading.',
+        '- If you list any actual violation of the hardwired Grounded Writing Engine, mark valid=false. Use severity=minor only for a non-blocking note with no rule-breaking evidence.',
+        '- If a candidate issue is debatable, indirect, or not supported by exact visible evidence, do not reject it.',
+        '- Audit ONLY the text inside <VISIBLE_RESPONSE>. Ignore any chat history, hidden reasoning, summaries, instructions, or model thoughts that may appear elsewhere.',
+        '',
+        `Latest user input:\n${userInput || '(none)'}`,
+        '',
+        `Tracker/context summary:\n${trackerSummary || '(none)'}`,
+        '',
+        `<VISIBLE_RESPONSE>\n${response || '(empty)'}\n</VISIBLE_RESPONSE>`,
+    ].join('\n');
+}
+
+function buildWritingRepairPrompt(audit, attempt = 1) {
+    const violations = Array.isArray(audit?.violations) ? audit.violations : [];
+    const lines = violations.slice(0, 5).map((item, index) => {
+        const rawRule = cleanRepairLine(item?.rule || 'Grounded Writing Engine');
+        const rule = groundedRepairCategory(rawRule);
+        const evidence = cleanRepairLine(item?.evidence || '(not provided)');
+        const problem = cleanRepairLine(item?.problem || 'Direct Grounded Writing Engine violation.');
+        return [
+            `${index + 1}. Violation: ${rule}`,
+            `   Offending phrase: "${evidence}"`,
+            `   Reason: ${problem}`,
+            `   Repair: ${repairInstructionForRule(rule)}`,
+            `   Silent acknowledgement before drafting: "I will respond with ${desiredRepairBehaviorForRule(rule)}. I will not use ${unwantedRepairBehaviorForRule(rule)}."`,
+        ].join('\n');
+    });
+    return [
+        `GROUNDING REPAIR ATTEMPT ${attempt}/${MAX_WRITING_REPAIR_ATTEMPTS}`,
+        'Your previous reply was rendered invalid because it violated the hardwired Grounded Writing Engine.',
+        '',
+        'Repair the existing reply in place from the same game-state handoff.',
+        'Do not reroll. Do not change outcome, relationship state, NPC state, dice, chaos, proactivity, aggression, inventory, tasks, names, scene facts, or the meaning of the user input.',
+        'Change only the prose needed to remove the exact violation(s) below.',
+        'Before writing the repaired reply, silently acknowledge each violated rule using the provided positive form. Do not output the acknowledgement.',
+        '',
+        lines.length ? `Violation report:\n${lines.join('\n\n')}` : 'Violation report:\n1. Violation: Grounded Writing Engine\n   Offending phrase: "(not provided)"\n   Reason: Direct grounded-writing violation.\n   Repair: Rewrite only the violating phrase using literal, directly observable prose.',
+        '',
+        'Replacement examples are guidance, not new facts:',
+        '- "She sets the cup down harder than before."',
+        '- "She steps back once and puts the table between you."',
+        '- "She answers after three seconds."',
+        '- "Her hand stays on the knife hilt."',
+        '',
+        'Further Grounded Writing Engine violations in the repair will render the response invalid.',
+        attempt >= MAX_WRITING_REPAIR_ATTEMPTS ? 'This is the final quiet repair attempt. If it still violates the Grounded Writing Engine, the extension will stop repairing and surface the failure.' : '',
+    ].filter(Boolean).join('\n');
+}
+
+function buildQuietWritingRepairPrompt({ audit, original, target, userInput, attempt = 1 }) {
+    const violations = Array.isArray(audit?.violations) ? audit.violations : [];
+    const lines = violations.slice(0, 5).map((item, index) => {
+        const rawRule = cleanRepairLine(item?.rule || 'Grounded Writing Engine');
+        const rule = groundedRepairCategory(rawRule);
+        const evidence = cleanRepairEvidenceLine(expandRepairEvidenceForPrompt(original, item) || '(not provided)');
+        const problem = cleanRepairLine(repairFailureCauseForRule(rule, item?.problem));
+        return [
+            `${index + 1}. WARNING: RESPONSE INVALIDATED.`,
+            `   NUCLEAR PROTOCOL BREACH: ${rule}`,
+            `   OFFENDING TEXT: "${evidence}"`,
+            `   FAILURE CAUSE: ${problem}`,
+            '   STATUS: The cited text is annulled. It must not survive in the repaired message.',
+            `   MANDATORY REPAIR COMMAND: Replace the offending text with ${desiredRepairBehaviorForRule(rule)}.`,
+            `   EXECUTION ORDER: ${repairInstructionForRule(rule)}`,
+            `   SILENT ACKNOWLEDGEMENT REQUIRED: "${repairAcknowledgementForRule(rule)}"`,
+        ].join('\n');
+    });
+    const surgical = target?.mode !== 'full';
+    return [
+        `GroundedWritingQuietRepair(attempt=${attempt}/${MAX_WRITING_REPAIR_ATTEMPTS})`,
+        'Return exactly one JSON object and nothing else: {"replacement":"..."}',
+        '',
+        lines.length ? lines.join('\n\n') : 'WARNING: RESPONSE INVALIDATED.\nNUCLEAR PROTOCOL BREACH: GroundedWritingEngine: Direct Rule Violation\nOFFENDING TEXT: "(not provided)"\nFAILURE CAUSE: Direct grounded-writing violation.\nSTATUS: The cited text is annulled. It must not survive in the repaired message.\nMANDATORY REPAIR COMMAND: Replace the offending text with literal, directly observable prose that preserves the same facts and outcome.',
+        '',
+        'Do not reroll. Do not change outcome, relationship state, NPC state, dice, chaos, proactivity, aggression, inventory, tasks, names, scene facts, or the meaning of the user input.',
+        'Before drafting the replacement, internally perform the SILENT ACKNOWLEDGEMENT REQUIRED for each breach. Do not output the acknowledgement.',
+        '',
+        `Latest user input:\n${userInput || '(none)'}`,
+        '',
+        `<FULL_ASSISTANT_MESSAGE>\n${original || ''}\n</FULL_ASSISTANT_MESSAGE>`,
+        '',
+        surgical
+            ? [
+                'Surgical task: rewrite ONLY the target sentence/phrase below.',
+                'Return the replacement for that target only, not the full assistant message.',
+                'The replacement must fit grammatically where the target currently appears.',
+                `<TARGET_TEXT>\n${target?.text || ''}\n</TARGET_TEXT>`,
+            ].join('\n')
+            : [
+                'Structural task: rewrite the full assistant message because the violation affects agency, chronology, turn structure, consent, or final handoff.',
+                'Return the full repaired assistant message only in the replacement field.',
+            ].join('\n'),
+    ].join('\n');
+}
+
+function chooseWritingRepairTarget(response, audit) {
+    const text = String(response || '');
+    const violations = Array.isArray(audit?.violations) ? audit.violations : [];
+    const structural = violations.some(isStructuralWritingViolation);
+    if (structural) return { mode: 'full', text, evidence: '' };
+
+    for (const violation of violations) {
+        const evidence = normalizeRepairEvidence(violation?.evidence);
+        if (!evidence) continue;
+        const sentence = sentenceContainingText(text, evidence);
+        if (sentence) return { mode: 'sentence', text: sentence, evidence };
+        if (text.includes(evidence)) return { mode: 'phrase', text: evidence, evidence };
+    }
+
+    return { mode: 'full', text, evidence: '' };
+}
+
+function isStructuralWritingViolation(violation) {
+    const source = `${violation?.rule || ''} ${violation?.problem || ''}`.toLowerCase();
+    return /agency|chronology|recap|echo|paraphrase|turn|question|handoff|final beat|consent|intimacy/.test(source);
+}
+
+function normalizeRepairEvidence(value) {
+    return String(value || '')
+        .replace(/^[\s"'“”‘’`]+|[\s"'“”‘’`]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function expandRepairEvidenceForPrompt(source, violation) {
+    const evidence = normalizeRepairEvidence(violation?.evidence);
+    if (!evidence) return '';
+    if (!isStructuralWritingViolation(violation)) return evidence;
+    const stripped = evidence.replace(/^[.!?]\s*/, '').trim();
+    const candidates = [...new Set([stripped, evidence].filter(Boolean))];
+    for (const candidate of candidates) {
+        const sentence = sentenceContainingText(source, candidate);
+        if (sentence) return sentence.replace(/^[.!?]\s*/, '').trim();
+    }
+    return stripped || evidence;
+}
+
+function sentenceContainingText(source, needle) {
+    const text = String(source || '');
+    const target = String(needle || '').trim();
+    if (!text || !target) return '';
+    const index = text.indexOf(target);
+    if (index < 0) return '';
+    let start = index;
+    while (start > 0 && !/[.!?\n]/.test(text[start - 1])) start -= 1;
+    while (start < index && /\s/.test(text[start])) start += 1;
+    let end = index + target.length;
+    while (end < text.length && !/[.!?\n]/.test(text[end])) end += 1;
+    if (end < text.length && /[.!?]/.test(text[end])) end += 1;
+    const sentence = text.slice(start, end).trim();
+    return sentence && sentence.length <= 700 ? sentence : target;
+}
+
+function cleanRepairReplacement(value) {
+    return String(value || '')
+        .replace(/^```(?:json|text|markdown)?\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .replace(/^\s*(?:replacement|repaired sentence|repaired text)\s*:\s*/i, '')
+        .trim();
+}
+
+function applyWritingRepairReplacement(original, target, replacement) {
+    const source = String(original || '');
+    const fixed = String(replacement || '').trim();
+    if (!source || !fixed) return '';
+    if (target?.mode === 'full') return fixed;
+    const targetText = String(target?.text || '');
+    if (targetText && source.includes(targetText)) {
+        return source.replace(targetText, fixed);
+    }
+    const evidence = String(target?.evidence || '');
+    if (evidence && source.includes(evidence)) {
+        return source.replace(evidence, fixed);
+    }
+    return '';
+}
+
+async function replaceAssistantMessageText(messageId, repairedText) {
+    const id = Number(messageId);
+    const context = getContext();
+    const sources = [context.chat, liveChat].filter(Array.isArray);
+    let message = null;
+    for (const source of sources) {
+        if (!source[id]) continue;
+        source[id].mes = repairedText;
+        source[id].extra = source[id].extra || {};
+        if (source[id].extra.display_text) source[id].extra.display_text = repairedText;
+        if (Array.isArray(source[id].swipes)) {
+            const swipeId = Number.isFinite(Number(source[id].swipe_id)) ? Number(source[id].swipe_id) : 0;
+            if (source[id].swipes[swipeId] !== undefined) source[id].swipes[swipeId] = repairedText;
+        }
+        source[id].extra.rpEngineRepaired = true;
+        message = source[id];
+    }
+    if (!message) throw new Error('Assistant message disappeared before repair could be saved.');
+    context.updateMessageBlock?.(id, message);
+    await context.saveChat?.();
+}
+
+function saveWritingRepairResult(audit, repairResult) {
+    const current = tracker();
+    const repairedAudit = {
+        ...(audit || {}),
+        at: new Date().toISOString(),
+        originalValid: false,
+        valid: true,
+        severity: 'repaired',
+        repaired: true,
+        repairFailed: false,
+        repairAttempts: writingRepairState.attempts,
+        repairResult,
+    };
+    current.lastWritingAudit = repairedAudit;
+    current.lastAudit = current.lastAudit || {};
+    current.lastAudit.writingAudit = repairedAudit;
+    chat_metadata[METADATA_KEY] = current;
+    saveTracker();
+    renderPanel();
+}
+
+function cleanRepairLine(value) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 220);
+}
+
+function cleanRepairEvidenceLine(value) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 900);
+}
+
+function groundedRepairCategory(rule) {
+    const text = String(rule || '').toLowerCase();
+    if (/user|agency|recap|echo|paraphrase/.test(text)) {
+        return 'agencyEnforcement / chronologyEnforcement: Absolute Separation of Control and T+1 Consequence';
+    }
+    if (/question|turn/.test(text)) {
+        return 'turnEnforcement: Response-Required Question Stop';
+    }
+    if (/name|naming|western|garrick|candidate/.test(text)) {
+        return 'NameGenerationEngine: Fantasy-Native Name Style / Candidate Priority';
+    }
+    if (/idle|waiting|filler/.test(text)) {
+        return 'handoffEnforcement: Actionable Final Beat';
+    }
+    if (/intimacy|consent/.test(text)) {
+        return 'agencyEnforcement: Consent Boundary';
+    }
+    if (/smell|taste|sensory/.test(text)) {
+        return 'olfactoryGate / sensoryEnforcement: Locked Smell-Taste Channel';
+    }
+    if (/ability|system/.test(text)) {
+        return 'abilityIntegration: Effect-Only Rendering';
+    }
+    if (/personification|abstract|atmospheric abstraction/.test(text)) {
+        return 'materialEnforcement: Inanimate Objectivity / Abstract Physical Agency';
+    }
+    if (/metaphor|simile|poetic/.test(text)) {
+        return 'literalismEnforcement: Radical Literalism / No Figurative Comparison';
+    }
+    if (/pathetic|fallacy|atmosphere/.test(text)) {
+        return 'materialEnforcement: No Pathetic Fallacy';
+    }
+    if (/melodrama|emotional physics/.test(text)) {
+        return 'styleEnforcement / literalismEnforcement: No Melodrama or Emotional Physics';
+    }
+    if (/lazy|shorthand|autonomic|negative-expression|negative expression|emotion|hesitation|micro-beat/.test(text)) {
+        return 'behavioralEnforcement: Strict Behaviorism / Autonomic Trope Shortcut';
+    }
+    return 'GroundedWritingEngine: Direct Rule Violation';
+}
+
+function repairFailureCauseForRule(rule, fallback = '') {
+    const text = String(rule || '').toLowerCase();
+    if (/agency|chronology|separation|t\+1/.test(text)) {
+        return 'Narrating the user character\'s speech, thoughts, decisions, voluntary actions, recap, echo, paraphrase, or continued action is strictly prohibited.';
+    }
+    if (/question|turn/.test(text)) {
+        return 'Continuing the same NPC after that NPC has asked, commanded, requested, or acted in a way that requires the user response is strictly prohibited.';
+    }
+    if (/name|naming|western|candidate/.test(text)) {
+        return 'Using a generic modern-Western or overused Western-fantasy name when the Name Generation Engine controls revealed names is strictly prohibited.';
+    }
+    if (/handoff|final beat/.test(text)) {
+        return 'Ending on idle waiting, posture-holding, ambient filler, or a non-actionable beat is strictly prohibited.';
+    }
+    if (/consent/.test(text)) {
+        return 'Letting denied intimate contact land after the consent gate blocks it is strictly prohibited.';
+    }
+    if (/olfactory|sensory|smell|taste/.test(text)) {
+        return 'Using smell or taste as lazy ambient mood narration while the smell/taste gate is locked is strictly prohibited.';
+    }
+    if (/ability/.test(text)) {
+        return 'Announcing activation, ability labels, system terms, or hidden magical causes instead of observable effects is strictly prohibited.';
+    }
+    if (/inanimate|abstract|objectivity|personification/.test(text)) {
+        return 'Giving abstractions, objects, rooms, silence, names, words, weather, or atmosphere living agency is strictly prohibited.';
+    }
+    if (/literalism|figurative|comparison|metaphor|simile/.test(text)) {
+        return 'Replacing literal observable events with metaphor, simile, idiom, hyperbole, or poetic comparison is strictly prohibited.';
+    }
+    if (/pathetic/.test(text)) {
+        return 'Making weather, darkness, air, rooms, silence, or atmosphere mirror emotion or intent is strictly prohibited.';
+    }
+    if (/melodrama|emotional physics/.test(text)) {
+        return 'Rendering feelings, words, silence, truth, tension, or moments as weight, pressure, rupture, electricity, heat, impact, or suspended time is strictly prohibited.';
+    }
+    if (/behaviorism|autonomic|trope|shorthand/.test(text)) {
+        return 'Using stock autonomic cues, facial/breath micro-beats, negative-expression shorthand, or metaphorized emotion instead of consequential observable behavior is strictly prohibited.';
+    }
+    return cleanRepairLine(fallback || 'Direct Grounded Writing Engine violation.');
+}
+
+function desiredRepairBehaviorForRule(rule) {
+    const text = String(rule || '').toLowerCase();
+    if (/agency|chronology|separation|t\+1/.test(text)) {
+        return 'the immediate consequence, result, NPC reaction, environmental change, or new stimulus after the user action';
+    }
+    if (/question|turn/.test(text)) {
+        return 'the response-requiring question, command, request, or action without further speech/action from the same NPC';
+    }
+    if (/name|naming|western|candidate/.test(text)) {
+        return 'the next matching reserved candidate exactly, or one clean fantasy-native generated name when no candidate exists';
+    }
+    if (/handoff|final beat/.test(text)) {
+        return 'a concrete dialogue line, question, action, useful answer, or stimulus the user can answer right now';
+    }
+    if (/consent/.test(text)) {
+        return 'a blocked, refused, interrupted, or avoided intimate advance before denied contact lands';
+    }
+    if (/olfactory|sensory|smell|taste/.test(text)) {
+        return 'sight, sound, and touch unless smell or taste is explicitly unlocked';
+    }
+    if (/ability/.test(text)) {
+        return 'only the directly perceivable effect as sensory fact';
+    }
+    if (/inanimate|abstract|objectivity|personification/.test(text)) {
+        return 'literal actor behavior or physical object state with no agency assigned to abstractions or inanimate things';
+    }
+    if (/literalism|figurative|comparison|metaphor|simile/.test(text)) {
+        return 'literal visible events and physical properties only';
+    }
+    if (/pathetic/.test(text)) {
+        return 'literal weather, lighting, room, sound, and actor behavior without emotional mirroring';
+    }
+    if (/melodrama|emotional physics/.test(text)) {
+        return 'concrete behavior, spoken words, timing, distance, object handling, contact, or posture';
+    }
+    if (/behaviorism|autonomic|trope|shorthand/.test(text)) {
+        return 'observable consequential behavior that changes action, speech, distance, object handling, timing, contact, or posture';
+    }
+    return 'literal, directly observable prose that preserves the same facts and outcome';
+}
+
+function repairAcknowledgementForRule(rule) {
+    const text = String(rule || '').toLowerCase();
+    if (/agency|chronology|separation|t\+1/.test(text)) {
+        return 'I will strictly abide by agencyEnforcement and chronologyEnforcement. I will not violate user agency, echo the user action, or continue the user character action.';
+    }
+    if (/question|turn/.test(text)) {
+        return 'I will strictly abide by turnEnforcement. I will not let the same NPC continue after a response-required beat.';
+    }
+    if (/name|naming|western|candidate/.test(text)) {
+        return 'I will strictly abide by the NameGenerationEngine. I will not use generic modern-Western or overused Western-fantasy revealed names.';
+    }
+    if (/handoff|final beat/.test(text)) {
+        return 'I will strictly abide by handoffEnforcement. I will not end on idle waiting, filler, or a non-actionable beat.';
+    }
+    if (/consent/.test(text)) {
+        return 'I will strictly abide by agencyEnforcement consent boundaries. I will not let denied intimate contact land.';
+    }
+    if (/olfactory|sensory|smell|taste/.test(text)) {
+        return 'I will strictly abide by olfactoryGate and sensoryEnforcement. I will not use locked smell or taste as ambient mood shorthand.';
+    }
+    if (/ability/.test(text)) {
+        return 'I will strictly abide by abilityIntegration. I will not announce activation, ability labels, system terms, or hidden causes.';
+    }
+    if (/inanimate|abstract|objectivity|personification/.test(text)) {
+        return 'I will strictly abide by materialEnforcement. I will not give abstractions or inanimate things living agency.';
+    }
+    if (/literalism|figurative|comparison|metaphor|simile/.test(text)) {
+        return 'I will strictly abide by literalismEnforcement. I will not use metaphor, simile, idiom, hyperbole, or poetic comparison.';
+    }
+    if (/pathetic/.test(text)) {
+        return 'I will strictly abide by materialEnforcement. I will not use pathetic fallacy or mood-object atmosphere.';
+    }
+    if (/melodrama|emotional physics/.test(text)) {
+        return 'I will strictly abide by styleEnforcement and literalismEnforcement. I will not use melodrama or emotional physics.';
+    }
+    if (/behaviorism|autonomic|trope|shorthand/.test(text)) {
+        return 'I will strictly abide by behavioralEnforcement. I will not use lazy emotional shorthand or stock autonomic cues.';
+    }
+    return 'I will strictly abide by the Grounded Writing Engine. I will not repeat the cited violation or any equivalent workaround.';
+}
+
+function unwantedRepairBehaviorForRule(rule) {
+    const text = String(rule || '').toLowerCase();
+    if (/agency|chronology|separation|t\+1/.test(text)) {
+        return 'user speech, thoughts, decisions, voluntary actions, recap, echo, paraphrase, or continued user action';
+    }
+    if (/question|turn/.test(text)) {
+        return 'the same NPC speaking or acting again after targeting the user with a response-requiring beat';
+    }
+    if (/name|naming|western|candidate/.test(text)) {
+        return 'generic modern-Western or Western-fantasy names such as Garrick, Cedric, Alaric, Marcus, Dorian, Coran, or Denan';
+    }
+    if (/handoff|final beat/.test(text)) {
+        return 'idle waiting, position-holding, atmospheric filler, or non-actionable endings';
+    }
+    if (/consent/.test(text)) {
+        return 'denied intimate contact landing or new unearned contact';
+    }
+    if (/olfactory|sensory|smell|taste/.test(text)) {
+        return 'ambient smell, taste, tasting the air, or romanticized odor language';
+    }
+    if (/ability/.test(text)) {
+        return 'ability labels, activation language, system terms, or hidden-cause explanations';
+    }
+    if (/inanimate|abstract|objectivity|personification/.test(text)) {
+        return 'personification, abstract physical agency, or inanimate objects acting like living agents';
+    }
+    if (/literalism|figurative|comparison|metaphor|simile/.test(text)) {
+        return 'metaphor, simile, poetic image, idiom, hyperbole, or abstract comparison';
+    }
+    if (/pathetic/.test(text)) {
+        return 'pathetic fallacy, mood-object atmosphere, or weather/darkness/rooms mirroring emotion';
+    }
+    if (/melodrama|emotional physics/.test(text)) {
+        return 'theatrical emotional physics, abstract pressure, weight, rupture, electricity, heat, impact, or suspended time';
+    }
+    if (/behaviorism|autonomic|trope|shorthand/.test(text)) {
+        return 'stock autonomic cues, canned hesitation micro-beats, negative-expression shorthand, facial/breath punctuation, or metaphorized emotion';
+    }
+    return 'the cited violation or any equivalent workaround';
+}
+
+function repairInstructionForRule(rule) {
+    const text = String(rule || '').toLowerCase();
+    if (/user|agency|recap|echo|paraphrase|chronology|separation|t\+1/.test(text)) {
+        return 'Remove user speech, thoughts, decisions, recap, echo, paraphrase, or new/continued user action. Begin at the consequence, result, NPC reaction, environmental change, or new stimulus.';
+    }
+    if (/question|turn/.test(text)) {
+        return 'After an NPC says or does something requiring the user response, remove any further speech or action from that same NPC for this turn. Do not force or answer the user response.';
+    }
+    if (/name|naming|western|candidate/.test(text)) {
+        return 'Replace the generic revealed name with the next matching reserved candidate from the name handoff. If no candidate exists, generate one clean fantasy-native name that is not ordinary modern-Western or generic Western-fantasy.';
+    }
+    if (/idle|waiting|filler/.test(text)) {
+        return 'Remove the idle waiting/filler ending. Stop at the useful answer, concrete consequence, direct question, or action that already gives the user something to respond to.';
+    }
+    if (/intimacy|consent/.test(text)) {
+        return 'Rewrite so denied intimate contact is blocked, refused, interrupted, or avoided before it lands. Do not add new relationship changes or new contact.';
+    }
+    if (/smell|taste|sensory/.test(text)) {
+        return 'Remove smell or taste narration unless the user explicitly smelled, tasted, ate, drank, or the source is immediate and overpowering.';
+    }
+    if (/ability|system/.test(text)) {
+        return 'Remove system/ability labeling and write only directly perceivable effects. Do not explain hidden causes.';
+    }
+    if (/personification|abstract/.test(text)) {
+        return 'Remove agency from abstractions or inanimate things. Replace with literal speech, visible movement, object handling, distance, timing, contact, or a clean stop.';
+    }
+    if (/metaphor|simile|poetic/.test(text)) {
+        return 'Remove the comparison or poetic image. Replace with the literal visible event.';
+    }
+    if (/pathetic|fallacy|atmosphere/.test(text)) {
+        return 'Remove mood or intent from weather, darkness, air, room, silence, or atmosphere. Describe only literal physical conditions or actor behavior.';
+    }
+    if (/melodrama|emotional physics/.test(text)) {
+        return 'Remove theatrical emotional physics. Do not make feelings, words, truth, silence, or tension act like weight, pressure, rupture, impact, heat, electricity, or suspended time.';
+    }
+    if (/lazy|shorthand|autonomic|negative-expression|emotion/.test(text)) {
+        return 'Replace the cited phrase with concrete observable behavior that changes action, speech, distance, object handling, timing, contact, or posture.';
+    }
+    return 'Rewrite only the cited phrase using literal, directly observable prose while preserving the same outcome and facts.';
+}
+
+async function validateGroundedWriting(messageId, type) {
+    const cfg = settings();
+    if (!cfg.enabled || !cfg.injectHandoff || !cfg.enableRenderRules) return;
+    if (type === 'quiet') return;
+    if (writingRepairSuppressed) return;
+    const latestAssistantId = resolveAssistantMessageId();
+    if (!Number.isFinite(latestAssistantId) || latestAssistantId < 0) return;
+    const requestedId = Number(messageId);
+    if (Number.isFinite(requestedId) && requestedId >= 0 && requestedId !== latestAssistantId) return;
+    messageId = latestAssistantId;
+    if (writingValidationRunning) {
+        pendingWritingValidation = { messageId, type };
+        return;
+    }
+    if (resolving) {
+        pendingWritingValidation = { messageId, type };
+        return;
+    }
+
+    const message = getMessageById(messageId);
+    if (!message || message.is_user || message.is_system || message.extra?.type === 'narrator') return;
+    const response = messageText(message).trim();
+    if (!response) return;
+    if (/^(thinking|generating)\.{3}$/i.test(response)) {
+        scheduleGroundedWritingValidation(messageId, type, 2500);
+        return;
+    }
+    const userInput = getPreviousUserMessageStrictForId(messageId);
+    if (!userInput) return;
+    if (/^\s*\(\((?!\()[\s\S]*\)\)\s*$/.test(userInput)) {
+        resetWritingRepairState({ keepSnapshot: true });
+        return;
+    }
+    const signature = makeWritingValidationSignature(messageId, response);
+    if (!writingRepairState.active && signature === lastGroundedWritingValidationSignature) return;
+
+    if (writingRepairState.active) {
+        writingRepairState.active = false;
+        setExtensionPrompt(WRITING_REPAIR_PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
+        await runGroundedWritingAudit({ messageId, response, repaired: true, allowRegenerate: true, signature });
+        return;
+    }
+
+    await runGroundedWritingAudit({ messageId, response, repaired: false, allowRegenerate: true, signature });
+}
+
+function scheduleGroundedWritingValidation(messageId, type, delay = 2500) {
+    if (writingRepairSuppressed) return;
+    if (quietGenerationDepth > 0 || String(type || '').toLowerCase() === 'quiet') return;
+    const id = Number(messageId);
+    if (!Number.isFinite(id) || id < 0) return;
+    const existing = writingValidationTimers.get(id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+        writingValidationTimers.delete(id);
+        validateGroundedWriting(id, type);
+    }, delay);
+    writingValidationTimers.set(id, timer);
+}
+
+async function runGroundedWritingAudit({ messageId, response, repaired, allowRegenerate, signature = '' }) {
+    writingValidationRunning = true;
+    try {
+        const userInput = getPreviousUserMessageStrictForId(messageId);
+        if (!userInput) return;
+        const deterministic = deterministicWritingPrecheck(response, userInput, tracker());
+        if (deterministic.valid === false) {
+            deterministic.at = new Date().toISOString();
+            deterministic.messageId = Number(messageId);
+            deterministic.repaired = !!repaired;
+            deterministic.repairAttempts = writingRepairState.attempts;
+            saveWritingAudit(deterministic);
+            lastGroundedWritingValidationSignature = signature || makeWritingValidationSignature(messageId, response);
+            if (allowRegenerate) {
+                await scheduleWritingRepair(deterministic);
+            }
+            return;
+        }
+
+        const prompt = buildGroundedWritingValidatorPrompt({
+            userInput,
+            response,
+            trackerSummary: JSON.stringify(summarizeTracker(tracker())),
+        });
+        const raw = await generateQuietPromptWithTimeout({
+            quietPrompt: `${prompt}\n\nReturn exactly one compact JSON object only. No markdown, no prose, no commentary.`,
+            skipWIAN: true,
+            responseLength: 1200,
+            removeReasoning: true,
+        }, Math.min(Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000), 120000));
+        const parsed = normalizeWritingAudit(parseJsonResponse(raw), raw, response);
+        parsed.at = new Date().toISOString();
+        parsed.messageId = Number(messageId);
+        parsed.repaired = !!repaired;
+        parsed.repairAttempts = writingRepairState.attempts;
+        saveWritingAudit(parsed);
+        lastGroundedWritingValidationSignature = signature || makeWritingValidationSignature(messageId, response);
+
+        if (allowRegenerate && !writingRepairSuppressed && parsed.valid === false) {
+            await scheduleWritingRepair(parsed);
+        } else if (parsed.valid !== false) {
+            resetWritingRepairState({ keepSnapshot: true });
+        }
+    } catch (error) {
+        console.warn('[RP Engine Tracker] Grounded writing validation failed.', error);
+        lastGroundedWritingValidationSignature = signature || makeWritingValidationSignature(messageId, response);
+        clearWritingValidationQueue();
+        resetWritingRepairState();
+        const current = tracker();
+        current.lastWritingAudit = {
+            at: new Date().toISOString(),
+            valid: null,
+            severity: 'validator_error',
+            violations: [{ rule: 'Validator', evidence: '', problem: String(error?.message || error) }],
+            repaired: !!repaired,
+        };
+        current.lastAudit = current.lastAudit || {};
+        current.lastAudit.writingAudit = current.lastWritingAudit;
+        chat_metadata[METADATA_KEY] = current;
+        saveTracker();
+        renderPanel();
+    } finally {
+        writingValidationRunning = false;
+        const pending = pendingWritingValidation;
+        pendingWritingValidation = null;
+        if (pending && Number(pending.messageId) !== Number(messageId)) {
+            setTimeout(() => validateGroundedWriting(pending.messageId, pending.type), 0);
+        }
+    }
+}
+
+function normalizeWritingAudit(parsed, raw, response = '') {
+    if (!parsed || typeof parsed !== 'object') {
+        return {
+            valid: null,
+            severity: 'validator_error',
+            violations: [{
+                rule: 'Validator',
+                evidence: String(raw || '').slice(0, 160),
+                problem: 'Grounded Writing Validator did not return parseable JSON.',
+            }],
+            repairInstructions: 'Validator failed; no automatic repair was attempted.',
+        };
+    }
+    const result = parsed && typeof parsed === 'object' ? parsed : {};
+    const violations = Array.isArray(result.violations)
+        ? result.violations.map(item => ({
+            rule: String(item?.rule || 'Grounded Writing Engine').slice(0, 80),
+            evidence: String(item?.evidence || '').slice(0, 160),
+            problem: String(item?.problem || '').slice(0, 220),
+        })).filter(item => item.problem || item.evidence)
+            .filter(item => isDirectWritingViolation(item, response))
+        : [];
+    const rawValid = typeof result.valid === 'boolean' ? result.valid : violations.length === 0;
+    const severity = ['pass', 'minor', 'major'].includes(result.severity) ? result.severity : (rawValid ? 'pass' : 'major');
+    const valid = violations.length ? false : true;
+    return {
+        valid,
+        severity: valid ? 'pass' : severity,
+        violations,
+        repairInstructions: String(valid ? '' : (result.repairInstructions || raw || '')).slice(0, 500),
+    };
+}
+
+function isDirectWritingViolation(item, response) {
+    const evidence = String(item?.evidence || '').trim();
+    if (!evidence || !containsVisibleEvidence(response, evidence)) return false;
+    const categoryText = `${item?.rule || ''} ${item?.problem || ''}`.toLowerCase();
+    if (isDialoguePermissiveWritingCategory(categoryText) && evidenceInsideQuotedDialogue(response, evidence)) {
+        return false;
+    }
+    return /personification|abstract|metaphor|simile|pathetic|fallacy|melodrama|emotional physics|lazy|autonomic|shorthand|negative-expression|negative expression|sensory|smell|taste|ability|system term|user agency|user action|recap|echo|paraphrase|turn-boundary|turn boundary|question|idle filler|waiting|denied intimacy|consent|name style|name generation|generic western|candidate priority/.test(categoryText);
+}
+
+function isDialoguePermissiveWritingCategory(categoryText) {
+    const text = String(categoryText || '').toLowerCase();
+    if (/user agency|user action|recap|echo|paraphrase|turn-boundary|turn boundary|denied intimacy|consent|mechanic|system term|ability/.test(text)) {
+        return false;
+    }
+    return /personification|abstract|metaphor|simile|pathetic|fallacy|melodrama|emotional physics|lazy|autonomic|shorthand|negative-expression|negative expression|sensory|smell|taste|poetic|atmosphere/.test(text);
+}
+
+function evidenceInsideQuotedDialogue(response, evidence) {
+    const normalizedEvidence = normalizeEvidenceText(evidence);
+    if (normalizedEvidence.length < 4) return false;
+    return extractQuotedDialogue(response).some(segment => normalizeEvidenceText(segment).includes(normalizedEvidence));
+}
+
+function extractQuotedDialogue(value) {
+    const source = String(value || '');
+    const segments = [];
+    for (const match of source.matchAll(/"([^"\n]*)(?:"|$)/g)) {
+        if (match[1]) segments.push(match[1]);
+    }
+    for (const match of source.matchAll(/[“]([^”\n]*)(?:[”]|$)/g)) {
+        if (match[1]) segments.push(match[1]);
+    }
+    return segments;
+}
+
+function containsVisibleEvidence(response, evidence) {
+    const text = String(response || '');
+    const raw = String(evidence || '').trim();
+    if (raw.length < 4) return false;
+    const candidates = uniqueLocal([
+        raw,
+        raw.replace(/^["'“”‘’]+|["'“”‘’]+$/g, ''),
+        raw.replace(/^Evidence:\s*/i, ''),
+    ]).filter(x => x.length >= 4);
+    const normalizedText = normalizeEvidenceText(text);
+    return candidates.some(candidate => {
+        const normalized = normalizeEvidenceText(candidate);
+        return normalized.length >= 4 && normalizedText.includes(normalized);
+    });
+}
+
+function normalizeEvidenceText(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/[“”]/g, '"')
+        .replace(/[‘’]/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function stripQuotedDialogue(value) {
+    return String(value || '')
+        .replace(/"[^"\n]*(?:"|$)/g, ' ')
+        .replace(/[“][^”\n]*(?:[”]|$)/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function deterministicWritingPrecheck(response, userInput = '', currentTracker = null) {
+    const text = String(response || '');
+    const narratorText = stripQuotedDialogue(text);
+    const proxyNarration = /^\s*\(\(\([\s\S]*\)\)\)\s*$/.test(String(userInput || ''));
+    const checks = [
+        {
+            rule: 'Lazy autonomic shorthand',
+            pattern: /\b(blush(?:es|ed|ing)?|flush(?:es|ed|ing)?|cheeks?\s+(?:heat|heated|heats|redden|reddened|color|colored|pink|pinked|burn|burned)|ears?\s+(?:redden|reddened|heat|heated)|heart\s+(?:flutter(?:s|ed|ing)?|pound(?:s|ed|ing)?|race(?:s|d)?|skip(?:s|ped)?))\b/i,
+            problem: 'Uses stock autonomic emotion cue instead of physical behavior with scene effect.',
+        },
+        {
+            rule: 'Canned hesitation micro-beat',
+            pattern: /\b(?:mouth\s+(?:opens?|opened)[^.!?]{0,80}\b(?:closes?|closed)\b(?:[^.!?]{0,80}\b(?:opens?|opened)\b(?:\s+again)?)?|mouth\b[^.!?]{0,120}\b(?:opens?|opened|closes?|closed|press(?:es|ed)?\s+shut|shuts?)\b[^.!?]{0,120}\b(?:opens?|opened|closes?|closed|press(?:es|ed)?\s+shut|shuts?)\b|lips?\b[^.!?]{0,120}\b(?:part(?:s|ed|ing)?|separate(?:s|d|ing)?|open(?:s|ed|ing)?)\b[^.!?]{0,120}\b(?:close(?:s|d|ing)?|shut(?:s|ting)?)\b|opens?\s+(?:and\s+)?closes?\s+(?:and\s+)?opens?\s+again|(?:jaw|mouth)\s+(?:moves?|moved|shifts?|shifted)\s+(?:once\s+)?(?:as\s+if|like)\s+(?:he|she|they)?\s*(?:is|was|were|are)?\s*(?:about\s+to|going\s+to|trying\s+to)\s+(?:speak|answer|reply|say)|(?:about\s+to|almost|nearly)\s+(?:speak|answer|reply|say)[^.!?]{0,80}\b(?:stop(?:s|ped)?|does\s+not|doesn't|falls?\s+silent)|(?:pulse|vein)\s+(?:at\s+(?:his|her|their)\s+temple\s+)?(?:ticks?|ticked|throbs?|throbbed|jumps?|jumped)|(?:temple|vein)\s+[^.!?]{0,40}\b(?:ticks?|ticked|throbs?|throbbed|jumps?|jumped)|throat\s+(?:bob(?:s|bed|bing)?|tighten(?:s|ed|ing)?)|swallow(?:s|ed|ing)?\s+(?:hard|thickly|visibly|again)|(?:jaw|mouth)\s+(?:shifts?|shifted|moves?|moved|sets?|set|clench(?:es|ed|ing)?|works?|worked|tightens?|tightened|hardens?|hardened|locks?|locked)|(?:set|clenched|tight|tightened|hard|locked)\s+jaw|(?:facial|jaw|cheek)\s+muscles?\s+(?:jump(?:s|ed|ing)?|tick(?:s|ed|ing)?|tense(?:s|d|ing)?)|muscle\s+tens(?:es|ed|ing)\s+along\s+(?:the\s+)?(?:jaw|bone|cheek)|(?:breath|breathing)\s+(?:hitch(?:es|ed|ing)?|catch(?:es|ing)?|caught)|exhal(?:es|ed|ing)\s+through\s+(?:his|her|their)\s+nose|fingers?\s+twitch(?:es|ed|ing)?|knuckles?\s+(?:(?:are|were|is|was|turn(?:s|ed)?|go(?:es|ing)?|went)\s+)?(?:white|pale|paler|bloodless|whiten(?:s|ed|ing)?|palen(?:s|ed|ing)?)|(?:white|pale|bloodless|whitening|paling)\s+knuckles?)\b/i,
+            problem: 'Uses canned hesitation/anxiety shorthand instead of consequential action, speech, distance, object use, or timing.',
+        },
+        {
+            rule: 'Negative-expression shorthand',
+            pattern: /\b(?:(?:he|she|they|[A-Z][A-Za-z'-]{1,30})\s+(?:does\s+not|doesn't|did\s+not|didn't)\s+(?:smile|look\s+away|blink|laugh)|without\s+blinking|smile\s+(?:does\s+not|doesn't|did\s+not|didn't)\s+reach\s+(?:his|her|their)\s+eyes)\b/i,
+            problem: 'Uses absence or negated expression as emotional shorthand instead of concrete consequential behavior.',
+        },
+        {
+            rule: 'Metaphorized emotion shorthand',
+            pattern: /\b(?:(?:warmth|coldness|cold|heat|light|shadow|softness|hardness|music)\s+(?:(?:that\s+)?(?:lived|sat|rested|stayed)\s+(?:there|in\s+(?:his|her|their)\s+(?:eyes?|gaze|voice))|(?:is|was|goes?|went|has\s+gone|had\s+gone)\s+(?:gone|left|missing|dead|absent))|(?:no|not\s+any)\s+(?:warmth|music|softness|light)\s+(?:is\s+|was\s+)?(?:left|remains?)\s+in\s+(?:his|her|their)\s+(?:eyes?|gaze|voice)|(?:his|her|their)\s+(?:eyes?|gaze|voice)\s+(?:go(?:es|ing)?|went|turn(?:s|ed)?|become(?:s)?|became)\s+(?:cold|hard|soft|empty|flat|dead|warm)|(?:voice|gaze|eyes?)\s+(?:is|are|was|were|goes?|went|turns?|turned)\s+(?:cold|hard|soft|empty|flat|dead|warm)|(?:voice|words?)\s+(?:had|has|with)\s+(?:no|not\s+any)\s+(?:music|warmth|softness|light))\b/i,
+            problem: 'Uses metaphorized emotion in eyes, gaze, voice, warmth, coldness, music, light, or shadow instead of literal observable behavior.',
+        },
+        {
+            rule: 'Atmospheric abstraction',
+            pattern: /\b(?:the\s+)?(?:air|silence|quiet|tension|moment|atmosphere|room|world)\s+(?:(?:settles?|settled|stretches?|stretched|hangs?|hung|thickens?|thickened|presses?|pressed|hum(?:s|med)?|breathes?|breathed|shrinks?|shrank|narrows?|narrowed|suspends?|suspended|draws?|drew|tightens?|tightened)|(?:(?:falls?|fell|is|was)\s+(?:complete|absolute|total|heavy|thick|loud|deafening)))\b/i,
+            problem: 'Gives abstraction or atmosphere physical agency instead of concrete scene action.',
+        },
+        {
+            rule: 'Melodramatic emotional physics',
+            pattern: /\b(?:(?:heart|soul|mind|something\s+inside\s+(?:him|her|them)|world|room|moment|truth|words?|silence|quiet|tension|air|sound|noise|voice|cry|scream)\s+(?:shatter(?:s|ed|ing)?|break(?:s|ing)?|broke|crack(?:s|ed|ing)?|collapse(?:s|d|ing)?|drop(?:s|ped|ping)?|hit(?:s)?|land(?:s|ed|ing)?|press(?:es|ed|ing)?|weigh(?:s|ed|ing)?|hang(?:s|ing)?|hung|burn(?:s|ed|ing)?|crawl(?:s|ed|ing)?|claw(?:s|ed|ing)?|drag(?:s|ged|ging)?|flood(?:s|ed|ing)?|thunder(?:s|ed|ing)?|darken(?:s|ed|ing)?|soften(?:s|ed|ing)?|electric)|(?:sound|noise|voice|cry|scream)\s+[^.!?]{0,80}\b(?:into|through|up|out\s+of)\s+(?:silence|throat|chest)|(?:the\s+)?weight\s+of\s+(?:his|her|their|the)?\s*words?|unspoken\s+words?|every\s+breath\s+felt\s+like|tension\s+was\s+electric|truth\s+landed\s+like|like\s+a\s+blow|like\s+a\s+leaf|look(?:ed)?\s+like\s+(?:he|she|they)\s+might\s+fall\s+apart)\b/i,
+            problem: 'Uses melodramatic emotional physics, theatrical abstraction, or stock comparison instead of literal observable behavior.',
+        },
+        {
+            rule: 'Poetic abstraction or simile',
+            pattern: /\b(?:(?:names?|words?|truth|lies?|answer|question|promise|confession|accusation|silence|quiet|stillness|tension|moment)\s+(?:land(?:s|ed|ing)?|settle(?:s|d|ing)?|fall(?:s|fell|en|ing)?|drop(?:s|ped|ping)?|hang(?:s|hung|ing)?|float(?:s|ed|ing)?|drift(?:s|ed|ing)?|ripple(?:s|d|ing)?|sink(?:s|ing)?|press(?:es|ed|ing)?|cut(?:s|ting)?|slice(?:s|d|ing)?|soften(?:s|ed|ing)?|spread(?:s|ing)?)|(?:land(?:s|ed|ing)?|settle(?:s|d|ing)?|fall(?:s|fell|en|ing)?|drop(?:s|ped|ping)?)\s+(?:softly?|hard|heavy|lightly)?\s*(?:as|like)\s+(?:a|an|the)\s+(?:leaf|stone|knife|blade|weight|hammer|blow|storm|wave|tide|shadow|ghost|prayer|flame|spark)|(?:as|like)\s+(?:a|an|the)\s+(?:leaf|stone|knife|blade|weight|hammer|blow|storm|wave|tide|shadow|ghost|prayer|flame|spark)\b)/i,
+            problem: 'Uses poetic simile, metaphor, or abstract physical action instead of literal observable behavior.',
+        },
+        {
+            rule: 'Idle filler ending',
+            pattern: /(?:^|[.!?]\s+)(?:he|she|they|he's|she's|they're|the\s+(?:man|woman|guard|merchant|apothecary|bartender|barmaid|girl|boy|npc)|[A-Z][A-Za-z'-]{1,30})\s+(?:(?:is|are|'s|'re)\s+)?(?:still\s+)?(?:lowers?\s+(?:his|her|their)\s+hand\s+and\s+)?(?:waits?|waiting|stands?|standing|stays?|staying|remains?|remaining|holds?\s+(?:still|position)|holding\s+(?:still|position))\s*(?:for\s+(?:you|your\s+(?:answer|response|reply))|for\s+you\s+to\s+[^.!?]+)?\s*[.!?]?\s*$/i,
+            problem: 'Ends with idle waiting or position-holding filler instead of stopping at the concrete consequence or useful answer.',
+        },
+    ];
+    const violations = [];
+    for (const check of checks) {
+        const match = narratorText.match(check.pattern);
+        if (match) {
+            violations.push({
+                rule: check.rule,
+                evidence: match[0],
+                problem: check.problem,
+            });
+        }
+    }
+    const nameViolation = detectGenericNameReveal(text, currentTracker);
+    if (nameViolation) {
+        violations.push(nameViolation);
+    }
+    if (!proxyNarration) {
+        const firstChunk = text.trim().slice(0, 320);
+        const agencyMatch = firstChunk.match(/^(?:["“']?\s*)?(?:(?:as|when|while)\s+you\b|you\s+(?:say|said|ask|asked|tell|told|decide|decided|choose|chose|think|thought|feel|felt|realize|realized|notice|noticed|move|moved|step|stepped|reach|reached|slide|slid|sneak|sneaked|slip|slipped|walk|walked|run|ran|swing|swung|stab|slash|kick|punch|kiss|grab|take|took|press|pressed|try|tried|start|started|begin|began)\b)/i);
+        if (agencyMatch) {
+            violations.push({
+                rule: 'User action recap',
+                evidence: agencyMatch[0],
+                problem: 'Normal IC narration begins by repeating or continuing the user action instead of starting at the consequence, result, NPC reaction, or new stimulus. Use triple parentheses for proxy narration.',
+            });
+        }
+        const userActionTakeover = text.match(/(?:^|[.!?]\s+)(?:you\s+(?:stumble|stumbled|drop|dropped|fall|fell|step|stepped|move|moved|reach|reached|extend|extended|pull|pulled|push|pushed|grab|grabbed|take|took|run|ran|walk|walked|turn|turned|pivot|pivoted|slide|slid|slip|slipped|sneak|sneaked|kiss|kissed|speak|spoke|say|said|ask|asked|answer|answered|decide|decided|choose|chose|try|tried)\b|(?:your|the\s+user's)\s+(?:arm|arms|hand|hands|finger|fingers|leg|legs|foot|feet|body|shoulder|shoulders|head|mouth|voice|eyes?)\s+(?:extend|extends|extended|reach|reaches|reached|move|moves|moved|slide|slides|slid|slip|slips|slipped|pull|pulls|pulled|push|pushes|pushed|grab|grabs|grabbed|drop|drops|dropped|turn|turns|turned|pivot|pivots|pivoted|jerk|jerks|jerked|snap|snaps|snapped|say|says|said|ask|asks|asked)\b)/i);
+        if (userActionTakeover) {
+            violations.push({
+                rule: 'User agency takeover',
+                evidence: userActionTakeover[0].trim(),
+                problem: 'Normal IC narration takes over the user character body, speech, or decision. Narrate consequences and NPC/environment response, not new user actions. Use triple parentheses for proxy narration.',
+            });
+        }
+    }
+    const packet = currentTracker?.lastAudit?.resolutionPacket || null;
+    if (packet?.GOAL === 'IntimacyAdvancePhysical' && packet?.IntimacyConsent === 'N') {
+        const intimacyLanded = text.match(/\b(?:your|his|her|their|the\s+user(?:'s)?)\s+(?:mouth|lips|hand|hands|fingers|body|chest|hips)\b[^.!?]{0,120}\b(?:press(?:es|ed|ing)?|touch(?:es|ed|ing)?|meet(?:s|ing)?|met|land(?:s|ed|ing)?|connect(?:s|ed|ing)?|close(?:s|d)?\s+around|slide(?:s|d)?\s+(?:over|under|across|into)|grip(?:s|ped|ping)?|grab(?:s|bed|bing)?)\b[^.!?]{0,120}\b(?:his|her|their|[A-Z][A-Za-z'-]{1,40}(?:'s)?)?\s*(?:mouth|lips|skin|face|cheek|jaw|hair|throat|neck|chest|breast|waist|hip|hips|thigh|thighs|groin|body|hand|hands|arm|arms|wrist|wrists)\b/i)
+            || text.match(/\b(?:kiss(?:es|ed|ing)?|grope(?:s|d|ing)?|fondle(?:s|d|ing)?|caress(?:es|ed|ing)?)\b[^.!?]{0,120}\b(?:him|her|them|[A-Z][A-Za-z'-]{1,40})\b/i);
+        if (intimacyLanded) {
+            violations.push({
+                rule: 'Denied intimacy landed',
+                evidence: intimacyLanded[0],
+                problem: 'The consent gate denied the physical intimacy advance, so intimate contact must be blocked, refused, interrupted, or avoided before it lands.',
+            });
+        }
+    }
+    return {
+        valid: violations.length === 0,
+        severity: violations.length ? 'major' : 'pass',
+        violations,
+        repairInstructions: violations.length
+            ? 'Regenerate with concrete observable behavior and remove personification, metaphor/simile, pathetic fallacy, melodrama, lazy emotional shorthand, and atmospheric abstraction.'
+            : '',
+    };
+}
+
+function detectGenericNameReveal(response, currentTracker = null) {
+    const text = String(response || '');
+    const revealPatterns = [
+        /\b(?:my\s+name\s+is|name['’]s|call\s+me|they\s+call\s+me|I\s+am|I'm)\s+([A-Z][a-z]{3,14})\b/g,
+        /\b(?:called|known\s+as|named)\s+([A-Z][a-z]{3,14})\b/g,
+    ];
+    const allowed = knownNameSetForValidation(currentTracker);
+    for (const pattern of revealPatterns) {
+        for (const match of text.matchAll(pattern)) {
+            const name = String(match[1] || '').trim();
+            if (!name || allowed.has(normalizeValidationName(name))) continue;
+            if (!isGenericWesternFantasyRevealName(name)) continue;
+            return {
+                rule: 'Name style violation',
+                evidence: match[0],
+                problem: `Reveals generic modern-Western or Western-fantasy name "${name}" instead of using the reserved fantasy-native candidate or generating a stricter fantasy-native name.`,
+            };
+        }
+    }
+    return null;
+}
+
+function knownNameSetForValidation(currentTracker = null) {
+    const names = [];
+    const state = currentTracker?.nameState || {};
+    const reserved = state.reserved || {};
+    for (const bucket of ['person', 'male', 'female', 'neutral', 'location']) {
+        if (Array.isArray(reserved[bucket])) names.push(...reserved[bucket]);
+    }
+    if (Array.isArray(state.used)) names.push(...state.used);
+    if (currentTracker?.npcs && typeof currentTracker.npcs === 'object') {
+        for (const npc of Object.values(currentTracker.npcs)) {
+            if (npc?.name) names.push(npc.name);
+            if (Array.isArray(npc?.aliases)) names.push(...npc.aliases);
+        }
+    }
+    return new Set(names.map(normalizeValidationName).filter(Boolean));
+}
+
+function normalizeValidationName(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isGenericWesternFantasyRevealName(name) {
+    const text = String(name || '').trim();
+    if (!/^[A-Z][a-z]+$/.test(text)) return false;
+    if (/^(Garrick|Cedric|Alaric|Ulric|Edric|Aldric|Osric|Baldric|Marcus|Dorian|Doran|Coran|Denan|Ronan|Logan|Ethan|Owen|Loren|Kellen|Torin|Darren|Gareth|Roland|Edwin|Godwin|Harlan|Hadrian|Adrian|Tristan|Brandon|Duncan|John|Sarah|Elena|Pedro)$/i.test(text)) {
+        return true;
+    }
+    return /(?:rick|ric|rik|dric|bert|ard|win|son|ton|ley|ly)$/i.test(text);
+}
+
+function saveWritingAudit(audit) {
+    const current = tracker();
+    current.lastWritingAudit = audit;
+    current.lastAudit = current.lastAudit || {};
+    current.lastAudit.writingAudit = audit;
+    chat_metadata[METADATA_KEY] = current;
+    saveTracker();
+    renderPanel();
+}
+
+function renderPanel() {
+    const cfg = settings();
+    const root = $('#rp_engine_tracker_panel');
+    if (!root.length) return;
+
+    root.toggleClass('rp-engine-hidden', !cfg.showPanel);
+    root.toggleClass('rp-engine-collapsed', !!cfg.panelCollapsed);
+    root.find('#rp_engine_tracker_collapse')
+        .attr('title', cfg.panelCollapsed ? 'Expand tracker' : 'Collapse tracker')
+        .html('<i class="fa-solid fa-book-open"></i>');
+
+    const data = summarizeTracker(tracker());
+    const audit = data.lastAudit;
+    const userLabel = data.user?.name || name1 || 'User';
+    const presentHtml = data.present.length
+        ? data.present.map(renderNpc).join('')
+        : '<div class="rp-engine-muted">No present NPCs initialized.</div>';
+    const absentHtml = data.absent.length
+        ? data.absent.map(renderNpc).join('')
+        : '<div class="rp-engine-muted">No absent NPCs tracked.</div>';
+    const showAbsent = !(cfg.enableNpcArchive && cfg.pruneArchivedAbsentNpcs);
+    const inventoryHtml = data.inventory.length
+        ? `<ul>${data.inventory.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
+        : '<div class="rp-engine-muted">No inventory tracked yet.</div>';
+    const pendingHtml = data.pendingTasks.length
+        ? `<ul class="rp-engine-task-list">${data.pendingTasks.map(renderTask).join('')}</ul>`
+        : '<div class="rp-engine-muted">No pending tasks tracked yet.</div>';
+    const auditHtml = audit ? renderAudit(audit) : '<div class="rp-engine-muted">No audit yet.</div>';
+    const writingReportHtml = renderWritingViolationReport(tracker().lastWritingAudit || audit?.writingAudit || null);
+    const creatorHtml = shouldShowCharacterCreatorPrompt()
+        ? `<section class="rp-engine-creator-prompt">
+            <h4>New Character</h4>
+            <div class="rp-engine-muted">No user messages detected in this chat. Create a Persona-ready character sheet?</div>
+            <button id="rp_engine_panel_open_creator" type="button">Create Character</button>
+            <button id="rp_engine_panel_skip_creator" type="button">Not Now</button>
+        </section>`
+        : '';
+
+    root.find('.rp-engine-body').html(`
+        ${creatorHtml}
+        <section>
+            <h4>Scene</h4>
+            <div>${escapeHtml(data.scene.location || 'Unknown location')}</div>
+            <div class="rp-engine-muted">${renderSceneTime(data.scene, data.worldClock)}</div>
+        </section>
+        <details open>
+            <summary>Present NPCs</summary>
+            ${presentHtml}
+        </details>
+        ${showAbsent ? `<details>
+            <summary>Absent NPCs</summary>
+            ${absentHtml}
+        </details>` : ''}
+        <section>
+            <h4>${escapeHtml(userLabel)}</h4>
+            <div class="rp-engine-statline">PHY ${data.user.stats.PHY} | MND ${data.user.stats.MND} | CHA ${data.user.stats.CHA}</div>
+            <div class="rp-engine-muted">${escapeHtml(data.user.condition || 'unknown condition')}</div>
+        </section>
+        <details>
+            <summary>Inventory for ${escapeHtml(userLabel)}</summary>
+            ${inventoryHtml}
+        </details>
+        <details open>
+            <summary>Pending Tasks for ${escapeHtml(userLabel)}</summary>
+            ${pendingHtml}
+        </details>
+        <details ${cfg.debug ? 'open' : ''}>
+            <summary>Audit</summary>
+            ${auditHtml}
+        </details>
+        <section class="rp-engine-writing-report">
+            <button id="rp_engine_toggle_writing_report" type="button">
+                <i class="fa-solid fa-pen-to-square"></i>
+                Writing Violations
+            </button>
+            ${writingViolationReportOpen ? writingReportHtml : ''}
+        </section>
+    `);
+    root.find('#rp_engine_panel_open_creator').off('click').on('click', () => openCharacterCreatorDialog({ manual: true }));
+    root.find('#rp_engine_panel_skip_creator').off('click').on('click', () => {
+        const current = tracker();
+        current.characterCreator.offered = true;
+        chat_metadata[METADATA_KEY] = current;
+        saveTracker();
+        renderPanel();
+    });
+    root.find('#rp_engine_toggle_writing_report').off('click').on('click', () => {
+        writingViolationReportOpen = !writingViolationReportOpen;
+        renderPanel();
+    });
+    applyPanelPosition();
+}
+
+function currentArchiveChatId() {
+    if (!settings().scopeNpcArchivePerChat) return 'global';
+    const context = getContext();
+    const raw = context?.chatId || context?.getCurrentChatId?.() || 'unsaved-chat';
+    return sanitizeArchiveChatId(raw);
+}
+
+function currentArchiveOwnerKey() {
+    const context = getContext();
+    if (context?.groupId !== undefined && context?.groupId !== null && context?.groupId !== '') {
+        return `group:${sanitizeArchiveChatId(context.groupId)}`;
+    }
+    if (context?.characterId !== undefined && context?.characterId !== null && context?.characterId !== '') {
+        return `character:${sanitizeArchiveChatId(context.characterId)}`;
+    }
+    return 'unknown';
+}
+
+function sanitizeArchiveChatId(value) {
+    return String(value || 'unsaved-chat')
+        .replace(/\\/g, '/')
+        .split('/')
+        .pop()
+        .replace(/\.jsonl$/i, '')
+        .replace(/[^\p{L}\p{N}_. -]+/gu, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80) || 'unsaved-chat';
+}
+
+function archiveEntryKey(name, chatId = currentArchiveChatId(), ownerKey = currentArchiveOwnerKey()) {
+    const owner = String(ownerKey || 'unknown').trim().replace(/\s+/g, '_');
+    return `RPE:${owner}:${sanitizeArchiveChatId(chatId)}:${String(name || '').trim()}`;
+}
+
+function archiveEntryMatchesCurrentChat(parsed) {
+    if (!settings().scopeNpcArchivePerChat) return true;
+    const wanted = currentArchiveChatId();
+    const stored = sanitizeArchiveChatId(parsed?.chatId || 'global');
+    if (stored !== wanted) return false;
+    const storedOwner = String(parsed?.archiveOwner || '').trim();
+    return !storedOwner || storedOwner === 'unknown' || storedOwner === currentArchiveOwnerKey();
+}
+
+function shouldShowCharacterCreatorPrompt() {
+    const cfg = settings();
+    if (!cfg.enableCharacterCreator || !cfg.autoOfferCharacterCreator) return false;
+    const current = tracker();
+    if (current.characterCreator?.completed || current.characterCreator?.offered) return false;
+    if (parseCoreStats(getContext().powerUserSettings?.persona_description || '')) return false;
+    return countUserMessages() === 0;
+}
+
+function maybeOfferCharacterCreator() {
+    if (!shouldShowCharacterCreatorPrompt()) return;
+    renderPanel();
+}
+
+function countUserMessages() {
+    const sourceChat = [
+        Array.isArray(getContext().chat) ? getContext().chat : [],
+        Array.isArray(liveChat) ? liveChat : [],
+    ].find(x => x.length) || [];
+    return sourceChat.filter(message => {
+        const roleName = String(message?.name || '').trim();
+        return message?.is_user || message?.role === 'user' || roleName === name1 || message?.force_avatar === 'persona';
+    }).length;
+}
+
+function renderSceneTime(scene, worldClock = null) {
+    const time = escapeHtml(scene?.time || 'Unknown time');
+    const weather = scene?.weather ? ` | ${escapeHtml(scene.weather)}` : '';
+    const clock = worldClock || {};
+    const advance = clock.enabled !== false && clock.lastAdvance
+        ? `<div class="rp-engine-clock-note">${escapeHtml(clock.lastAdvance)}</div>`
+        : '';
+    return `${time}${weather}${advance}`;
+}
+
+function renderNpc(npc) {
+    const d = npc.disposition || { B: 2, F: 2, H: 2 };
+    const s = npc.coreStats || { PHY: 2, MND: 2, CHA: 2 };
+    return `
+        <div class="rp-engine-npc">
+            <div class="rp-engine-npc-title">${escapeHtml(npc.name || npc.id)}</div>
+            <div>B${d.B}/F${d.F}/H${d.H} | Rapport ${npc.rapport ?? 0} | Gate ${escapeHtml(npc.intimacyGate || 'SKIP')}</div>
+            <div class="rp-engine-muted">Feels: ${escapeHtml(npc.feelsTowardUser || describeNpcFeeling(npc))}</div>
+            <div class="rp-engine-statline">PHY ${s.PHY} | MND ${s.MND} | CHA ${s.CHA}</div>
+            <div class="rp-engine-muted">${escapeHtml(npc.condition || 'unknown')} ${npc.position ? `| ${escapeHtml(npc.position)}` : ''}</div>
+        </div>
+    `;
+}
+
+function renderTask(task) {
+    const item = typeof task === 'string' ? { task } : (task || {});
+    const bits = [
+        item.due ? `Due: ${escapeHtml(item.due)}` : '',
+        item.source ? `Source: ${escapeHtml(item.source)}` : '',
+    ].filter(Boolean);
+    return `<li>
+        <div>${escapeHtml(item.task || 'Pending task')}</div>
+        ${bits.length ? `<div class="rp-engine-muted">${bits.join(' | ')}</div>` : ''}
+    </li>`;
+}
+
+function renderAudit(audit) {
+    if (audit.rollback) {
+        return `
+            <div class="rp-engine-audit-card">
+                <div class="rp-engine-audit-title">Mechanics Rolled Back</div>
+                ${renderKv('At', audit.at)}
+                ${renderKv('Reason', audit.reason)}
+                ${audit.deletedTrigger ? renderKv('Deleted Input', audit.deletedTrigger) : ''}
+            </div>
+        `;
+    }
+    if (audit.error) {
+        return `
+            <div class="rp-engine-audit-card rp-engine-audit-error">
+                <div class="rp-engine-audit-title">Resolver Error</div>
+                ${renderKv('At', audit.at)}
+                ${renderKv('Message', audit.error)}
+                ${audit.latestUserMessage ? renderKv('Latest User Message', audit.latestUserMessage) : ''}
+            </div>
+        `;
+    }
+
+    const extraction = audit.extraction || {};
+    const packet = audit.resolutionPacket || {};
+    const chaos = audit.chaosHandoff?.CHAOS || {};
+    const proactivity = audit.proactivityHandoff || {};
+    const aggression = audit.aggressionResults || {};
+    const writing = audit.writingAudit || tracker().lastWritingAudit || null;
+    const roll = packet.roll || {};
+    const npcs = Array.isArray(audit.npcHandoffs) ? audit.npcHandoffs : [];
+    const statLine = packet.stats ? `${packet.stats.USER || '?'} vs ${packet.stats.OPP || '?'}` : '(none)';
+    const rollLine = Number.isFinite(roll.atkDie)
+        ? `${roll.atkDie} -> ${roll.atkTot} vs ${roll.defDie} -> ${roll.defTot} (margin ${roll.margin})`
+        : '(no resolution roll)';
+
+    return `
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Intent</div>
+            ${renderKv('Goal', packet.GOAL || extraction.goal)}
+            ${renderKv('Decisive Action', packet.DecisiveAction || extraction.decisiveAction)}
+            ${renderKv('Evidence', extraction.decisiveActionEvidence || extraction.goalEvidence)}
+            ${renderKv('On Success', packet.OutcomeOnSuccess || extraction.outcomeOnSuccess)}
+            ${renderKv('On Failure', packet.OutcomeOnFailure || extraction.outcomeOnFailure)}
+        </div>
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Resolution</div>
+            ${renderKv('Stakes', packet.STAKES || extraction.hasStakes)}
+            ${renderKv('Stats', statLine)}
+            ${renderKv('Roll', rollLine)}
+            ${renderKv('Outcome', `${packet.OutcomeTier || 'NONE'} / ${packet.Outcome || 'no_roll'}`)}
+            ${renderKv('Landed', packet.LandedActions)}
+            ${renderKv('Counter', packet.CounterPotential)}
+        </div>
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Targets</div>
+            ${renderKv('Action Targets', listText(packet.ActionTargets || extraction.actionTargets))}
+            ${renderKv('Opposing NPCs', listText(packet.OppTargets?.NPC || extraction.oppTargetsNpc))}
+            ${renderKv('Opposing Env', listText(packet.OppTargets?.ENV || extraction.oppTargetsEnv))}
+            ${renderKv('Benefited', listText(packet.BenefitedObservers || extraction.benefitedObservers))}
+            ${renderKv('Harmed', listText(packet.HarmedObservers || extraction.harmedObservers))}
+        </div>
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Relationship</div>
+            ${npcs.length ? npcs.map(renderNpcAudit).join('') : '<div class="rp-engine-muted">No NPC relationship update.</div>'}
+        </div>
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Chaos</div>
+            ${renderKv('Triggered', chaos.triggered ? 'Y' : 'N')}
+            ${renderKv('Band', chaos.band || 'None')}
+            ${renderKv('Magnitude', chaos.magnitude || 'None')}
+            ${renderKv('Anchor', chaos.anchor || 'None')}
+            ${renderKv('Vector', chaos.vector || 'None')}
+            ${renderKv('Context', chaos.ctx || '(none)')}
+            ${renderKv('Dice', chaos.dice ? `A ${chaos.dice.A}, O ${chaos.dice.O}, I ${chaos.dice.I}, anchor ${chaos.dice.anchorIdx}, vector ${chaos.dice.vectorIdx}` : '(none)')}
+        </div>
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Proactivity</div>
+            ${Object.keys(proactivity).length ? Object.entries(proactivity).map(([name, item]) => renderProactivityAudit(name, item, aggression[name])).join('') : '<div class="rp-engine-muted">No NPC proactivity.</div>'}
+        </div>
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Grounded Writing</div>
+            ${writing ? renderWritingAudit(writing) : '<div class="rp-engine-muted">No writing audit yet.</div>'}
+        </div>
+    `;
+}
+
+function renderWritingAudit(audit) {
+    const violations = Array.isArray(audit.violations) ? audit.violations : [];
+    const repair = audit.repairResult || {};
+    return `
+        ${renderKv('Status', writingAuditStatus(audit))}
+        ${renderKv('Valid', audit.valid === null ? 'Validator error' : audit.valid ? 'Y' : 'N')}
+        ${renderKv('Severity', audit.severity || '(none)')}
+        ${renderKv('Repaired Pass', audit.repaired ? 'Y' : 'N')}
+        ${repair.status ? renderKv('Repair', repair.status) : ''}
+        ${repair.original ? renderKv('Original', repair.original) : ''}
+        ${repair.replacement ? renderKv('Replacement', repair.replacement) : ''}
+        ${repair.reason ? renderKv('Repair Failure', repair.reason) : ''}
+        ${violations.length
+            ? violations.map(item => `
+                <div class="rp-engine-audit-npc">
+                    <div class="rp-engine-audit-npc-title">${escapeHtml(item.rule || 'Violation')}</div>
+                    ${renderKv('Problem', item.problem)}
+                    ${item.evidence ? renderKv('Evidence', item.evidence) : ''}
+                </div>
+            `).join('')
+            : '<div class="rp-engine-muted">No grounded writing violation detected.</div>'}
+    `;
+}
+
+function renderWritingViolationReport(audit) {
+    if (!audit) {
+        return '<div class="rp-engine-writing-report-body"><div class="rp-engine-muted">No writing audit yet.</div></div>';
+    }
+    const violations = Array.isArray(audit.violations) ? audit.violations : [];
+    const repair = audit.repairResult || {};
+    return `
+        <div class="rp-engine-writing-report-body">
+            ${renderKv('Status', writingAuditStatus(audit))}
+            ${renderKv('At', audit.at)}
+            ${violations.length
+                ? violations.map(item => `
+                    <div class="rp-engine-audit-npc">
+                        <div class="rp-engine-audit-npc-title">${escapeHtml(item.rule || 'Violation')}</div>
+                        ${item.evidence ? renderKv('Offending Text', item.evidence) : ''}
+                        ${renderKv('Reason', item.problem)}
+                    </div>
+                `).join('')
+                : '<div class="rp-engine-muted">No grounded writing violation detected on the latest checked message.</div>'}
+            ${repair.status ? `
+                <div class="rp-engine-audit-npc">
+                    <div class="rp-engine-audit-npc-title">Repair</div>
+                    ${renderKv('Result', repair.status)}
+                    ${repair.mode ? renderKv('Mode', repair.mode) : ''}
+                    ${repair.original ? renderKv('Original', repair.original) : ''}
+                    ${repair.replacement ? renderKv('Replacement', repair.replacement) : ''}
+                    ${repair.reason ? renderKv('Failure', repair.reason) : ''}
+                </div>
+            ` : ''}
+        </div>
+    `;
+}
+
+function writingAuditStatus(audit) {
+    if (!audit) return 'No audit';
+    if (audit.repairFailed || audit.repairResult?.status === 'failed') return 'Violation repair failed';
+    if (audit.repaired || audit.repairResult?.status === 'repaired') return 'Violation repaired in place';
+    if (audit.valid === false) return 'Violation detected';
+    if (audit.valid === null) return 'Validator error';
+    return 'Clean';
+}
+
+function renderNpcAudit(npc) {
+    return `
+        <div class="rp-engine-audit-npc">
+            <div class="rp-engine-audit-npc-title">${escapeHtml(npc.NPC || 'NPC')}</div>
+            ${renderKv('State', `${npc.FinalState || '?'} / ${npc.Behavior || '?'}${npc.Lock ? ` / Lock ${npc.Lock}` : ''}`)}
+            ${renderKv('Target', npc.Target)}
+            ${renderKv('Gate', npc.IntimacyGate)}
+        </div>
+    `;
+}
+
+function renderProactivityAudit(name, item, aggression) {
+    return `
+        <div class="rp-engine-audit-npc">
+            <div class="rp-engine-audit-npc-title">${escapeHtml(name || 'NPC')}</div>
+            ${renderKv('Proactive', item.Proactive)}
+            ${renderKv('Intent', item.Intent)}
+            ${renderKv('Impulse', item.Impulse)}
+            ${renderKv('Targets User', item.TargetsUser)}
+            ${renderKv('Tier', item.ProactivityTier)}
+            ${renderKv('Die / Threshold', item.ProactivityDie ? `${item.ProactivityDie} / ${item.Threshold}` : item.Threshold)}
+            ${aggression ? renderKv('Aggression', `${aggression.ReactionOutcome} (margin ${aggression.Margin})`) : ''}
+        </div>
+    `;
+}
+
+function renderKv(label, value) {
+    const text = value === undefined || value === null || value === '' ? '(none)' : String(value);
+    return `
+        <div class="rp-engine-kv">
+            <span>${escapeHtml(label)}</span>
+            <b>${escapeHtml(text)}</b>
+        </div>
+    `;
+}
+
+function listText(value) {
+    return Array.isArray(value) && value.length ? value.join(', ') : '(none)';
+}
+
+function updateRevealedNamesFromChat() {
+    const sourceChat = [
+        Array.isArray(getContext().chat) ? getContext().chat : [],
+        Array.isArray(liveChat) ? liveChat : [],
+    ].find(x => x.length) || [];
+    for (let i = sourceChat.length - 1; i >= 0; i--) {
+        const message = sourceChat[i];
+        const isUser = message.is_user || message.role === 'user' || message.name === name1;
+        if (isUser) continue;
+        const text = messageText(message).trim();
+        if (!text) return;
+        const current = tracker();
+        const before = JSON.stringify(current.nameState || {});
+        markRevealedNames(current, text);
+        if (JSON.stringify(current.nameState || {}) !== before) {
+            chat_metadata[METADATA_KEY] = current;
+            saveTracker();
+        }
+        return;
+    }
+}
+
+function setupUi() {
+    if (!$('#rp_engine_tracker_panel').length) {
+        $('body').append(`
+            <div id="rp_engine_tracker_panel">
+                <div class="rp-engine-header">
+                    <strong class="rp-engine-title">RP Engine</strong>
+                    <div class="rp-engine-actions">
+                        <button id="rp_engine_tracker_collapse" title="Collapse tracker"><i class="fa-solid fa-book-open"></i></button>
+                        <button id="rp_engine_tracker_toggle_debug" title="Toggle audit">Audit</button>
+                    </div>
+                </div>
+                <div class="rp-engine-body"></div>
+            </div>
+        `);
+    }
+
+    setupExtensionSettingsBlock();
+    setupCharacterCreatorDialog();
+
+    if (!$('#rp_engine_tracker_button').length) {
+        $('#extensionsMenu').append(`
+            <div id="rp_engine_tracker_button" class="list-group-item flex-container flexGap5">
+                <div class="fa-solid fa-dice-d20 extensionsMenuExtensionButton"></div>
+                RP Engine Settings
+            </div>
+        `);
+    }
+
+    $('#rp_engine_tracker_button').off('click').on('click', () => {
+        openSettingsDialog();
+    });
+
+    $('#rp_engine_tracker_collapse').off('click').on('click', () => {
+        if (panelDragMoved) {
+            panelDragMoved = false;
+            return;
+        }
+        settings().panelCollapsed = !settings().panelCollapsed;
+        saveSettingsDebounced();
+        renderPanel();
+    });
+
+    $('#rp_engine_tracker_toggle_debug').off('click').on('click', () => {
+        settings().debug = !settings().debug;
+        saveSettingsDebounced();
+        renderPanel();
+    });
+
+    setupPanelDrag();
+    setupSettingsDialog();
+    renderPanel();
+    maybeOfferCharacterCreator();
+}
+
+function setupExtensionSettingsBlock() {
+    if (!$('#rp_engine_extension_settings').length) {
+        const target = $('#extensions_settings2').length ? $('#extensions_settings2') : $('#extensions_settings');
+        target.append(`
+            <div id="rp_engine_extension_settings" class="extension_container">
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b>RP Engine</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <div class="rp-engine-extension-row">
+                            <label><input id="rp_engine_ext_enabled" type="checkbox"> Enable engine</label>
+                            <label><input id="rp_engine_ext_inject" type="checkbox"> Inject final payload</label>
+                        </div>
+                        <div class="rp-engine-extension-row">
+                            <label><input id="rp_engine_ext_panel" type="checkbox"> Show tracker panel</label>
+                            <label><input id="rp_engine_ext_render" type="checkbox"> Grounded writing engine</label>
+                            <label><input id="rp_engine_ext_style" type="checkbox"> Style guide</label>
+                        </div>
+                        <div class="rp-engine-extension-row">
+                            <label>Name style
+                                <select id="rp_engine_ext_name_style"></select>
+                            </label>
+                        </div>
+                        <div class="rp-engine-extension-row">
+                            <label><input id="rp_engine_ext_time" type="checkbox"> World time tracking</label>
+                            <label>1 real min =
+                                <input id="rp_engine_ext_time_scale" type="number" min="0.1" max="120" step="0.1" class="text_pole" style="width:70px">
+                                world min
+                            </label>
+                        </div>
+                        <div class="rp-engine-extension-row">
+                            <label><input id="rp_engine_ext_creator" type="checkbox"> Character creator</label>
+                            <label><input id="rp_engine_ext_creator_offer" type="checkbox"> Offer on new chat</label>
+                            <button id="rp_engine_open_creator" type="button" class="menu_button">Create Character</button>
+                        </div>
+                        <div class="rp-engine-extension-row">
+                            <label><input id="rp_engine_ext_archive" type="checkbox"> NPC Lorebook archive</label>
+                            <label>Archive book
+                                <select id="rp_engine_ext_archive_world"></select>
+                            </label>
+                            <button id="rp_engine_refresh_archive_worlds" type="button" class="menu_button">Refresh</button>
+                            <button id="rp_engine_prune_forgotten" type="button" class="menu_button">Prune Forgotten</button>
+                        </div>
+                        <div class="rp-engine-extension-row">
+                            <button id="rp_engine_open_settings" type="button" class="menu_button">Edit Style Guide</button>
+                        </div>
+                        <div class="rp-engine-muted">Core mechanics, name generation, and grounded writing rules are hardwired. The writing engine can be turned off if you miss the ozone in your roleplays. Style guide is editable. Note: Style Guide is not a place to restrict how the LLM writes, but rather which author or specific vibe you want from the LLM.</div>
+                    </div>
+                </div>
+            </div>
+        `);
+    }
+
+    bindExtensionSettingsBlock();
+    syncExtensionSettingsBlock();
+}
+
+function bindExtensionSettingsBlock() {
+    const root = $('#rp_engine_extension_settings');
+    root.find('#rp_engine_open_settings').off('click').on('click', openSettingsDialog);
+    root.find('#rp_engine_open_creator').off('click').on('click', () => openCharacterCreatorDialog({ manual: true }));
+    root.find('#rp_engine_refresh_archive_worlds').off('click').on('click', async () => {
+        await updateWorldInfoList();
+        syncExtensionSettingsBlock();
+    });
+    root.find('#rp_engine_prune_forgotten').off('click').on('click', pruneForgottenNpcs);
+    root.find('input, select').off('change').on('change', () => {
+        const cfg = settings();
+        cfg.enabled = root.find('#rp_engine_ext_enabled').prop('checked');
+        cfg.injectHandoff = root.find('#rp_engine_ext_inject').prop('checked');
+        cfg.showPanel = root.find('#rp_engine_ext_panel').prop('checked');
+        cfg.enableRenderRules = root.find('#rp_engine_ext_render').prop('checked');
+        cfg.enableWritingStyle = root.find('#rp_engine_ext_style').prop('checked');
+        cfg.nameStyle = String(root.find('#rp_engine_ext_name_style').val() || DEFAULT_SETTINGS.nameStyle);
+        cfg.enableTimeTracking = root.find('#rp_engine_ext_time').prop('checked');
+        cfg.timeScaleWorldMinutesPerRealMinute = Math.max(0.1, Number(root.find('#rp_engine_ext_time_scale').val()) || DEFAULT_SETTINGS.timeScaleWorldMinutesPerRealMinute);
+        cfg.enableCharacterCreator = root.find('#rp_engine_ext_creator').prop('checked');
+        cfg.autoOfferCharacterCreator = root.find('#rp_engine_ext_creator_offer').prop('checked');
+        cfg.enableNpcArchive = root.find('#rp_engine_ext_archive').prop('checked');
+        cfg.npcArchiveWorld = String(root.find('#rp_engine_ext_archive_world').val() || '');
+        saveSettingsDebounced();
+        syncGroundedWritingEarlyPrompt();
+        renderPanel();
+    });
+}
+
+function syncExtensionSettingsBlock() {
+    const cfg = settings();
+    const root = $('#rp_engine_extension_settings');
+    root.find('#rp_engine_ext_enabled').prop('checked', !!cfg.enabled);
+    root.find('#rp_engine_ext_inject').prop('checked', !!cfg.injectHandoff);
+    root.find('#rp_engine_ext_panel').prop('checked', !!cfg.showPanel);
+    root.find('#rp_engine_ext_render').prop('checked', !!cfg.enableRenderRules);
+    root.find('#rp_engine_ext_style').prop('checked', !!cfg.enableWritingStyle);
+    root.find('#rp_engine_ext_name_style').html(renderNameStyleOptions(cfg.nameStyle));
+    root.find('#rp_engine_ext_time').prop('checked', !!cfg.enableTimeTracking);
+    root.find('#rp_engine_ext_time_scale').val(Number(cfg.timeScaleWorldMinutesPerRealMinute) || DEFAULT_SETTINGS.timeScaleWorldMinutesPerRealMinute);
+    root.find('#rp_engine_ext_creator').prop('checked', !!cfg.enableCharacterCreator);
+    root.find('#rp_engine_ext_creator_offer').prop('checked', !!cfg.autoOfferCharacterCreator);
+    root.find('#rp_engine_ext_archive').prop('checked', !!cfg.enableNpcArchive);
+    root.find('#rp_engine_ext_archive_world').html(renderWorldOptions(cfg.npcArchiveWorld));
+    syncGroundedWritingEarlyPrompt();
+}
+
+function renderNameStyleOptions(selected) {
+    const current = NAME_STYLE_PRESETS[selected] ? selected : DEFAULT_SETTINGS.nameStyle;
+    return Object.entries(NAME_STYLE_PRESETS).map(([key, preset]) => (
+        `<option value="${escapeHtml(key)}" ${key === current ? 'selected' : ''}>${escapeHtml(preset.label)}</option>`
+    )).join('');
+}
+
+function renderWorldOptions(selected) {
+    const names = Array.isArray(world_names) ? world_names : [];
+    const options = ['<option value="">Auto-create / default</option>'];
+    for (const name of names) {
+        options.push(`<option value="${escapeHtml(name)}" ${name === selected ? 'selected' : ''}>${escapeHtml(name)}</option>`);
+    }
+    return options.join('');
+}
+
+function setupSettingsDialog() {
+    if ($('#rp_engine_settings_modal').length) return;
+
+    $('body').append(`
+        <div id="rp_engine_settings_modal" class="rp-engine-settings-hidden">
+            <div class="rp-engine-settings-card">
+                <div class="rp-engine-settings-header">
+                    <strong>RP Engine Settings</strong>
+                    <button id="rp_engine_settings_close" title="Close">Close</button>
+                </div>
+                <div class="rp-engine-settings-body"></div>
+            </div>
+        </div>
+    `);
+
+    $('#rp_engine_settings_close').on('click', closeSettingsDialog);
+    $('#rp_engine_settings_modal').on('click', (event) => {
+        if (event.target?.id === 'rp_engine_settings_modal') closeSettingsDialog();
+    });
+}
+
+function openSettingsDialog() {
+    setupSettingsDialog();
+    renderSettingsDialog();
+    $('#rp_engine_settings_modal').removeClass('rp-engine-settings-hidden');
+}
+
+function closeSettingsDialog() {
+    $('#rp_engine_settings_modal').addClass('rp-engine-settings-hidden');
+}
+
+function setupCharacterCreatorDialog() {
+    if ($('#rp_engine_character_creator_modal').length) return;
+
+    $('body').append(`
+        <div id="rp_engine_character_creator_modal" class="rp-engine-settings-hidden">
+            <div class="rp-engine-settings-card rp-engine-character-card">
+                <div class="rp-engine-settings-header">
+                    <strong>Character Creator</strong>
+                    <button id="rp_engine_character_close" title="Close">Close</button>
+                </div>
+                <div class="rp-engine-character-body"></div>
+            </div>
+        </div>
+    `);
+
+    $('#rp_engine_character_close').on('click', closeCharacterCreatorDialog);
+    $('#rp_engine_character_creator_modal').on('click', (event) => {
+        if (event.target?.id === 'rp_engine_character_creator_modal') closeCharacterCreatorDialog();
+    });
+}
+
+function openCharacterCreatorDialog({ manual = false } = {}) {
+    const cfg = settings();
+    if (!manual && !cfg.enableCharacterCreator) return;
+    setupCharacterCreatorDialog();
+    if (!characterCreatorState || manual) {
+        characterCreatorState = createCharacterCreatorState();
+    }
+    const current = tracker();
+    current.characterCreator.offered = true;
+    chat_metadata[METADATA_KEY] = current;
+    saveTracker();
+    renderCharacterCreatorDialog();
+    $('#rp_engine_character_creator_modal').removeClass('rp-engine-settings-hidden');
+}
+
+function closeCharacterCreatorDialog() {
+    $('#rp_engine_character_creator_modal').addClass('rp-engine-settings-hidden');
+}
+
+function createCharacterCreatorState() {
+    const roll = rollCharacterCreatorStats();
+    return {
+        step: 'stats',
+        roll,
+        stats: structuredClone(roll.baseStats),
+        rerolled: false,
+        swapped: false,
+        basics: normalizeCharacterBasics(rollCharacterCreatorBasics(), 'random'),
+        basicsMode: 'random',
+        draft: null,
+        sheet: '',
+        status: '',
+    };
+}
+
+function renderCharacterCreatorDialog() {
+    setupCharacterCreatorDialog();
+    const state = characterCreatorState || createCharacterCreatorState();
+    characterCreatorState = state;
+    const body = $('#rp_engine_character_creator_modal .rp-engine-character-body');
+    const stats = state.stats || { PHY: 3, MND: 3, CHA: 3 };
+    const pool = state.roll?.pool || {};
+    state.basics = normalizeCharacterBasics(state.basics, state.basicsMode);
+    state.basicsMode = state.basics.mode;
+    const basics = state.basics;
+    const statRows = ['PHY', 'MND', 'CHA'].map(stat => `
+        <tr>
+            <th>${stat}</th>
+            <td>${Array.isArray(pool[stat]) ? pool[stat].join(', ') : '-'}</td>
+            <td>${stats[stat]}</td>
+        </tr>
+    `).join('');
+    const sheetHtml = state.sheet
+        ? `<textarea id="rp_engine_character_sheet" spellcheck="false">${escapeHtml(state.sheet)}</textarea>`
+        : '<div class="rp-engine-muted">Generate the character details after stats are finalized.</div>';
+
+    body.html(`
+        <div class="rp-engine-muted">Stats are real d10 rolls made by the extension. Creative details are drafted as structured output, then the final sheet can be applied to the active Persona field.</div>
+        <div class="rp-engine-character-basics">
+            <div class="rp-engine-settings-row">
+                <label>Basics
+                    <select id="rp_engine_character_basics_mode">
+                        <option value="random" ${basics.mode === 'random' ? 'selected' : ''}>Random</option>
+                        <option value="manual" ${basics.mode === 'manual' ? 'selected' : ''}>Choose basics</option>
+                    </select>
+                </label>
+                <button id="rp_engine_character_reroll_basics" type="button" ${basics.mode === 'random' ? '' : 'disabled'}>Reroll Race</button>
+                <span class="rp-engine-muted">${basics.mode === 'random' ? `Race d100: ${basics.raceRoll}` : 'Selected race is enforced; remaining details are randomized.'}</span>
+            </div>
+            <div class="rp-engine-settings-row">
+                <label>Race
+                    <select id="rp_engine_character_race" ${basics.mode === 'random' ? 'disabled' : ''}>
+                        ${CHARACTER_CREATOR_RACES.map(race => `<option value="${escapeHtml(race)}" ${race === basics.race ? 'selected' : ''}>${escapeHtml(race)}</option>`).join('')}
+                        <option value="__custom" ${!CHARACTER_CREATOR_RACES.includes(basics.race) ? 'selected' : ''}>Custom humanoid fantasy race</option>
+                    </select>
+                </label>
+                <input id="rp_engine_character_custom_race" type="text" placeholder="Custom race" value="${!CHARACTER_CREATOR_RACES.includes(basics.race) ? escapeHtml(basics.race) : ''}" ${basics.mode === 'manual' && !CHARACTER_CREATOR_RACES.includes(basics.race) ? '' : 'disabled'}>
+                <span class="rp-engine-muted">Name, gender, appearance, traits, abilities, and inventory are drafted by the model, then editable in the final sheet before applying to Persona.</span>
+            </div>
+        </div>
+        <table class="rp-engine-character-table">
+            <thead><tr><th>Stat</th><th>Rolls</th><th>Current</th></tr></thead>
+            <tbody>${statRows}</tbody>
+        </table>
+        <div class="rp-engine-settings-row">
+            <label>Optional reroll
+                <select id="rp_engine_character_reroll_stat" ${state.rerolled ? 'disabled' : ''}>
+                    <option value="">No reroll</option>
+                    <option value="PHY">PHY</option>
+                    <option value="MND">MND</option>
+                    <option value="CHA">CHA</option>
+                </select>
+            </label>
+            <button id="rp_engine_character_apply_reroll" type="button" ${state.rerolled ? 'disabled' : ''}>Apply Reroll</button>
+            <span class="rp-engine-muted">${state.rerolled ? `Reroll value used: ${state.roll.rerollValue}` : 'Reroll value is hidden until used or skipped.'}</span>
+        </div>
+        <div class="rp-engine-settings-row">
+            <label>Swap
+                <select id="rp_engine_character_swap_a" ${state.swapped ? 'disabled' : ''}>
+                    <option value="">None</option><option value="PHY">PHY</option><option value="MND">MND</option><option value="CHA">CHA</option>
+                </select>
+            </label>
+            <label>with
+                <select id="rp_engine_character_swap_b" ${state.swapped ? 'disabled' : ''}>
+                    <option value="">None</option><option value="PHY">PHY</option><option value="MND">MND</option><option value="CHA">CHA</option>
+                </select>
+            </label>
+            <button id="rp_engine_character_apply_swap" type="button" ${state.swapped ? 'disabled' : ''}>Apply Swap</button>
+        </div>
+        <div class="rp-engine-settings-row">
+            <button id="rp_engine_character_generate" type="button">Generate Details</button>
+            <button id="rp_engine_character_apply_persona" type="button" ${state.sheet ? '' : 'disabled'}>Apply to Persona</button>
+            <button id="rp_engine_character_copy" type="button" ${state.sheet ? '' : 'disabled'}>Copy Sheet</button>
+            <button id="rp_engine_character_reset" type="button">Start Over</button>
+        </div>
+        ${state.status ? `<div class="rp-engine-muted">${escapeHtml(state.status)}</div>` : ''}
+        ${sheetHtml}
+    `);
+
+    body.find('#rp_engine_character_basics_mode').on('change', () => {
+        const mode = String(body.find('#rp_engine_character_basics_mode').val() || 'random');
+        state.basicsMode = mode === 'manual' ? 'manual' : 'random';
+        state.basics = state.basicsMode === 'random'
+            ? normalizeCharacterBasics(rollCharacterCreatorBasics(), 'random')
+            : { ...normalizeCharacterBasics(state.basics, 'manual'), mode: 'manual' };
+        state.status = state.basicsMode === 'random' ? 'Race rerolled by the extension.' : 'Choose a race, or type a custom humanoid fantasy race.';
+        state.sheet = '';
+        renderCharacterCreatorDialog();
+    });
+    body.find('#rp_engine_character_reroll_basics').on('click', () => {
+        state.basics = normalizeCharacterBasics(rollCharacterCreatorBasics(), 'random');
+        state.basicsMode = 'random';
+        state.status = 'Race rerolled by the extension.';
+        state.sheet = '';
+        renderCharacterCreatorDialog();
+    });
+    body.find('#rp_engine_character_race, #rp_engine_character_custom_race').on('change input', () => {
+        state.basicsMode = String(body.find('#rp_engine_character_basics_mode').val() || 'random') === 'manual' ? 'manual' : 'random';
+        const selectedRace = String(body.find('#rp_engine_character_race').val() || CHARACTER_CREATOR_RACES[0]);
+        const customRace = cleanUiText(body.find('#rp_engine_character_custom_race').val());
+        state.basics = normalizeCharacterBasics({
+            mode: state.basicsMode,
+            raceRoll: state.basics?.raceRoll || 1,
+            race: selectedRace === '__custom' ? (customRace || 'Human') : selectedRace,
+        }, state.basicsMode);
+        if (state.basicsMode === 'manual' && selectedRace === '__custom') {
+            body.find('#rp_engine_character_custom_race').prop('disabled', false);
+        }
+        state.sheet = '';
+    });
+
+    body.find('#rp_engine_character_apply_reroll').on('click', () => {
+        const stat = String(body.find('#rp_engine_character_reroll_stat').val() || '');
+        state.stats = stat ? applyCharacterCreatorReroll(state.stats, stat, state.roll.rerollValue) : state.stats;
+        state.rerolled = true;
+        state.status = stat ? `${stat} reroll revealed as ${state.roll.rerollValue}; higher value kept.` : `Reroll skipped. Hidden value was ${state.roll.rerollValue}.`;
+        state.sheet = '';
+        renderCharacterCreatorDialog();
+    });
+    body.find('#rp_engine_character_apply_swap').on('click', () => {
+        const a = String(body.find('#rp_engine_character_swap_a').val() || '');
+        const b = String(body.find('#rp_engine_character_swap_b').val() || '');
+        state.stats = applyCharacterCreatorSwap(state.stats, a, b);
+        state.swapped = Boolean(a && b && a !== b);
+        state.status = state.swapped ? `${a} and ${b} swapped.` : 'No swap applied.';
+        state.sheet = '';
+        renderCharacterCreatorDialog();
+    });
+    body.find('#rp_engine_character_generate').on('click', generateCharacterDetails);
+    body.find('#rp_engine_character_apply_persona').on('click', applyCharacterCreatorToPersona);
+    body.find('#rp_engine_character_copy').on('click', async () => {
+        const text = String(body.find('#rp_engine_character_sheet').val() || state.sheet || '');
+        if (text) {
+            await navigator.clipboard?.writeText(text);
+            toastr.success('Character sheet copied.', 'RP Engine');
+        }
+    });
+    body.find('#rp_engine_character_reset').on('click', () => {
+        characterCreatorState = createCharacterCreatorState();
+        renderCharacterCreatorDialog();
+    });
+}
+
+async function generateCharacterDetails() {
+    if (!characterCreatorState) characterCreatorState = createCharacterCreatorState();
+    characterCreatorState.basics = normalizeCharacterBasics(characterCreatorState.basics, characterCreatorState.basicsMode);
+    characterCreatorState.status = 'Generating character details...';
+    renderCharacterCreatorDialog();
+    const stats = characterCreatorState.stats;
+    const basics = characterCreatorState.basics;
+    let draft = null;
+    const prompt = buildCharacterCreatorPrompt(stats, basics);
+    try {
+        const response = await generateQuietPromptWithTimeout({
+            quietPrompt: prompt,
+            skipWIAN: false,
+            responseLength: 2400,
+            jsonSchema: CHARACTER_CREATOR_SCHEMA,
+            removeReasoning: true,
+        }, Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000));
+        draft = parseJsonResponse(response);
+    } catch (error) {
+        console.warn('[RP Engine Tracker] Character creator model pass failed; using fallback.', error);
+    }
+    if (!isUsableCharacterDraft(draft)) {
+        try {
+            const retryResponse = await generateQuietPromptWithTimeout({
+                quietPrompt: `${prompt}\n\nReturn only one valid compact JSON object. No markdown, no prose, no commentary. The final answer content must begin with { and end with }.`,
+                skipWIAN: false,
+                responseLength: 2400,
+                removeReasoning: true,
+            }, Math.min(Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000), 90000));
+            const retryDraft = parseJsonResponse(retryResponse);
+            if (isUsableCharacterDraft(retryDraft)) {
+                draft = retryDraft;
+            }
+        } catch (retryError) {
+            console.warn('[RP Engine Tracker] Character creator plain JSON retry failed; using fallback.', retryError);
+        }
+    }
+    if (!isUsableCharacterDraft(draft)) {
+        draft = buildFallbackCharacterDraft(stats, basics);
+        characterCreatorState.status = 'Model draft failed; deterministic fallback used.';
+    } else {
+        draft = applyCharacterBasicsToDraft(draft, basics);
+        characterCreatorState.status = 'Character details generated.';
+    }
+    characterCreatorState.draft = draft;
+    characterCreatorState.sheet = buildCharacterSheet(draft, stats);
+    renderCharacterCreatorDialog();
+}
+
+function isUsableCharacterDraft(draft) {
+    if (!draft || typeof draft !== 'object') return false;
+    const basic = draft.basic && typeof draft.basic === 'object' ? draft.basic : draft;
+    const hasBasic = ['name', 'race', 'gender', 'age'].some(key => String(basic[key] || '').trim());
+    const hasTraits = Array.isArray(draft.traits) && draft.traits.length >= 1;
+    const hasAbilities = Array.isArray(draft.abilities) && draft.abilities.length >= 1;
+    const hasInventory = Array.isArray(draft.inventory) && draft.inventory.length >= 1;
+    return hasBasic && hasTraits && hasAbilities && hasInventory;
+}
+
+function normalizeCharacterBasics(value, forcedMode = '') {
+    const base = value && typeof value === 'object' ? value : {};
+    const mode = forcedMode === 'manual' || base.mode === 'manual' ? 'manual' : 'random';
+    const fallback = rollCharacterCreatorBasics(() => 0);
+    const race = cleanUiText(base.race) || fallback.race;
+    return {
+        mode,
+        raceRoll: clampUiInt(base.raceRoll, 1, 100),
+        raceDie: 100,
+        race,
+    };
+}
+
+function applyCharacterBasicsToDraft(draft, basics) {
+    const normalized = normalizeCharacterBasics(basics);
+    const output = draft && typeof draft === 'object' ? structuredClone(draft) : {};
+    const currentBasic = output.basic && typeof output.basic === 'object' ? output.basic : output;
+    output.basic = {
+        ...currentBasic,
+        race: normalized.race,
+        gender: cleanUiText(currentBasic.gender) || 'Unspecified',
+        name: cleanUiText(currentBasic.name) || '{{user}}',
+        age: cleanUiText(currentBasic.age) || 'young adult',
+    };
+    if (typeof output.appearance === 'string') {
+        output.appearance = {
+            distinctFeatures: cleanUiText(output.appearance),
+        };
+    }
+    return output;
+}
+
+function cleanUiText(value) {
+    return String(value ?? '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120);
+}
+
+function clampUiInt(value, min, max) {
+    const number = Math.floor(Number(value));
+    if (!Number.isFinite(number)) return min;
+    return Math.min(Math.max(number, min), max);
+}
+
+function buildCharacterCreatorPrompt(stats, basics = {}) {
+    const cfg = settings();
+    const fixed = normalizeCharacterBasics(basics);
+    const namePreset = NAME_STYLE_PRESETS[cfg.nameStyle] || NAME_STYLE_PRESETS[DEFAULT_SETTINGS.nameStyle];
+    const styleLine = cfg.nameStyle === 'custom' && cfg.customNameStyle
+        ? cfg.customNameStyle
+        : `${namePreset.label}: ${namePreset.description}`;
+    const fixedLines = [
+        `Race: ${fixed.race} (${fixed.mode === 'random' ? `extension dice d100=${fixed.raceRoll}` : 'user-selected'})`,
+        'Name, gender, age, appearance, traits, abilities, inventory, and notes: generate them now.',
+    ].filter(Boolean);
+    return [
+        'You are the hidden character creator for the RP Engine extension. Return JSON only.',
+        '',
+        'Create one fantasy/isekai user character that fits these fixed stats:',
+        `PHY ${stats.PHY}, MND ${stats.MND}, CHA ${stats.CHA}`,
+        '',
+        'Fixed or preselected character basics:',
+        ...fixedLines.map(line => `- ${line}`),
+        '',
+        'Rules:',
+        '- Race is fixed by the extension or user. Copy it exactly into JSON. Do not replace it with a more common race.',
+        '- Generate gender, age, appearance, traits, abilities, inventory, notes, and name unless they are already explicit in active user/persona context.',
+        '- Do not mention dice, rolls, classes, levels, XP, cooldowns, damage formulas, bonuses, or penalties.',
+        '- Traits are always-active narrative capabilities. Abilities require deliberate activation.',
+        '- Traits and abilities grant narrative permission only. They never create numeric modifiers.',
+        '- Ability use under risk is resolved later by the RP Engine through PHY, MND, or CHA.',
+        '- Private senses are allowed, but they remain private to the user. Do not write that others dismiss, notice, sense, react to, infer, or explain private perceptions.',
+        '- NPCs only perceive spirits, auras, hidden entities, or user-only information if an explicit later scene fact gives that NPC the same sense. Otherwise NPCs react only to observable user behavior.',
+        '- Inventory must be fantasy/isekai travel gear. No modern Earth items. No currency amount.',
+        '- Generate one clean proper name using this style guidance: ' + styleLine,
+        '- Avoid generic modern-Western names unless the style guidance explicitly asks for them.',
+        '',
+        'Return compact JSON matching the schema. Use two traits, two abilities, three to six inventory items, and concise notes.',
+    ].join('\n');
+}
+
+function buildFallbackCharacterDraft(stats, basics = {}) {
+    const high = Object.entries(stats).sort((a, b) => b[1] - a[1])[0]?.[0] || 'MND';
+    const fixed = normalizeCharacterBasics(basics);
+    const names = {
+        PHY: 'Veyraka',
+        MND: 'Saryndel',
+        CHA: 'Lunaveth',
+    };
+    return applyCharacterBasicsToDraft({
+        basic: {
+            name: names[high] || 'Saryndel',
+            race: fixed.race || (high === 'PHY' ? 'ash-blooded human' : high === 'CHA' ? 'moon-touched elf' : 'veil-marked human'),
+            gender: 'Unspecified',
+            age: 'young adult',
+        },
+        appearance: {
+            height: high === 'PHY' ? 'tall' : 'average',
+            build: high === 'PHY' ? 'compact muscle' : 'lean',
+            hair: 'dark, tied back',
+            eyes: high === 'MND' ? 'pale gray' : 'amber',
+            skin: 'warm brown',
+            distinctFeatures: high === 'MND' ? 'thin silver mark under one eye' : 'old travel scars across the hands',
+        },
+        traits: [
+            { name: 'Road-Hardened Body', effect: 'Recovers footing quickly after rough travel, falls, or forced movement.' },
+            { name: 'Low-Light Adaptation', effect: 'Sees shape and movement clearly in dim natural light.' },
+        ],
+        abilities: [
+            { name: 'Threshold Sense', effect: 'When deliberately focused, senses whether a nearby boundary has been crossed recently.' },
+            { name: 'Focused Burst', effect: 'Can force one short, deliberate surge of effort through body, mind, or presence.' },
+        ],
+        inventory: ['travel cloak', 'bedroll', 'flint kit', 'waterskin', 'small knife'],
+        notes: ['Private perception remains private unless another entity explicitly shares that sense.'],
+    }, fixed);
+}
+
+async function applyCharacterCreatorToPersona() {
+    if (!characterCreatorState?.sheet) return;
+    const sheet = String($('#rp_engine_character_sheet').val() || characterCreatorState.sheet || '').trim();
+    if (!sheet) return;
+    const name = parsePersonaName(sheet) || name1 || 'User';
+    setUserName(name, { toastPersonaNameChange: false });
+
+    power_user.persona_description = sheet;
+    power_user.persona_description_position = persona_description_positions.IN_PROMPT;
+    if (user_avatar) {
+        if (!power_user.personas[user_avatar]) {
+            initPersona(user_avatar, name, sheet, '');
+        } else {
+            power_user.personas[user_avatar] = name;
+            power_user.persona_descriptions[user_avatar] = {
+                ...(power_user.persona_descriptions[user_avatar] || {}),
+                description: sheet,
+                position: power_user.persona_descriptions[user_avatar]?.position ?? persona_description_positions.IN_PROMPT,
+                depth: power_user.persona_descriptions[user_avatar]?.depth ?? 2,
+                role: power_user.persona_descriptions[user_avatar]?.role ?? 0,
+                lorebook: power_user.persona_descriptions[user_avatar]?.lorebook ?? '',
+                title: power_user.persona_descriptions[user_avatar]?.title ?? '',
+            };
+        }
+    }
+    $('#persona_description').val(sheet);
+    setPersonaDescription();
+    await getUserAvatars(true, user_avatar);
+
+    const current = tracker();
+    current.characterCreator.completed = true;
+    current.characterCreator.lastSheet = sheet;
+    current.user.name = name;
+    const stats = parseCoreStats(sheet);
+    if (stats) current.user.stats = stats;
+    chat_metadata[METADATA_KEY] = current;
+    saveTracker();
+    saveSettingsDebounced();
+    renderPanel();
+    closeCharacterCreatorDialog();
+    toastr.success('Character sheet applied to Persona.', 'RP Engine');
+}
+
+function renderSettingsDialog() {
+    const cfg = settings();
+    const body = $('#rp_engine_settings_modal .rp-engine-settings-body');
+    body.html(`
+        <div class="rp-engine-settings-row">
+            <label><input id="rp_engine_setting_enabled" type="checkbox" ${cfg.enabled ? 'checked' : ''}> Enable engine</label>
+            <label><input id="rp_engine_setting_inject" type="checkbox" ${cfg.injectHandoff ? 'checked' : ''}> Inject final payload</label>
+            <label><input id="rp_engine_setting_show_panel" type="checkbox" ${cfg.showPanel ? 'checked' : ''}> Show tracker panel</label>
+        </div>
+        <div class="rp-engine-settings-row">
+            <label>Name Style
+                <select id="rp_engine_name_style">${renderNameStyleOptions(cfg.nameStyle)}</select>
+            </label>
+        </div>
+        <textarea id="rp_engine_custom_name_style" spellcheck="false" placeholder="Custom name style, used when Name Style is Custom. Example: elegant desert empire names, Persian and Byzantine influence, 2-4 syllables, soft consonants, no modern English names."></textarea>
+        <div class="rp-engine-settings-row">
+            <label><input id="rp_engine_setting_time_enabled" type="checkbox" ${cfg.enableTimeTracking ? 'checked' : ''}> Enable world time tracking</label>
+            <label>1 real minute =
+                <input id="rp_engine_setting_time_scale" type="number" min="0.1" max="120" step="0.1" value="${Number(cfg.timeScaleWorldMinutesPerRealMinute) || DEFAULT_SETTINGS.timeScaleWorldMinutesPerRealMinute}">
+                world minutes
+            </label>
+            <label>Max idle counted
+                <input id="rp_engine_setting_time_cap" type="number" min="1" max="1440" step="1" value="${Number(cfg.timeTrackingMaxRealMinutes) || DEFAULT_SETTINGS.timeTrackingMaxRealMinutes}">
+                real minutes
+            </label>
+        </div>
+        <div class="rp-engine-muted">World time advances on generation, not continuously while idle. Explicit time skips or explicit scene times override the automatic tick.</div>
+        <div class="rp-engine-settings-row">
+            <label><input id="rp_engine_setting_creator_enabled" type="checkbox" ${cfg.enableCharacterCreator ? 'checked' : ''}> Enable character creator</label>
+            <label><input id="rp_engine_setting_creator_offer" type="checkbox" ${cfg.autoOfferCharacterCreator ? 'checked' : ''}> Offer on empty new chats</label>
+            <button id="rp_engine_setting_creator_open" type="button">Open Character Creator</button>
+        </div>
+        <div class="rp-engine-muted">Character creation rolls real d10s in the extension. The model only drafts race, appearance, traits, abilities, inventory, and notes; all risky ability use is still resolved by the core engine.</div>
+        <div class="rp-engine-settings-row">
+            <label><input id="rp_engine_setting_archive_enabled" type="checkbox" ${cfg.enableNpcArchive ? 'checked' : ''}> Enable NPC Lorebook archive</label>
+            <label><input id="rp_engine_setting_archive_auto" type="checkbox" ${cfg.autoCreateNpcArchive ? 'checked' : ''}> Auto-create archive book</label>
+            <label><input id="rp_engine_setting_archive_prune" type="checkbox" ${cfg.pruneArchivedAbsentNpcs ? 'checked' : ''}> Hide archived absent NPCs</label>
+            <label><input id="rp_engine_setting_archive_rehydrate" type="checkbox" ${cfg.rehydrateArchivedNpcs ? 'checked' : ''}> Restore archived NPCs on mention</label>
+            <label><input id="rp_engine_setting_archive_dead" type="checkbox" ${cfg.autoRetireDeadNpcs ? 'checked' : ''}> Auto-mark dead NPCs</label>
+        </div>
+        <div class="rp-engine-settings-row">
+            <label>NPC Archive Lorebook
+                <select id="rp_engine_setting_archive_world">${renderWorldOptions(cfg.npcArchiveWorld)}</select>
+            </label>
+            <button id="rp_engine_setting_archive_refresh" type="button">Refresh Books</button>
+            <button id="rp_engine_setting_archive_create" type="button">Create Default Book</button>
+            <button id="rp_engine_setting_archive_prune_forgotten" type="button">Prune Forgotten NPCs</button>
+        </div>
+        <div class="rp-engine-settings-row">
+            <label><input id="rp_engine_setting_render_enabled" type="checkbox" ${cfg.enableRenderRules ? 'checked' : ''}> Enforce Grounded Writing Engine</label>
+        </div>
+        <div class="rp-engine-muted">Core mechanics, name generation, and grounded writing rules are hardwired. The writing engine can be turned off if you miss the ozone in your roleplays. Style Guide is editable. Note: Style Guide is not a place to restrict how the LLM writes, but rather which author or specific vibe you want from the LLM.</div>
+        <div class="rp-engine-settings-row">
+            <label><input id="rp_engine_setting_style_enabled" type="checkbox" ${cfg.enableWritingStyle ? 'checked' : ''}> Enable Style Guide</label>
+            <button id="rp_engine_reset_style" type="button">Reset Style Guide</button>
+        </div>
+        <textarea id="rp_engine_writing_style" spellcheck="false"></textarea>
+        <div class="rp-engine-settings-footer">
+            <button id="rp_engine_settings_save" type="button">Save</button>
+            <button id="rp_engine_settings_cancel" type="button">Cancel</button>
+        </div>
+    `);
+
+    body.find('#rp_engine_writing_style').val(cfg.writingStyle || DEFAULT_WRITING_STYLE);
+    body.find('#rp_engine_custom_name_style').val(cfg.customNameStyle || '');
+
+    body.find('#rp_engine_reset_style').on('click', () => {
+        body.find('#rp_engine_writing_style').val(DEFAULT_WRITING_STYLE);
+    });
+    body.find('#rp_engine_setting_archive_refresh').on('click', async () => {
+        await updateWorldInfoList();
+        body.find('#rp_engine_setting_archive_world').html(renderWorldOptions(settings().npcArchiveWorld));
+    });
+    body.find('#rp_engine_setting_archive_create').on('click', async () => {
+        const worldName = await ensureNpcArchiveWorld({ createIfMissing: true });
+        body.find('#rp_engine_setting_archive_world').html(renderWorldOptions(worldName || settings().npcArchiveWorld));
+        if (worldName) body.find('#rp_engine_setting_archive_world').val(worldName);
+    });
+    body.find('#rp_engine_setting_archive_prune_forgotten').on('click', pruneForgottenNpcs);
+    body.find('#rp_engine_setting_creator_open').on('click', () => openCharacterCreatorDialog({ manual: true }));
+    body.find('#rp_engine_settings_cancel').on('click', closeSettingsDialog);
+    body.find('#rp_engine_settings_save').on('click', () => {
+        cfg.enabled = body.find('#rp_engine_setting_enabled').prop('checked');
+        cfg.injectHandoff = body.find('#rp_engine_setting_inject').prop('checked');
+        cfg.showPanel = body.find('#rp_engine_setting_show_panel').prop('checked');
+        cfg.enableNpcArchive = body.find('#rp_engine_setting_archive_enabled').prop('checked');
+        cfg.autoCreateNpcArchive = body.find('#rp_engine_setting_archive_auto').prop('checked');
+        cfg.pruneArchivedAbsentNpcs = body.find('#rp_engine_setting_archive_prune').prop('checked');
+        cfg.rehydrateArchivedNpcs = body.find('#rp_engine_setting_archive_rehydrate').prop('checked');
+        cfg.autoRetireDeadNpcs = body.find('#rp_engine_setting_archive_dead').prop('checked');
+        cfg.npcArchiveWorld = String(body.find('#rp_engine_setting_archive_world').val() || '');
+        cfg.enableRenderRules = body.find('#rp_engine_setting_render_enabled').prop('checked');
+        cfg.enableWritingStyle = body.find('#rp_engine_setting_style_enabled').prop('checked');
+        cfg.enableCharacterCreator = body.find('#rp_engine_setting_creator_enabled').prop('checked');
+        cfg.autoOfferCharacterCreator = body.find('#rp_engine_setting_creator_offer').prop('checked');
+        cfg.nameStyle = String(body.find('#rp_engine_name_style').val() || DEFAULT_SETTINGS.nameStyle);
+        cfg.customNameStyle = String(body.find('#rp_engine_custom_name_style').val() || '');
+        cfg.enableTimeTracking = body.find('#rp_engine_setting_time_enabled').prop('checked');
+        cfg.timeScaleWorldMinutesPerRealMinute = Math.max(0.1, Number(body.find('#rp_engine_setting_time_scale').val()) || DEFAULT_SETTINGS.timeScaleWorldMinutesPerRealMinute);
+        cfg.timeTrackingMaxRealMinutes = Math.max(1, Number(body.find('#rp_engine_setting_time_cap').val()) || DEFAULT_SETTINGS.timeTrackingMaxRealMinutes);
+        cfg.renderRules = DEFAULT_RENDER_RULES;
+        cfg.writingStyle = String(body.find('#rp_engine_writing_style').val() || '');
+        saveSettingsDebounced();
+        syncExtensionSettingsBlock();
+        renderPanel();
+        closeSettingsDialog();
+        toastr.success('Settings saved.', 'RP Engine');
+    });
+}
+
+function setupPanelDrag() {
+    const root = $('#rp_engine_tracker_panel');
+    const header = root.find('.rp-engine-header');
+
+    header.off(`pointerdown.${EXT_ID}`).on(`pointerdown.${EXT_ID}`, (event) => {
+        if ($(event.target).closest('button').length) return;
+        const el = root[0];
+        if (!el) return;
+
+        const rect = el.getBoundingClientRect();
+        const offsetX = event.clientX - rect.left;
+        const offsetY = event.clientY - rect.top;
+        panelDragMoved = false;
+
+        root.addClass('rp-engine-dragging');
+        event.preventDefault();
+
+        $(document)
+            .off(`pointermove.${EXT_ID} pointerup.${EXT_ID} pointercancel.${EXT_ID}`)
+            .on(`pointermove.${EXT_ID}`, (moveEvent) => {
+                if (Math.abs(moveEvent.clientX - event.clientX) > 3 || Math.abs(moveEvent.clientY - event.clientY) > 3) {
+                    panelDragMoved = true;
+                }
+                const pos = constrainPanelPosition(moveEvent.clientX - offsetX, moveEvent.clientY - offsetY, el);
+                root.css({ left: `${pos.left}px`, top: `${pos.top}px`, right: 'auto' });
+                settings().panelPosition = pos;
+            })
+            .on(`pointerup.${EXT_ID} pointercancel.${EXT_ID}`, () => {
+                root.removeClass('rp-engine-dragging');
+                saveSettingsDebounced();
+                $(document).off(`pointermove.${EXT_ID} pointerup.${EXT_ID} pointercancel.${EXT_ID}`);
+            });
+    });
+}
+
+function applyPanelPosition() {
+    const cfg = settings();
+    const root = $('#rp_engine_tracker_panel');
+    const el = root[0];
+    if (!el) return;
+
+    if (!isFinitePosition(cfg.panelPosition)) {
+        root.css({ left: '', top: '', right: '' });
+        return;
+    }
+
+    const pos = constrainPanelPosition(cfg.panelPosition.left, cfg.panelPosition.top, el);
+    root.css({ left: `${pos.left}px`, top: `${pos.top}px`, right: 'auto' });
+    cfg.panelPosition = pos;
+}
+
+function constrainPanelPosition(left, top, el) {
+    const rect = el.getBoundingClientRect();
+    const margin = 8;
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+    return {
+        left: Math.round(Math.min(Math.max(Number(left) || margin, margin), maxLeft)),
+        top: Math.round(Math.min(Math.max(Number(top) || margin, margin), maxTop)),
+    };
+}
+
+function isFinitePosition(value) {
+    return !!value
+        && typeof value === 'object'
+        && Number.isFinite(Number(value.left))
+        && Number.isFinite(Number(value.top));
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;',
+    }[char]));
+}
+
+function escapeRegExpLocal(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeNameLocal(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function uniqueLocal(list) {
+    return [...new Map((Array.isArray(list) ? list : [])
+        .map(x => String(x || '').trim())
+        .filter(Boolean)
+        .map(x => [normalizeNameLocal(x), x])).values()];
+}
+
+function preferKnownValue(primary, fallback, emptyValue = 'unknown') {
+    const primaryText = String(primary || '').trim();
+    if (primaryText && !/^(unknown|none|null|n\/a)$/i.test(primaryText)) return primaryText;
+    const fallbackText = String(fallback || '').trim();
+    if (fallbackText && !/^(unknown|none|null|n\/a)$/i.test(fallbackText)) return fallbackText;
+    return emptyValue;
+}
+
+jQuery(() => {
+    settings();
+    tracker();
+    setupUi();
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        lastGroundedWritingValidationSignature = '';
+        updateRevealedNamesFromChat();
+        tracker();
+        renderPanel();
+        maybeOfferCharacterCreator();
+    });
+    eventSource.on(event_types.MESSAGE_UPDATED, (messageId) => {
+        updateRevealedNamesFromChat();
+        renderPanel();
+        scheduleGroundedWritingValidation(messageId, writingRepairState.active ? 'regenerate' : 'updated');
+    });
+    eventSource.on(event_types.MESSAGE_SWIPED, () => {
+        updateRevealedNamesFromChat();
+        renderPanel();
+    });
+    eventSource.on(event_types.MESSAGE_RECEIVED, (messageId, type) => {
+        updateRevealedNamesFromChat();
+        scheduleGroundedWritingValidation(messageId, type || 'received');
+    });
+    eventSource.on(event_types.GENERATION_ENDED, (messageCount) => {
+        updateRevealedNamesFromChat();
+        const lastMessageId = Number(messageCount) - 1;
+        scheduleGroundedWritingValidation(lastMessageId, 'generation_ended', 3000);
+    });
+    eventSource.on(event_types.GENERATION_STARTED, (_type, params = {}) => {
+        if (!params?.automatic_trigger) {
+            writingRepairSuppressed = false;
+        }
+    });
+    eventSource.on(event_types.GENERATION_STOPPED, () => {
+        stopWritingRepairAutomation('ST emitted generation_stopped.');
+    });
+    eventSource.on(event_types.MESSAGE_DELETED, () => {
+        lastGroundedWritingValidationSignature = '';
+        clearWritingValidationQueue();
+        const latestUserMessage = latestUserMessageFromAvailableChats(getContext().chat || []);
+        const repairTrigger = writingRepairState.trackerSnapshot?.lastAudit?.triggerUserMessage
+            || tracker()?.lastAudit?.triggerUserMessage
+            || '';
+        if (writingRepairState.active || (writingRepairState.handoff && latestUserMessage && repairTrigger && latestUserMessage === repairTrigger)) {
+            updateRevealedNamesFromChat();
+            renderPanel();
+            return;
+        }
+        resetWritingRepairState();
+        rollbackLastTurnIfTriggerDeleted();
+        updateRevealedNamesFromChat();
+        renderPanel();
+    });
+    eventSource.on(event_types.CHAT_DELETED, deleteNpcArchiveEntriesForChat);
+    eventSource.on(event_types.GROUP_CHAT_DELETED, deleteNpcArchiveEntriesForChat);
+});
