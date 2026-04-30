@@ -1402,7 +1402,8 @@ async function runQuietWritingRepair(messageId, audit) {
         removeReasoning: true,
     }, Math.min(Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000), 120000));
     const parsed = parseJsonResponse(raw);
-    const replacement = cleanRepairReplacement(parsed?.replacement || raw);
+    const replacementSource = parsed && typeof parsed === 'object' ? parsed.replacement : raw;
+    const replacement = cleanRepairReplacement(replacementSource);
     if (!replacement) {
         markWritingRepairFailed(audit, 'Quiet repair returned an empty replacement.', target);
         return false;
@@ -1581,12 +1582,14 @@ function buildGroundedWritingValidatorPrompt({ userInput, response, trackerSumma
         '- A violation needs a specific phrase or sentence from <VISIBLE_RESPONSE> as evidence. If you cannot quote the offending visible text, return valid=true.',
         '- Camera/microphone standard: if a camera or microphone could capture it from the scene position, it is generally legal narration. Prefer concrete physical detail, but do not reject visible expressions, visible posture, tone, normal physical adjectives, or audible dialogue flavor unless the exact text directly violates a locked ban.',
         '- Character dialogue is more permissive than narrator prose. NPCs may use folklore, idiom, superstition, metaphor, or flavor in spoken lines. Do not reject quoted dialogue for literalism/style unless it violates user agency, consent/mechanics, or exposes hidden system rules.',
+        '- Engine leakage is always a direct violation, including in quoted dialogue, unless the user is explicitly asking OOC about the extension. Reject visible private labels, schemas, JSON/checklists, mechanics explanations, rolls, tracker/audit text, and handoff fields.',
         '- Do not infer hidden intent from legal concrete behavior. Small observable gestures are legal unless they are one of the banned shorthand categories or they take over user agency.',
         '- Enforce POV-locked epistemology: no hidden motives, mindreading, unknown causes, or knowledge unavailable from the user position.',
         '- Enforce strict behaviorism without flattening emotion: emotion should be physically demonstrated through observable action, not removed.',
         '- Allowed emotional tells include visible facial expression, gaze changes, looking away, hand movement, nervous object handling, stance changes, distance changes, lip/tongue movement, hesitation, pressure, recoil, speech disruption, posture, contact, timing, or other physical behavior with scene effect.',
+        '- Normal audible vocal description is legal. Do not reject voice dropped/lowered/rose/quieted, spoke more quietly/loudly, voice stayed quiet, voice cracked, or similar volume/pitch/delivery changes unless the exact phrase turns voice into an emotional substance, impossible physical force, or metaphor.',
         '- Reject lazy emotional shorthand, canned hesitation/anxiety micro-beats, negative-expression shorthand, facial/breath micro-beat punctuation, metaphorized emotion, and stock autonomic cues such as blush, flush, cheeks heating, ears reddening, heart fluttering/pounding, stomach dropping, breath hitching or exhaling through the nose as emotional punctuation, temple pulses ticking/throbbing, veins throbbing, eyes darkening/softening/sharpening/flashing as emotion labels, gaze sharpening/hardening/softening/locking/going cold, warmth/coldness/light/shadow/music in eyes/gaze/voice, jaws shifting/setting/clenching/working/tightening, lips parting without consequence, mouths opening and closing, throat bobbing/tightening, visible or emphatic swallowing as emotional shorthand, whitening/pale knuckles as tension shorthand, fingers twitching, and equivalents.',
-        '- Metaphorized emotion means treating voice, eyes, gaze, warmth, coldness, music, light, shadow, softness, or hardness as emotional substances. Bad: "the warmth that lived there is gone"; bad: "no music left in her voice"; bad: "her gaze went cold". Replace with concrete action, speech content, distance, object handling, or a clean stop.',
+        '- Metaphorized emotion means treating voice, eyes, gaze, warmth, coldness, music, light, shadow, softness, or hardness as emotional substances. Bad: "the warmth that lived there is gone"; bad: "the warmth left her voice"; bad: "no music left in her voice"; bad: "her gaze went cold". Replace with concrete action, speech content, distance, object handling, or a clean stop.',
         '- Negative-expression shorthand means absence used as emotion instead of action: "she does not smile", "she does not look away", "without blinking", "his smile does not reach his eyes", and equivalent non-events. If the character simply does not do something, omit it unless it changes the scene materially.',
         '- Observable small gestures are allowed. Do not reject a visible hand, gaze, lip, tongue, stance, or posture detail merely because it is small. Reject it only if it is stock shorthand, decorative filler, or used to smuggle hidden emotion without consequence.',
         '- Small physical tells are valid when they produce or reveal concrete scene behavior: changed distance, object use, posture, timing, pressure, contact, speech content, movement, or an immediate tactical/social consequence.',
@@ -1598,11 +1601,12 @@ function buildGroundedWritingValidatorPrompt({ userInput, response, trackerSumma
         '- PERSONIFICATION / ABSTRACT PHYSICAL AGENCY: Abstractions, language, silence, tension, rooms, weather, moments, truth, names, and words cannot act, move, feel, hold, breathe, settle, land, press, cut, wait, watch, or react. Bad: "The name settled into the quiet." Bad: "The silence held its breath." Good: "\"The temple is called Eryndor.\" Seraphina stops speaking."',
         '- METAPHOR / SIMILE: Do not replace the visible event with a poetic image or comparison. Bad: "The name landed soft as a leaf on still water." Bad: "The truth hit her like a blow." Good: "Seraphina says the name once." Good: "She steps back once and grips the table edge."',
         '- PATHETIC FALLACY: Do not make weather, darkness, air, rooms, silence, or atmosphere mirror emotion or intent. Bad: "The room waited." Bad: "The dark pressed in around them." Good: "The room is dark except for the lamp on the table."',
-        '- MELODRAMA / EMOTIONAL PHYSICS: Do not render feelings, words, truth, silence, or tension as weight, gravity, electricity, heat, rupture, collapse, impact, pressure, or suspended time. Bad: "The moment shattered." Bad: "Her words carried the weight of a confession." Good: "She does not answer for three seconds."',
+        '- MELODRAMA / EMOTIONAL PHYSICS: Do not render feelings, words, truth, silence, or tension as weight, gravity, electricity, heat, rupture, collapse, impact, pressure, or suspended time. Bad: "The moment shattered." Bad: "Her words carried the weight of a confession." Good: "She does not answer for three seconds." Legal: "Her voice dropped lower" when it means audible volume or pitch.',
         '- LAZY EMOTIONAL SHORTHAND: Do not use stock autonomic, negative-expression, breath-punctuation, facial-microbeat, metaphorized emotion, or canned hesitation cues as emotion labels. Bad: "Her cheeks flushed." Bad: "Her throat bobbed." Bad: "Her jaw set." Bad: "Her jaw shifts once, muscle tensing along the bone." Bad: "She exhales through her nose." Bad: "She does not smile." Bad: "She does not look away." Bad: "The warmth that lived there is gone." Bad: "No music is left in her voice." Bad: "Her knuckles whitened." Good: "She looks away and moves the cup behind the ledger."',
         '- USER AGENCY VIOLATION: Do not repeat, paraphrase, continue, decide, speak, or act for the user unless the input used triple parentheses. Bad: "As you ask, she..." Bad: "You step closer." Good: begin with the NPC response or consequence.',
         '- Enforce sensory gates against lazy ambient smell/taste shortcuts. Do not reject dialogue about smell, directions involving smell, or a physically specific overpowering nearby source.',
         '- Enforce ability integration: write observable effects only, no system terms, ability labels, or causation explanations unless spoken aloud.',
+        '- Enforce antiMetaEnforcement: never output private control labels or mechanics text such as OOC_MODE, SYSTEM_ONLY_UPDATE, GOAL, DECISIVE_ACTION, STAKES, OUTCOME, LANDED_ACTIONS, COUNTER_POTENTIAL, ACTION_TARGETS, OPPOSITION_NPC, NPC_HANDOFFS, CHAOS, REQUIRED_NPC_INITIATIVE, NPC_PROACTIVITY, AGGRESSION_RESULTS, FinalState, Behavior, Target, Gate, Proactive, Intent, Impulse, Threshold, Margin, resolver, handoff, tracker, audit, Grounded Writing, JSON, or schema text.',
         '- Enforce turn boundary: do not write user speech, thoughts, feelings, intentions, decisions, voluntary reactions, silence, or new/continued action; do not recap, echo, paraphrase, summarize, re-perform, continue, or add choices to the user action. Normal IC replies begin at T+1: consequence, result, NPC reaction, environmental change, or new stimulus immediately after the user action.',
         '- User agency distinction: externally caused, involuntary physical or sensory effects may be narrated because the user cannot choose them. Legal examples: being shoved, grabbed, knocked back, startled by a sudden shout, woken by noise, blinded by impact or light, ears ringing after an explosion, vision going white after a blow. Illegal examples: deciding to step back, choosing to turn, speaking, thinking, feeling fear, or continuing the user action.',
         '- Reject subjective disorientation written as scene physics or metaphor unless the scene physically supports it. Bad: "The ground tilted." Good if impact caused it: "Your vision went white for half a second." Good if earthquake/ship/deck physically moves: "The floor lurched under both boots."',
@@ -1766,10 +1770,21 @@ function sentenceContainingText(source, needle) {
 }
 
 function cleanRepairReplacement(value) {
-    return String(value || '')
+    const text = String(value || '')
         .replace(/^```(?:json|text|markdown)?\s*/i, '')
         .replace(/```\s*$/i, '')
         .replace(/^\s*(?:replacement|repaired sentence|repaired text)\s*:\s*/i, '')
+        .trim();
+    if (!text || /^(?:\{\}|\[\]|null|undefined)$/i.test(text)) return '';
+    if (/^\{[\s\S]*}$/.test(text)) {
+        const parsed = parseJsonResponse(text);
+        if (parsed && typeof parsed === 'object' && typeof parsed.replacement === 'string') {
+            return cleanRepairReplacement(parsed.replacement);
+        }
+        return '';
+    }
+    return text
+        .replace(/^\s*["'“”]+|["'“”]+\s*$/g, '')
         .trim();
 }
 
@@ -1777,16 +1792,26 @@ function applyWritingRepairReplacement(original, target, replacement) {
     const source = String(original || '');
     const fixed = String(replacement || '').trim();
     if (!source || !fixed) return '';
-    if (target?.mode === 'full') return fixed;
+    if (target?.mode === 'full') return normalizeRepairedMessageSpacing(fixed);
     const targetText = String(target?.text || '');
     if (targetText && source.includes(targetText)) {
-        return source.replace(targetText, fixed);
+        return normalizeRepairedMessageSpacing(source.replace(targetText, fixed));
     }
     const evidence = String(target?.evidence || '');
     if (evidence && source.includes(evidence)) {
-        return source.replace(evidence, fixed);
+        return normalizeRepairedMessageSpacing(source.replace(evidence, fixed));
     }
     return '';
+}
+
+function normalizeRepairedMessageSpacing(value) {
+    return String(value || '')
+        .replace(/([.!?])([A-Z])/g, '$1 $2')
+        .replace(/([a-z0-9])(")([A-Z])/g, '$1$2 $3')
+        .replace(/([.!?])(")([A-Z])/g, '$1$2 $3')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .trim();
 }
 
 async function replaceAssistantMessageText(messageId, repairedText) {
@@ -1848,6 +1873,9 @@ function cleanRepairEvidenceLine(value) {
 
 function groundedRepairCategory(rule) {
     const text = String(rule || '').toLowerCase();
+    if (/antimeta|engine leakage|schema|json|tracker|audit|handoff|private|mechanic/.test(text)) {
+        return 'antiMetaEnforcement: Private Mechanics / Engine Leakage';
+    }
     if (/user|agency|recap|echo|paraphrase/.test(text)) {
         return 'agencyEnforcement / chronologyEnforcement: Absolute Separation of Control and T+1 Consequence';
     }
@@ -1889,6 +1917,9 @@ function groundedRepairCategory(rule) {
 
 function repairFailureCauseForRule(rule, fallback = '') {
     const text = String(rule || '').toLowerCase();
+    if (/antimeta|private|leakage|schema|json|tracker|audit|handoff|mechanic/.test(text)) {
+        return 'Exposing private engine labels, mechanics, tracker/audit text, schemas, JSON, rolls, or handoff fields in visible chat is strictly prohibited.';
+    }
     if (/agency|chronology|separation|t\+1/.test(text)) {
         return 'Narrating the user character\'s speech, thoughts, decisions, voluntary actions, recap, echo, paraphrase, or continued action is strictly prohibited.';
     }
@@ -1930,6 +1961,9 @@ function repairFailureCauseForRule(rule, fallback = '') {
 
 function desiredRepairBehaviorForRule(rule) {
     const text = String(rule || '').toLowerCase();
+    if (/antimeta|private|leakage|schema|json|tracker|audit|handoff|mechanic/.test(text)) {
+        return 'ordinary fictional narration or dialogue only, with all private mechanics removed';
+    }
     if (/agency|chronology|separation|t\+1/.test(text)) {
         return 'the immediate consequence, result, NPC reaction, environmental change, or new stimulus after the user action';
     }
@@ -1971,6 +2005,9 @@ function desiredRepairBehaviorForRule(rule) {
 
 function repairAcknowledgementForRule(rule) {
     const text = String(rule || '').toLowerCase();
+    if (/antimeta|private|leakage|schema|json|tracker|audit|handoff|mechanic/.test(text)) {
+        return 'I will strictly abide by antiMetaEnforcement. I will not expose private mechanics, engine labels, schemas, JSON, tracker/audit text, rolls, or handoff fields.';
+    }
     if (/agency|chronology|separation|t\+1/.test(text)) {
         return 'I will strictly abide by agencyEnforcement and chronologyEnforcement. I will not violate user agency, echo the user action, or continue the user character action.';
     }
@@ -2012,6 +2049,9 @@ function repairAcknowledgementForRule(rule) {
 
 function unwantedRepairBehaviorForRule(rule) {
     const text = String(rule || '').toLowerCase();
+    if (/antimeta|private|leakage|schema|json|tracker|audit|handoff|mechanic/.test(text)) {
+        return 'engine labels, private field names, mechanics explanations, JSON, schemas, tracker summaries, audit language, dice, rolls, margins, or hidden handoff text';
+    }
     if (/agency|chronology|separation|t\+1/.test(text)) {
         return 'user speech, thoughts, decisions, voluntary actions, recap, echo, paraphrase, or continued user action';
     }
@@ -2053,6 +2093,9 @@ function unwantedRepairBehaviorForRule(rule) {
 
 function repairInstructionForRule(rule) {
     const text = String(rule || '').toLowerCase();
+    if (/antimeta|private|leakage|schema|json|tracker|audit|handoff|mechanic/.test(text)) {
+        return 'Delete private labels, JSON/schema text, rolls, tracker/audit summaries, and mechanics explanations. Preserve only the fictional consequence, NPC reaction, environmental change, useful answer, or dialogue.';
+    }
     if (/user|agency|recap|echo|paraphrase|chronology|separation|t\+1/.test(text)) {
         return 'Remove user speech, thoughts, decisions, recap, echo, paraphrase, or new/continued user action. Begin at the consequence, result, NPC reaction, environmental change, or new stimulus.';
     }
@@ -2263,12 +2306,12 @@ function isDirectWritingViolation(item, response) {
     if (isDialoguePermissiveWritingCategory(categoryText) && evidenceInsideQuotedDialogue(response, evidence)) {
         return false;
     }
-    return /personification|abstract|metaphor|simile|pathetic|fallacy|melodrama|emotional physics|lazy|autonomic|shorthand|negative-expression|negative expression|sensory|smell|taste|ability|system term|user agency|user action|recap|echo|paraphrase|turn-boundary|turn boundary|question|idle filler|waiting|denied intimacy|consent|name style|name generation|generic western|candidate priority/.test(categoryText);
+    return /personification|abstract|metaphor|simile|pathetic|fallacy|melodrama|emotional physics|lazy|autonomic|shorthand|negative-expression|negative expression|sensory|smell|taste|ability|system term|user agency|user action|recap|echo|paraphrase|turn-boundary|turn boundary|question|idle filler|waiting|denied intimacy|consent|name style|name generation|generic western|candidate priority|antimeta|engine leakage|schema|json|tracker|audit|handoff|private/.test(categoryText);
 }
 
 function isDialoguePermissiveWritingCategory(categoryText) {
     const text = String(categoryText || '').toLowerCase();
-    if (/user agency|user action|recap|echo|paraphrase|turn-boundary|turn boundary|denied intimacy|consent|mechanic|system term|ability/.test(text)) {
+    if (/user agency|user action|recap|echo|paraphrase|turn-boundary|turn boundary|denied intimacy|consent|mechanic|system term|ability|antimeta|engine leakage|schema|json|tracker|audit|handoff|private/.test(text)) {
         return false;
     }
     return /personification|abstract|metaphor|simile|pathetic|fallacy|melodrama|emotional physics|lazy|autonomic|shorthand|negative-expression|negative expression|sensory|smell|taste|poetic|atmosphere/.test(text);
@@ -2331,6 +2374,16 @@ function deterministicWritingPrecheck(response, userInput = '', currentTracker =
     const proxyNarration = /^\s*\(\(\([\s\S]*\)\)\)\s*$/.test(String(userInput || ''));
     const checks = [
         {
+            rule: 'antiMetaEnforcement: private engine leakage',
+            pattern: /\b(?:AUTHORITATIVE\s+RP\s+ENGINE\s+HANDOFF|PRIVATE\s+CONTROL\s+BLOCK|OOC_MODE|OOC_INSTRUCTION|SYSTEM_ONLY_UPDATE|SYSTEM_ONLY_REASON|DECISIVE_ACTION|ON_SUCCESS|ON_FAILURE|STAKES|INTIMACY_CONSENT|OUTCOME|LANDED_ACTIONS|COUNTER_POTENTIAL|ACTION_TARGETS|OPPOSITION_NPC|OPPOSITION_ENV|NPC_HANDOFFS|CHAOS|REQUIRED_NPC_INITIATIVE|NPC_PROACTIVITY|AGGRESSION_RESULTS|FinalState|IntimacyGate|Proactive|Proactivity|CounterBonus|Threshold|NarrationBand|resolver|handoff|tracker|audit|Grounded\s+Writing|resolution\s+packet|relationship\s+state|dice\s+roll|rolls?|margin|B\s*[:=\-]\s*Bond|F\s*[:=\-]\s*(?:Fear|Friction)|H\s*[:=\-]\s*(?:Hostility|Heat)|\bB[1-4]\s*\/\s*F[1-4]\s*\/\s*H[1-4]\b|friction\s+and\s+heat)\b/i,
+            problem: 'Exposes private engine labels, mechanics, tracker/audit terms, rolls, or handoff fields in visible chat. Render only the fictional consequence.',
+        },
+        {
+            rule: 'antiMetaEnforcement: schema or JSON leakage',
+            pattern: /(?:^\s*[\[{][\s\S]{0,500}[\]}]\s*$|"\s*(?:valid|severity|violations|replacement|goal|decisiveAction|hasStakes|actionTargets|npcInScene|resolutionPacket|npcHandoffs|chaosHandoff|proactivityHandoff)\s*"\s*:|^\s*[-*]\s*(?:GOAL|STAKES|OUTCOME|CHAOS|NPC_HANDOFFS|PROACTIVITY|AGGRESSION_RESULTS)\s*:)/i,
+            problem: 'Outputs schema, JSON, checklist, or private structured engine data instead of ordinary narration.',
+        },
+        {
             rule: 'Lazy autonomic shorthand',
             pattern: /\b(blush(?:es|ed|ing)?|flush(?:es|ed|ing)?|cheeks?\s+(?:heat|heated|heats|redden|reddened|color|colored|pink|pinked|burn|burned)|ears?\s+(?:redden|reddened|heat|heated)|heart\s+(?:flutter(?:s|ed|ing)?|pound(?:s|ed|ing)?|race(?:s|d)?|skip(?:s|ped)?))\b/i,
             problem: 'Uses stock autonomic emotion cue instead of physical behavior with scene effect.',
@@ -2347,7 +2400,7 @@ function deterministicWritingPrecheck(response, userInput = '', currentTracker =
         },
         {
             rule: 'Metaphorized emotion shorthand',
-            pattern: /\b(?:(?:warmth|coldness|cold|heat|light|shadow|softness|hardness|music)\s+(?:(?:that\s+)?(?:lived|sat|rested|stayed)\s+(?:there|in\s+(?:his|her|their)\s+(?:eyes?|gaze|voice))|(?:is|was|goes?|went|has\s+gone|had\s+gone)\s+(?:gone|left|missing|dead|absent))|(?:no|not\s+any)\s+(?:warmth|music|softness|light)\s+(?:is\s+|was\s+)?(?:left|remains?)\s+in\s+(?:his|her|their)\s+(?:eyes?|gaze|voice)|(?:his|her|their)\s+(?:eyes?|gaze|voice)\s+(?:go(?:es|ing)?|went|turn(?:s|ed)?|become(?:s)?|became)\s+(?:cold|hard|soft|empty|flat|dead|warm)|(?:voice|gaze|eyes?)\s+(?:is|are|was|were|goes?|went|turns?|turned)\s+(?:cold|hard|soft|empty|flat|dead|warm)|(?:voice|words?)\s+(?:had|has|with)\s+(?:no|not\s+any)\s+(?:music|warmth|softness|light))\b/i,
+            pattern: /\b(?:(?:warmth|coldness|cold|heat|light|shadow|softness|hardness|music)\s+(?:(?:that\s+)?(?:lived|sat|rested|stayed)\s+(?:there|in\s+(?:his|her|their)\s+(?:eyes?|gaze|voice))|(?:is|was|goes?|went|has\s+gone|had\s+gone)\s+(?:gone|left|missing|dead|absent)|(?:leaves?|left|drains?|drained|vanishes?|vanished)\s+(?:from\s+)?(?:his|her|their)\s+(?:eyes?|gaze|voice))|(?:no|not\s+any)\s+(?:warmth|music|softness|light)\s+(?:is\s+|was\s+)?(?:left|remains?)\s+in\s+(?:his|her|their)\s+(?:eyes?|gaze|voice)|(?:his|her|their)\s+(?:eyes?|gaze|voice)\s+(?:go(?:es|ing)?|went|turn(?:s|ed)?|become(?:s)?|became)\s+(?:cold|hard|soft|empty|flat|dead|warm)|(?:voice|gaze|eyes?)\s+(?:is|are|was|were|goes?|went|turns?|turned)\s+(?:cold|hard|soft|empty|flat|dead|warm)|(?:voice|words?)\s+(?:had|has|with)\s+(?:no|not\s+any)\s+(?:music|warmth|softness|light))\b/i,
             problem: 'Uses metaphorized emotion in eyes, gaze, voice, warmth, coldness, music, light, or shadow instead of literal observable behavior.',
         },
         {
@@ -2374,7 +2427,7 @@ function deterministicWritingPrecheck(response, userInput = '', currentTracker =
     const violations = [];
     for (const check of checks) {
         const match = narratorText.match(check.pattern);
-        if (match) {
+        if (match && !isAllowedGroundedWritingMatch(check.rule, match[0])) {
             violations.push({
                 rule: check.rule,
                 evidence: match[0],
@@ -2425,6 +2478,24 @@ function deterministicWritingPrecheck(response, userInput = '', currentTracker =
             ? 'Regenerate with concrete observable behavior and remove personification, metaphor/simile, pathetic fallacy, melodrama, lazy emotional shorthand, and atmospheric abstraction.'
             : '',
     };
+}
+
+function isAllowedGroundedWritingMatch(rule, evidence) {
+    const category = String(rule || '').toLowerCase();
+    const text = String(evidence || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!text) return false;
+    if (/melodramatic emotional physics|metaphorized emotion shorthand/.test(category)) {
+        if (/^(?:voice|his voice|her voice|their voice|the voice)\s+(?:drop(?:s|ped|ping)?|lower(?:s|ed|ing)?|rose|rises?|raised|quiet(?:s|ed|ing)?|stays?|stayed)$/i.test(text)) {
+            return true;
+        }
+        if (/\b(?:his|her|their|the)?\s*voice\s+(?:drop(?:s|ped|ping)?|lower(?:s|ed|ing)?|rose|rises?|raised|quiet(?:s|ed|ing)?|stays?|stayed|turns?|turned|goes?|went)\s+(?:lower|low|quiet|quieter|loud|louder|soft|softer|sharp|sharper|flat|hoarse|thin|rough)?\b/.test(text)) {
+            return !/\b(?:warmth|coldness|cold|heat|light|shadow|softness|hardness|music|weight|pressure|electric|shatter|break|collapse|land|hit|press|cut|knife|stone|leaf)\b/.test(text);
+        }
+        if (/\b(?:spoke|speaks|said|says|answered|answers)\s+(?:more\s+)?(?:quietly|loudly|softly|flatly|sharply|hoarsely|roughly)\b/.test(text)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function detectGenericNameReveal(response, currentTracker = null) {
@@ -2714,7 +2785,6 @@ function renderAudit(audit) {
     const chaos = audit.chaosHandoff?.CHAOS || {};
     const proactivity = audit.proactivityHandoff || {};
     const aggression = audit.aggressionResults || {};
-    const writing = audit.writingAudit || tracker().lastWritingAudit || null;
     const roll = packet.roll || {};
     const npcs = Array.isArray(audit.npcHandoffs) ? audit.npcHandoffs : [];
     const statLine = packet.stats ? `${packet.stats.USER || '?'} vs ${packet.stats.OPP || '?'}` : '(none)';
@@ -2765,10 +2835,6 @@ function renderAudit(audit) {
         <div class="rp-engine-audit-card">
             <div class="rp-engine-audit-title">Proactivity</div>
             ${Object.keys(proactivity).length ? Object.entries(proactivity).map(([name, item]) => renderProactivityAudit(name, item, aggression[name])).join('') : '<div class="rp-engine-muted">No NPC proactivity.</div>'}
-        </div>
-        <div class="rp-engine-audit-card">
-            <div class="rp-engine-audit-title">Grounded Writing</div>
-            ${writing ? renderWritingAudit(writing) : '<div class="rp-engine-muted">No writing audit yet.</div>'}
         </div>
     `;
 }
