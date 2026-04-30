@@ -59,7 +59,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.171';
+} from './engine.js?v=0.1.172';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -168,6 +168,7 @@ let writingRepairState = {
 };
 let writingViolationReportOpen = false;
 let manualWritingRepairRunning = false;
+let suppressNextRepairUpdateValidation = false;
 
 function settings() {
     extension_settings[EXT_ID] = extension_settings[EXT_ID] || structuredClone(DEFAULT_SETTINGS);
@@ -1307,6 +1308,8 @@ function abortActiveQuietPrompts(reason = 'Quiet prompt aborted.') {
 
 function stopWritingRepairAutomation(reason = 'Generation stopped by user.') {
     writingRepairSuppressed = true;
+    manualWritingRepairRunning = false;
+    suppressNextRepairUpdateValidation = false;
     clearWritingValidationQueue();
     abortActiveQuietPrompts(reason);
     resetWritingRepairState();
@@ -1424,6 +1427,7 @@ async function runQuietWritingRepair(messageId, audit) {
         quietPrompt: `${prompt}\n\nReturn exactly one compact JSON object only. No markdown, no prose, no commentary.`,
         skipWIAN: true,
         responseLength: target.mode === 'full' ? 1800 : 500,
+        jsonSchema: WRITING_REPAIR_SCHEMA,
         removeReasoning: true,
     }, Math.min(Math.max(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 60000), 120000));
     const parsed = parseJsonResponse(raw);
@@ -1446,6 +1450,7 @@ async function runQuietWritingRepair(messageId, audit) {
         return false;
     }
 
+    suppressNextRepairUpdateValidation = true;
     await replaceAssistantMessageText(messageId, repairedText);
     saveWritingRepairResult(audit, {
         status: 'repaired',
@@ -1491,6 +1496,7 @@ function markWritingRepairFailed(audit, reason, target = null, replacement = '')
     renderPanel();
     setExtensionPrompt(WRITING_REPAIR_PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0);
     clearWritingValidationQueue();
+    suppressNextRepairUpdateValidation = false;
     toastr.error(reason, 'RP Engine');
     resetWritingRepairState({ clearPrompt: false });
 }
@@ -3858,6 +3864,10 @@ jQuery(() => {
     eventSource.on(event_types.MESSAGE_UPDATED, (messageId) => {
         updateRevealedNamesFromChat();
         renderPanel();
+        if (suppressNextRepairUpdateValidation) {
+            suppressNextRepairUpdateValidation = false;
+            return;
+        }
         scheduleGroundedWritingValidation(messageId, writingRepairState.active ? 'regenerate' : 'updated');
     });
     eventSource.on(event_types.MESSAGE_SWIPED, () => {
