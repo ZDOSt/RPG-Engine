@@ -1,19 +1,24 @@
 import {
+    amount_gen,
     chat as liveChat,
     chat_metadata,
+    characters,
     eventSource,
     event_types,
     extension_prompt_roles,
     extension_prompt_types,
     Generate,
+    main_api,
     name1,
     name2,
     saveChatDebounced,
     saveSettingsDebounced,
+    setGenerationParamsFromPreset,
     setUserName,
     setExtensionPrompt,
     this_chid,
 } from '../../../../script.js';
+import { oai_settings } from '../../../openai.js';
 import { extension_settings, getContext, saveMetadataDebounced } from '../../../extensions.js';
 import { selected_group } from '../../../group-chats.js';
 import { persona_description_positions, power_user } from '../../../power-user.js';
@@ -53,7 +58,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.184';
+} from './engine.js?v=0.1.185';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -172,6 +177,159 @@ const COMPACT_RESOLVER_SCHEMA = Object.freeze({
             'harmedObservers',
             'npcInScene',
             'relationshipRoute',
+            'newEncounter',
+            'timeDeltaMinutes',
+            'timeSkipReason',
+            'scene',
+            'npcFacts',
+            'inventoryDeltas',
+            'taskDeltas'
+        ],
+    },
+});
+const RAW_RESOLVER_SCHEMA = Object.freeze({
+    name: 'rp_engine_raw_context_resolver_v1',
+    schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+            fullRequired: { type: 'string', enum: ['Y', 'N'] },
+            fullRequiredReason: { type: 'string' },
+            loreMightMatter: { type: 'string', enum: ['Y', 'N'] },
+            confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+            ooc: { type: 'string', enum: ['Y', 'N'] },
+            oocMode: { type: 'string', enum: ['IC', 'STOP', 'PROXY', 'MIXED'] },
+            oocInstruction: { type: 'string' },
+            goal: { type: 'string' },
+            goalKind: { type: 'string', enum: ['Normal', 'IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'] },
+            goalEvidence: { type: 'string' },
+            decisiveAction: { type: 'string' },
+            decisiveActionEvidence: { type: 'string' },
+            outcomeOnSuccess: { type: 'string' },
+            outcomeOnFailure: { type: 'string' },
+            actionTargets: { type: 'array', items: { type: 'string' } },
+            oppTargetsNpc: { type: 'array', items: { type: 'string' } },
+            oppTargetsEnv: { type: 'array', items: { type: 'string' } },
+            benefitedObservers: { type: 'array', items: { type: 'string' } },
+            harmedObservers: { type: 'array', items: { type: 'string' } },
+            npcInScene: { type: 'array', items: { type: 'string' } },
+            hasStakes: { type: 'string', enum: ['Y', 'N'] },
+            stakesEvidence: { type: 'string' },
+            actionCount: { type: 'integer', minimum: 1, maximum: 3 },
+            userStat: { type: 'string', enum: ['PHY', 'MND', 'CHA'] },
+            userStatEvidence: { type: 'string' },
+            oppStat: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'ENV'] },
+            oppStatEvidence: { type: 'string' },
+            hostilePhysicalHarm: { type: 'string', enum: ['Y', 'N'] },
+            newEncounter: { type: 'string', enum: ['Y', 'N'] },
+            timeDeltaMinutes: { type: 'integer', minimum: -10080, maximum: 10080 },
+            timeSkipReason: { type: 'string' },
+            scene: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    location: { type: 'string' },
+                    time: { type: 'string' },
+                    weather: { type: 'string' },
+                },
+                required: ['location', 'time', 'weather'],
+            },
+            npcFacts: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        name: { type: 'string' },
+                        present: { type: 'boolean' },
+                        position: { type: 'string' },
+                        condition: { type: 'string' },
+                        knowsUser: { type: 'string' },
+                        explicitPreset: {
+                            type: 'string',
+                            enum: ['romanticOpen', 'userBadRep', 'userGoodRep', 'userNonHuman', 'neutralDefault', 'unknown'],
+                        },
+                        rank: { type: 'string', enum: ['Weak', 'Average', 'Trained', 'Elite', 'Boss', 'unknown'] },
+                        mainStat: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'Balanced', 'unknown'] },
+                        explicitStats: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                PHY: { type: 'integer', minimum: 1, maximum: 10 },
+                                MND: { type: 'integer', minimum: 1, maximum: 10 },
+                                CHA: { type: 'integer', minimum: 1, maximum: 10 },
+                            },
+                        },
+                        override: {
+                            type: 'string',
+                            enum: ['Transactional', 'Hedonist', 'Exploitation', 'Established', 'NONE', 'unknown'],
+                        },
+                        archiveStatus: {
+                            type: 'string',
+                            enum: ['Active', 'Inactive', 'Dead', 'Retired', 'Forgotten', 'unknown'],
+                        },
+                    },
+                    required: ['name', 'position', 'condition', 'knowsUser', 'explicitPreset', 'rank', 'mainStat', 'override'],
+                },
+            },
+            inventoryDeltas: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        action: { type: 'string', enum: ['gain', 'lose', 'equip', 'unequip', 'use', 'damage'] },
+                        item: { type: 'string' },
+                        evidence: { type: 'string' },
+                    },
+                    required: ['action', 'item', 'evidence'],
+                },
+            },
+            taskDeltas: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        action: { type: 'string', enum: ['add', 'complete', 'cancel'] },
+                        task: { type: 'string' },
+                        due: { type: 'string' },
+                        source: { type: 'string' },
+                        evidence: { type: 'string' },
+                    },
+                    required: ['action', 'task', 'due', 'source', 'evidence'],
+                },
+            },
+        },
+        required: [
+            'fullRequired',
+            'fullRequiredReason',
+            'loreMightMatter',
+            'confidence',
+            'ooc',
+            'oocMode',
+            'oocInstruction',
+            'goal',
+            'goalKind',
+            'goalEvidence',
+            'decisiveAction',
+            'decisiveActionEvidence',
+            'outcomeOnSuccess',
+            'outcomeOnFailure',
+            'actionTargets',
+            'oppTargetsNpc',
+            'oppTargetsEnv',
+            'benefitedObservers',
+            'harmedObservers',
+            'npcInScene',
+            'hasStakes',
+            'stakesEvidence',
+            'actionCount',
+            'userStat',
+            'userStatEvidence',
+            'oppStat',
+            'oppStatEvidence',
+            'hostilePhysicalHarm',
             'newEncounter',
             'timeDeltaMinutes',
             'timeSkipReason',
@@ -482,6 +640,196 @@ function buildCompactResolverPrompt({ chatExcerpt, latestUserMessage, tracker, u
     ].join('\n');
 }
 
+function buildMechanicsContextBundle({ sourceChat, latestUserMessage, current, personaText, userName, characterName }) {
+    const activeCharacter = characters?.[this_chid] || {};
+    const presentNpcIds = Array.isArray(current?.presentNpcIds) ? current.presentNpcIds : [];
+    const presentNpcs = presentNpcIds
+        .map(id => current?.npcs?.[id])
+        .filter(Boolean)
+        .map(npc => ({
+            name: npc.name,
+            present: npc.present,
+            position: npc.position || '',
+            condition: npc.condition || 'unknown',
+            disposition: npc.disposition || null,
+            rapport: npc.rapport ?? 0,
+            rapportEncounterLock: npc.rapportEncounterLock || 'N',
+            intimacyGate: npc.intimacyGate || 'SKIP',
+            coreStats: npc.coreStats || null,
+            rank: npc.rank || '',
+            mainStat: npc.mainStat || '',
+            knowsUser: npc.knowsUser || 'unknown',
+            override: npc.override || 'NONE',
+            archiveStatus: npc.archiveStatus || 'Active',
+        }));
+    return {
+        mode: 'mechanics_context_bundle_v1',
+        user: {
+            name: userName || name1 || '{{user}}',
+            stats: current?.user?.stats || parseCoreStats(personaText) || null,
+            persona: truncateForResolver(personaText, 3500),
+        },
+        character: {
+            name: characterName || name2 || '{{char}}',
+            description: truncateForResolver(activeCharacter.description || '', 1800),
+            personality: truncateForResolver(activeCharacter.personality || '', 900),
+            scenario: truncateForResolver(chat_metadata?.scenario || activeCharacter.scenario || '', 900),
+        },
+        scene: current?.scene || {},
+        worldClock: current?.worldClock || {},
+        inventory: current?.inventory || [],
+        pendingTasks: current?.pendingTasks || [],
+        presentNpcs,
+        knownNpcs: Object.values(current?.npcs || {}).map(npc => ({
+            name: npc.name,
+            present: npc.present,
+            archiveStatus: npc.archiveStatus || 'Active',
+            lastKnownLocation: npc.lastKnownLocation || '',
+            condition: npc.condition || 'unknown',
+            disposition: npc.disposition || null,
+            rapport: npc.rapport ?? 0,
+            intimacyGate: npc.intimacyGate || 'SKIP',
+            coreStats: npc.coreStats || null,
+        })).slice(0, 24),
+        latestUserMessage,
+        recentChat: makeChatExcerpt(sourceChat),
+    };
+}
+
+function truncateForResolver(value, max = 1000) {
+    const text = String(value || '').trim();
+    if (text.length <= max) return text;
+    return `${text.slice(0, max)}\n[truncated]`;
+}
+
+function buildRawResolverPrompt({ bundle }) {
+    return [
+        'You are the fast mechanics resolver for a SillyTavern roleplay rules extension. Return JSON only.',
+        '',
+        'Use only the Mechanics Context Bundle below. This is a semantic/contextual resolver, not a keyword parser.',
+        'If the bundle lacks needed card/lore/world/context, or if unknown lore could change target, stakes, opposition, stats, consent, immunity, ability limits, or scene facts, set fullRequired=Y and loreMightMatter=Y.',
+        'If anything is ambiguous, set fullRequired=Y. Do not guess.',
+        '',
+        'EXPLICIT-ONLY:',
+        '- Facts must be explicitly present in latest input, recent chat, tracker, persona, character card basics, or the bundle.',
+        '- Never invent stats, targets, actions, obstacles, outcomes, items, NPC facts, relationship state, or scene facts.',
+        '- Uncertain = fullRequired=Y or conservative defaults.',
+        '- FIRST-YES-WINS. First matching explicit rule is final.',
+        '',
+        'RETURN fullRequired=Y WHEN:',
+        '- Lore/card/world info not in bundle might affect mechanics.',
+        '- Target, opposition, observer stakes, relationship effect, or decisive action is ambiguous.',
+        '- The action needs context beyond the bundle to decide if a roll is needed.',
+        '',
+        'RESOLUTION RULES:',
+        '- Goal is the final practical intent of the latest user action.',
+        '- Decisive action is the explicit bottleneck that determines success/failure.',
+        '- Stakes=Y only for meaningful possible consequences: physical risk/harm/danger, detection, material gain/loss, social status shift, autonomy loss, obstacle resolution/failure, or explicit goal progress/failure.',
+        '- No roll for harmless conversation, compliments, casual questions, harmless movement, or automatic/simple answers with no material stakes.',
+        '- Explicit combat/hostile attacks always have stakes. Max 3 hostile attack actions.',
+        '- Explicit intimacy advances set goalKind IntimacyAdvancePhysical or IntimacyAdvanceVerbal. Flirting/compliments/teasing alone are not intimacy advances.',
+        '',
+        'TARGETS:',
+        '- actionTargets: living entities directly targeted.',
+        '- oppTargetsNpc: living entities opposing, resisting, refusing, guarding, perceiving, defending, or being attacked.',
+        '- oppTargetsEnv: nonliving obstacles/hazards/objects/terrain only.',
+        '- benefitedObservers/harmedObservers only when material stakes improve/worsen.',
+        '- npcInScene includes NPCs directly interacted with plus benefited/harmed observers.',
+        '',
+        'STAT MAP:',
+        '- PHY: bodily execution, combat, strength, agility, stealth movement, physical contests.',
+        '- MND: perception, reasoning, knowledge, will, supernatural focus, mental/survival tasks.',
+        '- CHA: persuasion, deception, intimidation, negotiation, emotional influence, social pressure.',
+        '- Map USER from decisive action, not abstract final goal. Living opposition is never ENV.',
+        '- Social/deception/intimidation vs living target usually CHA vs MND; sincere persuasion CHA vs CHA; stealth PHY vs MND; physical contest PHY vs PHY; nonliving obstacle uses OPP=ENV.',
+        '',
+        'RELATIONSHIP INPUTS:',
+        '- Include NPC facts only when explicit/relevant.',
+        '- BenefitedObservers only for material benefit, not pleasant tone.',
+        '- Threats, coercion, intimidation, denied intimacy, attacks, theft, or autonomy violation must be clear so Relationship can route Fear/Hostility/FearHostility.',
+        '',
+        'MECHANICS CONTEXT BUNDLE:',
+        JSON.stringify(bundle),
+        '',
+        'Return valid JSON matching the schema. If fullRequired=Y, still fill fields conservatively when obvious, but code will ignore them and use the full resolver.',
+    ].join('\n');
+}
+
+async function runRawContextResolver({
+    sourceChat,
+    latestUserMessage,
+    current,
+    fallback,
+    personaText,
+    userName,
+    characterName,
+}) {
+    if (fallback?.resolverBypass) return null;
+    if (shouldSkipRawContextResolver(latestUserMessage, fallback)) return null;
+    const bundle = buildMechanicsContextBundle({ sourceChat, latestUserMessage, current, personaText, userName, characterName });
+    const prompt = buildRawResolverPrompt({ bundle });
+    let response = '';
+    try {
+        response = await generateQuietPromptWithTimeout({
+            quietPrompt: prompt,
+            skipWIAN: true,
+            responseLength: rawResolverResponseLength(),
+            jsonSchema: RAW_RESOLVER_SCHEMA,
+            removeReasoning: true,
+        }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
+        const parsed = parseJsonResponse(response);
+        if (!isUsefulRawExtraction(parsed)) return null;
+        if (parsed.fullRequired === 'Y' || parsed.loreMightMatter === 'Y' || parsed.confidence === 'low') {
+            console.debug('[RP Engine Tracker] Raw context resolver requested full resolver', {
+                fullRequiredReason: parsed.fullRequiredReason,
+                loreMightMatter: parsed.loreMightMatter,
+                confidence: parsed.confidence,
+            });
+            return { mode: 'FULL_REQUIRED', parsed, response };
+        }
+        const extraction = stripRawResolverMeta(parsed);
+        return { mode: 'raw_context', parsed, response, extraction };
+    } catch (error) {
+        console.warn('[RP Engine Tracker] Raw context resolver failed or timed out; falling back to full resolver.', error);
+        return null;
+    }
+}
+
+function shouldSkipRawContextResolver(latestUserMessage, fallback = {}) {
+    const text = String(latestUserMessage || '').trim();
+    if (!text) return true;
+    if (/^\s*\(\(\(/.test(text)) return true;
+    if (fallback?.resolverBypass) return true;
+    return false;
+}
+
+function rawResolverResponseLength() {
+    const configured = Number(settings().responseLength) || DEFAULT_SETTINGS.responseLength;
+    return Math.max(500, Math.min(configured, 900));
+}
+
+function isUsefulRawExtraction(value) {
+    if (!value || typeof value !== 'object') return false;
+    if (!['Y', 'N'].includes(value.fullRequired)) return false;
+    if (!['Y', 'N'].includes(value.loreMightMatter)) return false;
+    if (value.fullRequired === 'Y') return true;
+    return isUsefulExtraction(value);
+}
+
+function stripRawResolverMeta(value) {
+    const {
+        fullRequired,
+        fullRequiredReason,
+        loreMightMatter,
+        confidence,
+        ...extraction
+    } = value || {};
+    extraction.resolverMode = 'raw_context';
+    extraction.rawConfidence = confidence || '';
+    extraction.rawFallbackReason = fullRequiredReason || '';
+    return extraction;
+}
+
 async function runCompactResolver({
     sourceChat,
     latestUserMessage,
@@ -505,6 +853,7 @@ async function runCompactResolver({
         response = await generateQuietPromptWithTimeout({
             quietPrompt: prompt,
             skipWIAN: false,
+            responseLength: compactResolverResponseLength(),
             jsonSchema: COMPACT_RESOLVER_SCHEMA,
             removeReasoning: true,
         }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
@@ -524,6 +873,10 @@ async function runCompactResolver({
         console.warn('[RP Engine Tracker] Compact resolver failed or timed out; falling back to full resolver.', error);
         return null;
     }
+}
+
+function compactResolverResponseLength() {
+    return 450;
 }
 
 function expandCompactExtraction(compact, latestUserMessage) {
@@ -782,6 +1135,35 @@ async function runResolver(chat) {
         console.debug('[RP Engine Tracker] Resolver compact complete', {
             mode: compactResult.mode,
             goal: resolved.packet?.GOAL,
+            stakes: resolved.packet?.STAKES,
+        });
+        return resolved;
+    }
+
+    const rawResult = await runRawContextResolver({
+        sourceChat,
+        latestUserMessage,
+        current,
+        fallback,
+        personaText,
+        userName,
+        characterName: name2,
+    });
+    if (rawResult?.extraction) {
+        let parsed = mergeExtractionWithFallback(rawResult.extraction, fallback);
+        parsed = await guardDeadArchiveReentry(parsed, latestUserMessage);
+        const resolved = resolveTurn(parsed, current, { userStats });
+        applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
+        resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
+        resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
+        if (resolved.audit?.extraction) {
+            resolved.audit.extraction.resolverMode = 'raw_context';
+            resolved.audit.extraction.rawConfidence = rawResult.parsed?.confidence || '';
+            resolved.audit.extraction.rawFallbackReason = rawResult.parsed?.fullRequiredReason || '';
+        }
+        console.debug('[RP Engine Tracker] Resolver raw-context complete', {
+            goal: resolved.packet?.GOAL,
+            outcome: resolved.packet?.Outcome,
             stakes: resolved.packet?.STAKES,
         });
         return resolved;
@@ -1170,12 +1552,14 @@ function buildFailClosedExtraction(latestUserMessage, response = '') {
 
 async function generateQuietPromptWithTimeout(params = {}, ms = DEFAULT_SETTINGS.resolverTimeoutMs) {
     const timeoutMs = Number(ms) || DEFAULT_SETTINGS.resolverTimeoutMs;
+    const responseLength = Number(params.responseLength);
     const controller = new AbortController();
     activeQuietControllers.add(controller);
     const timer = setTimeout(() => {
         controller.abort(new Error(`Timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     quietGenerationDepth += 1;
+    const restoreResponseLength = applyTemporaryResponseLength(responseLength);
     try {
         const result = await Generate('quiet', {
             quiet_prompt: params.quietPrompt ?? '',
@@ -1190,10 +1574,39 @@ async function generateQuietPromptWithTimeout(params = {}, ms = DEFAULT_SETTINGS
         });
         return params.removeReasoning === false ? String(result || '') : stripReasoningBlocks(result);
     } finally {
+        restoreResponseLength();
         quietGenerationDepth = Math.max(0, quietGenerationDepth - 1);
         clearTimeout(timer);
         activeQuietControllers.delete(controller);
     }
+}
+
+function applyTemporaryResponseLength(responseLength) {
+    if (!Number.isFinite(responseLength) || responseLength <= 0) return () => {};
+    const original = main_api === 'openai'
+        ? { openai_max_tokens: Number(oai_settings.openai_max_tokens) }
+        : { genamt: Number(amount_gen) };
+    try {
+        if (main_api === 'openai') {
+            oai_settings.openai_max_tokens = responseLength;
+        } else {
+            setGenerationParamsFromPreset({ genamt: responseLength });
+        }
+    } catch (error) {
+        console.warn('[RP Engine Tracker] Failed to apply temporary resolver response cap.', error);
+        return () => {};
+    }
+    return () => {
+        try {
+            if (main_api === 'openai') {
+                oai_settings.openai_max_tokens = original.openai_max_tokens;
+            } else {
+                setGenerationParamsFromPreset({ genamt: original.genamt });
+            }
+        } catch (error) {
+            console.warn('[RP Engine Tracker] Failed to restore response length after resolver call.', error);
+        }
+    };
 }
 
 function stripReasoningBlocks(value) {
@@ -1518,13 +1931,13 @@ function preserveSameTurnHandoffForRegeneration() {
     renderPanel();
 }
 
-function buildMechanicsDisplayPayload(result, handoff, latestUserMessage) {
+function buildMechanicsDisplayPayload(result, handoff, latestUserMessage, sourceChat = null) {
     const audit = cloneAuditForDisplay(result?.audit || result?.tracker?.lastAudit || null);
     return {
         version: 1,
         at: new Date().toISOString(),
         triggerUserMessage: String(latestUserMessage || '').trim(),
-        triggerUserMessageId: findLatestUserMessageIdByText(latestUserMessage),
+        triggerUserMessageId: findLatestUserMessageIdByText(latestUserMessage, sourceChat),
         resolverSchema: audit,
         narrationHandoff: String(handoff || ''),
     };
@@ -1550,13 +1963,22 @@ function bindMechanicsDisplayToTrigger(payload) {
     return true;
 }
 
-function findLatestUserMessageIdByText(text) {
+function findLatestUserMessageIdByText(text, preferredChat = null) {
     const needle = String(text || '').trim();
-    const sourceChat = Array.isArray(getContext().chat) && getContext().chat.length ? getContext().chat : liveChat;
-    for (let i = sourceChat.length - 1; i >= 0; i--) {
-        if (!isUserMessage(sourceChat[i])) continue;
-        const candidate = messageText(sourceChat[i]).trim();
-        if (!needle || candidate === needle) return i;
+    const chats = [
+        preferredChat,
+        getContext().chat,
+        liveChat,
+    ].filter(chat => Array.isArray(chat) && chat.length);
+    const seen = new Set();
+    for (const sourceChat of chats) {
+        if (seen.has(sourceChat)) continue;
+        seen.add(sourceChat);
+        for (let i = sourceChat.length - 1; i >= 0; i--) {
+            if (!isUserMessage(sourceChat[i])) continue;
+            const candidate = messageText(sourceChat[i]).trim();
+            if (!needle || candidate === needle) return i;
+        }
     }
     return null;
 }
@@ -1584,8 +2006,9 @@ function renderMechanicsBlock(payload) {
             <details>
                 <summary>${escapeHtml(title)}</summary>
                 <div class="rp-engine-message-mechanics-body">
+                    ${audit ? renderMechanicsSummary(audit) : '<div class="rp-engine-muted">No mechanics summary stored.</div>'}
                     <details>
-                        <summary>Resolver Schema</summary>
+                        <summary>Raw Debug</summary>
                         ${audit?.extraction ? `<pre>${escapeHtml(formatJsonForDisplay(audit.extraction))}</pre>` : '<div class="rp-engine-muted">No resolver schema stored.</div>'}
                         ${audit ? `
                             <details>
@@ -1602,6 +2025,54 @@ function renderMechanicsBlock(payload) {
             </details>
         </div>
     `;
+}
+
+function renderMechanicsSummary(audit) {
+    if (audit.rollback || audit.error) return renderAudit(audit);
+    const extraction = audit.extraction || {};
+    const packet = audit.resolutionPacket || {};
+    const chaos = audit.chaosHandoff?.CHAOS || {};
+    const proactivity = audit.proactivityHandoff || {};
+    const aggression = audit.aggressionResults || {};
+    const npcs = Array.isArray(audit.npcHandoffs) ? audit.npcHandoffs : [];
+    const roll = packet.roll || {};
+    const rollLine = Number.isFinite(roll.atkDie)
+        ? `${roll.atkDie}+${packet.stats?.USER || '?'}=${roll.atkTot} vs ${roll.defDie}${packet.stats?.OPP === 'ENV' ? '' : `+${packet.stats?.OPP || '?'}`}=${roll.defTot}; margin ${roll.margin}`
+        : 'none';
+    const proactive = Object.entries(proactivity)
+        .filter(([, item]) => item?.Proactive === 'Y')
+        .map(([name, item]) => `${name}: ${item.Intent}${item.TargetsUser === 'Y' ? ' -> user' : ''}`);
+    const aggressionLines = Object.entries(aggression)
+        .map(([name, item]) => `${name}: ${item.ReactionOutcome} (${item.Margin})`);
+
+    return `
+        <div class="rp-engine-audit-card">
+            <div class="rp-engine-audit-title">Mechanics Summary</div>
+            ${renderKv('Resolver', resolverModeLabel(extraction))}
+            ${renderKv('Goal', packet.GOAL || extraction.goal)}
+            ${renderKv('Action', packet.DecisiveAction || extraction.decisiveAction)}
+            ${renderKv('Stakes', packet.STAKES || extraction.hasStakes)}
+            ${renderKv('Target', listText(packet.ActionTargets || extraction.actionTargets))}
+            ${renderKv('Opposition', listText([...(packet.OppTargets?.NPC || extraction.oppTargetsNpc || []), ...(packet.OppTargets?.ENV || extraction.oppTargetsEnv || [])]))}
+            ${renderKv('Benefited', listText(packet.BenefitedObservers || extraction.benefitedObservers))}
+            ${renderKv('Harmed', listText(packet.HarmedObservers || extraction.harmedObservers))}
+            ${renderKv('Roll', rollLine)}
+            ${renderKv('Outcome', `${packet.OutcomeTier || 'NONE'} / ${packet.Outcome || 'no_roll'}`)}
+            ${renderKv('Landed', packet.LandedActions)}
+            ${renderKv('Counter', packet.CounterPotential)}
+            ${npcs.length ? `<div class="rp-engine-audit-title">Relationships</div>${npcs.map(renderNpcAudit).join('')}` : ''}
+            <div class="rp-engine-audit-title">Events</div>
+            ${renderKv('Chaos', chaos.triggered ? `${chaos.band || 'event'} / ${chaos.magnitude || 'minor'} / ${chaos.anchor || 'scene'} / ${chaos.vector || 'scene'}` : 'none')}
+            ${renderKv('Proactivity', proactive.length ? proactive.join(' | ') : 'none')}
+            ${renderKv('Aggression', aggressionLines.length ? aggressionLines.join(' | ') : 'none')}
+        </div>
+    `;
+}
+
+function resolverModeLabel(extraction) {
+    if (extraction?.resolverMode === 'compact') return `compact ${extraction.compactMode || ''}`.trim();
+    if (extraction?.resolverMode === 'raw_context') return `raw context ${extraction.rawConfidence ? `(${extraction.rawConfidence})` : ''}`.trim();
+    return extraction?.resolverMode || 'full';
 }
 
 function mechanicsSummaryBits(audit, payload) {
@@ -1635,7 +2106,6 @@ function renderPanel() {
         .html('<i class="fa-solid fa-book-open"></i>');
 
     const data = summarizeTracker(tracker());
-    const audit = data.lastAudit;
     const userLabel = data.user?.name || name1 || 'User';
     const presentHtml = data.present.length
         ? data.present.map(renderNpc).join('')
@@ -1650,7 +2120,6 @@ function renderPanel() {
     const pendingHtml = data.pendingTasks.length
         ? `<ul class="rp-engine-task-list">${data.pendingTasks.map(renderTask).join('')}</ul>`
         : '<div class="rp-engine-muted">No pending tasks tracked yet.</div>';
-    const auditHtml = audit ? renderAudit(audit) : '<div class="rp-engine-muted">No audit yet.</div>';
     const creatorHtml = shouldShowCharacterCreatorPrompt()
         ? `<section class="rp-engine-creator-prompt">
             <h4>New Character</h4>
@@ -1687,10 +2156,6 @@ function renderPanel() {
         <details open>
             <summary>Pending Tasks for ${escapeHtml(userLabel)}</summary>
             ${pendingHtml}
-        </details>
-        <details ${cfg.debug ? 'open' : ''}>
-            <summary>Audit</summary>
-            ${auditHtml}
         </details>
     `);
     root.find('#rp_engine_panel_open_creator').off('click').on('click', () => openCharacterCreatorDialog({ manual: true }));
@@ -1938,7 +2403,6 @@ function setupUi() {
                     <strong class="rp-engine-title">RP Engine</strong>
                     <div class="rp-engine-actions">
                         <button id="rp_engine_tracker_collapse" title="Collapse tracker"><i class="fa-solid fa-book-open"></i></button>
-                        <button id="rp_engine_tracker_toggle_debug" title="Toggle audit">Audit</button>
                     </div>
                 </div>
                 <div class="rp-engine-body"></div>
@@ -1968,12 +2432,6 @@ function setupUi() {
             return;
         }
         settings().panelCollapsed = !settings().panelCollapsed;
-        saveSettingsDebounced();
-        renderPanel();
-    });
-
-    $('#rp_engine_tracker_toggle_debug').off('click').on('click', () => {
-        settings().debug = !settings().debug;
         saveSettingsDebounced();
         renderPanel();
     });
@@ -2792,7 +3250,7 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
         lastMechanicsHandoff = {
             handoff,
             trackerSnapshot: trackerSnapshotForRollback(result.tracker),
-            display: buildMechanicsDisplayPayload(result, handoff, latestUserMessage),
+            display: buildMechanicsDisplayPayload(result, handoff, latestUserMessage, chat),
         };
         bindMechanicsDisplayToTrigger(lastMechanicsHandoff.display);
 
