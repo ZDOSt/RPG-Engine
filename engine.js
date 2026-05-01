@@ -725,8 +725,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     const namedForgottenNpc = text.match(/\b(?:forget|prune|remove|delete)\s+([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:from\s+)?(?:the\s+)?(?:archive|lorebook|tracker|continuity)\b/i);
     const sceneSingleTarget = singlePresentNpcName(contextTracker);
     const activeCharacterName = String(characterName || '').trim();
-    const secondPersonTarget = activeCharacterName && /\b(you|your|yours|yourself)\b/i.test(text) ? activeCharacterName : '';
-    const pronounTarget = /\b(her|him|them|their)\b/i.test(text) ? (sceneSingleTarget || activeCharacterName) : '';
+    const pronounTarget = /\b(her|him|them|their)\b/i.test(text) ? sceneSingleTarget : '';
     const directSceneTarget = sceneSingleTarget && /\b(look over there|distract|point)\b/i.test(text) ? sceneSingleTarget : '';
     const target = firstCleanNpcName([
         namedAtTarget?.[1],
@@ -755,7 +754,6 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         namedAnyDescriptor?.[1],
         containsAttack && namedIntroducedTarget?.[1],
         activeCharacterName && lower.includes(activeCharacterName.toLowerCase()) ? activeCharacterName : '',
-        secondPersonTarget,
         pronounTarget,
         directSceneTarget,
     ]);
@@ -787,7 +785,6 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         && /\b(palm|conceal|pocket|snatch|slip|steal|pickpocket|hide)\b[\s\S]{0,80}\b(coin|bill|money|purse|wallet|key|gem|ring|item|knife|letter)\b/i.test(text)
         && /\b(watch|watches|watching|look|looks|looking|stare|stares|staring|observe|observes|observing|notice|notices|noticing|eyes|guard|sentry|observer|lookout)\b/i.test(text);
     const intimateVerbalRequest = hasTarget && /\b(ask|tell|demand|request)\b[\s\S]{0,80}\b(show|expose|flash|strip|undress|take off|remove)\b[\s\S]{0,80}\b(panties|underwear|bra|breasts|boobs|chest|ass|butt|nude|naked|body)\b/i.test(text);
-    const secondPersonIntimacyRequest = hasTarget && secondPersonTarget && /\b(?:would|will|can|could|please|let|may)\s+you\b[\s\S]{0,100}\b(kiss|touch|embrace|cuddle|grope|caress|fondle|strip|undress|show|expose|flash|take off|remove|sleep with|have sex)\b/i.test(text);
     const chasmJump = /\b(jump|leap|vault)\b[\s\S]{0,80}\b(chasm|gap|ravine|pit|ledge|crevasse)\b/i.test(text)
         || /\b(chasm|gap|ravine|pit|ledge|crevasse)\b[\s\S]{0,80}\b(jump|leap|vault)\b/i.test(text);
     const technicalMentalEnvTask = /\b(study|inspect|analyze|solve|decode|investigate|trace|identify|figure out|carefully|careful)\b[\s\S]{0,120}\b(disarm|pick|unlock|bypass|disable|open)\b[\s\S]{0,120}\b(trap|mechanism|lock|wire|runes|device)\b/i.test(text)
@@ -953,7 +950,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         }];
     }
 
-    if ((intimateVerbalRequest || secondPersonIntimacyRequest) && !Object.keys(fallback).length) {
+    if (intimateVerbalRequest && !Object.keys(fallback).length) {
         fallback.goal = text.slice(0, 140);
         fallback.goalKind = 'IntimacyAdvanceVerbal';
         fallback.goalEvidence = text;
@@ -972,40 +969,6 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         fallback.userStatEvidence = 'verbal intimacy proposition';
         fallback.oppStat = 'MND';
         fallback.oppStatEvidence = 'Target resists pressure, boundary violation, or unwanted intimacy with will/awareness.';
-        fallback.hostilePhysicalHarm = 'N';
-        fallback.npcFacts = [{
-            name: target,
-            position: '',
-            condition: '',
-            knowsUser: '',
-            explicitPreset: 'neutralDefault',
-            rank: 'unknown',
-            mainStat: 'unknown',
-            override: 'NONE',
-        }];
-    }
-
-    if (hasTarget && secondPersonTarget && !Object.keys(fallback).length && !/\b(attack|strike|hit|punch|kick|slap|stab|slash|cut|shoot|kill|wound|injure|hurt|grab|yank|drag|pin|restrain|tackle|trip|shove|push|force|steal|pickpocket|sneak|hide|lie|deceive|bluff|trick|distract|threaten|intimidate|coerce|blackmail|demand|order|persuade|convince|negotiate|kiss|touch|grope|fondle|caress|strip|undress|sex|spell|magic|curse|hex|charm|compel|dominate)\b/i.test(text)) {
-        const quoted = text.match(/["“]([^"”]{1,140})["”]/)?.[1];
-        const actionSummary = text.match(/\b(smile|nod|wave|look|watch|listen|open|hold|offer|greet|thank|apologize|compliment|praise|chat|talk|ask|tell|say)[^.?!]*/i)?.[0];
-        fallback.goal = quoted || actionSummary || `interact with ${target}`;
-        fallback.goalKind = 'Normal';
-        fallback.goalEvidence = text;
-        fallback.decisiveAction = actionSummary || quoted || `interact with ${target}`;
-        fallback.decisiveActionEvidence = text;
-        fallback.outcomeOnSuccess = '';
-        fallback.outcomeOnFailure = '';
-        fallback.actionTargets = [target];
-        fallback.oppTargetsNpc = [];
-        fallback.oppTargetsEnv = [];
-        fallback.npcInScene = [target];
-        fallback.hasStakes = 'N';
-        fallback.stakesEvidence = 'Direct second-person interaction with the active character, with no explicit risk, cost, pressure, or meaningful contested consequence.';
-        fallback.actionCount = 1;
-        fallback.userStat = 'CHA';
-        fallback.userStatEvidence = 'harmless direct interaction with active character';
-        fallback.oppStat = 'ENV';
-        fallback.oppStatEvidence = '';
         fallback.hostilePhysicalHarm = 'N';
         fallback.npcFacts = [{
             name: target,
@@ -2485,6 +2448,38 @@ export function upsertArchivedNpc(tracker, archived, present = true) {
         override: prior.override || 'NONE',
     };
     if (present && !safeTracker.presentNpcIds.includes(id)) {
+        safeTracker.presentNpcIds.push(id);
+    }
+    return safeTracker;
+}
+
+export function initializeSceneNpc(tracker, name, fact = {}) {
+    const safeTracker = createTracker(tracker);
+    const npcName = cleanNpcName(name);
+    if (!npcName) return safeTracker;
+    const clean = sanitizeExtraction({
+        npcInScene: [npcName],
+        npcFacts: [{
+            name: npcName,
+            present: true,
+            position: fact.position || '',
+            condition: fact.condition || '',
+            knowsUser: fact.knowsUser || '',
+            explicitPreset: fact.explicitPreset || 'unknown',
+            rank: fact.rank || 'unknown',
+            mainStat: fact.mainStat || 'unknown',
+            explicitStats: fact.explicitStats || null,
+            disposition: fact.disposition || null,
+            rapport: fact.rapport,
+            rapportEncounterLock: fact.rapportEncounterLock || null,
+            intimacyGate: fact.intimacyGate || null,
+            override: fact.override || 'unknown',
+            archiveStatus: fact.archiveStatus || 'unknown',
+        }],
+    });
+    const { id, npc } = ensureNpc(safeTracker, npcName, clean);
+    npc.present = true;
+    if (!safeTracker.presentNpcIds.includes(id)) {
         safeTracker.presentNpcIds.push(id);
     }
     return safeTracker;

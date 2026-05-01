@@ -43,6 +43,7 @@ import {
     createTracker,
     describeNpcFeeling,
     inferFallbackExtraction,
+    initializeSceneNpc,
     mergeExtractionWithFallback,
     parseCoreStats,
     parseNpcArchiveContent,
@@ -54,7 +55,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.189';
+} from './engine.js?v=0.1.191';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -503,12 +504,12 @@ function buildMechanicsPassPrompt({ chatExcerpt, latestUserMessage, tracker, use
         '- goalKind: IntimacyAdvancePhysical or IntimacyAdvanceVerbal only for explicit direct intimacy advances toward a specific NPC; otherwise Normal.',
         '- If the user uses deception, distraction, stealth, pressure, or setup to enable a kiss, touch, embrace, cuddle, grope, or similar physical intimacy toward a specific NPC, goalKind is still IntimacyAdvancePhysical.',
         '- Flirting, compliments, teasing, affectionate tone, romance-coded attention, and non-explicit social behavior do not count as intimacy advances.',
-        '- actionTargets: living entities directly targeted by the user action. In a one-on-one character chat, direct second-person address to "you/your" targets the active CHARACTER/ASSISTANT NAME.',
+        '- actionTargets: living entities directly targeted by the user action. In GM/narrator chats, do not treat the assistant/GM character name as an NPC unless that exact living entity is explicitly present in scene.',
         '- oppTargetsNpc: living entities actively/passively opposing, resisting, refusing, guarding, perceiving, defending, or attacked. Empty for NO_STAKES unless opposition matters, in which case use STAKES.',
         '- oppTargetsEnv: nonliving obstacle/hazard/object/terrain directly obstructing the action. Empty for NO_STAKES unless obstruction matters, in which case use STAKES.',
         '- Never put a living being in oppTargetsEnv. If a guard, witness, owner, victim, pursuer, target, or observer is the thing the action must get past, use oppTargetsNpc.',
         '- benefitedObservers/harmedObservers: living observers whose material stakes improve/worsen; never use for mere mood or pleasant tone.',
-        '- npcInScene: NPCs directly interacted with plus benefited/harmed observers. Include the active character if the user acts toward them by name, pronoun, or direct second-person context.',
+        '- npcInScene: NPCs directly interacted with plus benefited/harmed observers. Include newly introduced scene NPCs only when explicitly present or directly interacted with.',
         '- actionCount: 1 for noncombat; 1-3 only for explicit hostile/combat attack sequences.',
         '- Do not count setup, movement, repositioning, defense, recovery, or non-attack flavor as combat actions.',
         '- userStat/oppStat: for NO_STAKES use MND/ENV defaults unless explicit semantics are clear. For STAKES, map from decisive action using PHY/MND/CHA definitions.',
@@ -845,6 +846,7 @@ async function runResolver(chat) {
     const latestUserMessage = getLatestUserMessage(sourceChat)
         || getLatestUserMessage(liveChat)
         || getLatestUserMessage(chat);
+    seedSceneNpcsFromRecentAssistantMessages(sourceChat);
     await rehydrateArchivedNpcsForText(`${latestUserMessage}\n${makeChatExcerpt(sourceChat)}`);
     current = tracker();
     let fallback = inferFallbackExtraction(latestUserMessage, name2, current);
@@ -2916,6 +2918,238 @@ function uniqueLocal(list) {
         .map(x => String(x || '').trim())
         .filter(Boolean)
         .map(x => [normalizeNameLocal(x), x])).values()];
+}
+
+const SCENE_NPC_ROLE_PATTERN = [
+    'guard',
+    'watchman',
+    'sentry',
+    'gatekeeper',
+    'soldier',
+    'knight',
+    'captain',
+    'lady',
+    'woman',
+    'man',
+    'girl',
+    'boy',
+    'stranger',
+    'merchant',
+    'innkeeper',
+    'barmaid',
+    'bartender',
+    'waitress',
+    'patron',
+    'villager',
+    'noble',
+    'servant',
+    'priest',
+    'priestess',
+    'mage',
+    'witch',
+    'healer',
+    'hunter',
+    'messenger',
+    'bandit',
+    'thief',
+    'assassin',
+    'prisoner',
+    'captive',
+].join('|');
+
+function sceneNpcCandidatesFromText(text) {
+    const source = String(text || '');
+    const candidates = [];
+    const add = (name, role = '', evidence = '') => {
+        const cleanName = cleanSceneNpcName(name);
+        if (!cleanName) return;
+        candidates.push({
+            name: cleanName,
+            role: String(role || '').toLowerCase(),
+            evidence: String(evidence || '').trim().slice(0, 180),
+        });
+    };
+
+    const namedPatterns = [
+        new RegExp(`\\b(?:a|an|the|young|old|elderly|armored|hooded|female|male|neutral|ordinary|new)?\\s*(?:${SCENE_NPC_ROLE_PATTERN})\\s+named\\s+([A-Z][A-Za-z0-9_'-]{1,40})\\b`, 'gi'),
+        /\b([A-Z][A-Za-z0-9_'-]{1,40})\s*,\s+(?:a|an|the)\s+([a-z][a-z -]{2,40})\s*,\s+(?:stands?|sits?|walks?|steps?|arrives?|enters?|approaches?|blocks?|speaks?|says?|asks?)\b/gi,
+        /\b([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:stands?|sits?|walks?|steps?|arrives?|enters?|approaches?|blocks?|speaks?|says?|asks?|draws?|raises?|turns?|looks?)\b/gi,
+    ];
+    for (const pattern of namedPatterns) {
+        for (const match of source.matchAll(pattern)) {
+            const name = match[1];
+            if (isLikelyNonNpcName(name)) continue;
+            add(name, match[2] || '', match[0]);
+        }
+    }
+
+    const rolePattern = new RegExp(`\\b(?:a|an|the)\\s+((?:(?:young|old|elderly|armored|hooded|female|male|tall|short|broad|thin|scarred|white-haired|dark-haired)\\s+){0,3}(?:${SCENE_NPC_ROLE_PATTERN}))\\b[\\s\\S]{0,90}?\\b(blocks?|approaches?|arrives?|enters?|walks? up|steps? up|steps? forward|stands?|sits?|speaks?|says?|asks?|calls?|shouts?|draws?|raises?|turns?|looks?)\\b`, 'gi');
+    for (const match of source.matchAll(rolePattern)) {
+        const roleText = match[1].replace(/\s+/g, ' ').trim();
+        const role = roleText.split(/\s+/).at(-1);
+        add(sceneNpcNameForRole(roleText, source, candidates), role, match[0]);
+    }
+
+    return uniqueSceneNpcCandidates(candidates);
+}
+
+function cleanSceneNpcName(value) {
+    const text = String(value || '')
+        .trim()
+        .replace(/[.,!?;:]+$/g, '')
+        .replace(/\s+/g, ' ');
+    if (!text || /^(?:I|Me|My|You|Your|The|A|An|As|Just|Halt|State|Gate|Door|Room|Road|Path|Street|Forest|Town|City)$/i.test(text)) {
+        return '';
+    }
+    return text;
+}
+
+function isLikelyNonNpcName(value) {
+    return /^(?:I|Me|My|You|Your|The|A|An|As|Just|Halt|State|Gate|Door|Room|Road|Path|Street|Forest|Town|City|North|South|East|West)$/i.test(String(value || '').trim());
+}
+
+function sceneNpcNameForRole(roleText, source, existing = []) {
+    const base = titleCase(roleText.replace(/^(?:young|old|elderly|armored|hooded|female|male|tall|short|broad|thin|scarred|white-haired|dark-haired)\s+/i, ''));
+    const sameRoleCount = existing.filter(x => normalizeNameLocal(x.role || x.name) === normalizeNameLocal(base)).length;
+    return sameRoleCount ? `${base} ${sameRoleCount + 1}` : base;
+}
+
+function titleCase(value) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function uniqueSceneNpcCandidates(candidates) {
+    const seen = new Set();
+    const result = [];
+    for (const candidate of candidates) {
+        const key = normalizeNameLocal(candidate.name);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        result.push(candidate);
+    }
+    return result;
+}
+
+function seedSceneNpcsFromMessage(messageOrId = null) {
+    const cfg = settings();
+    if (!cfg.enabled) return;
+    const message = typeof messageOrId === 'number' || typeof messageOrId === 'string'
+        ? getMessageById(messageOrId)
+        : messageOrId && typeof messageOrId === 'object'
+            ? messageOrId
+            : getContext().chat?.at(-1);
+    if (!isAssistantMessage(message)) return;
+
+    const text = messageText(message);
+    const candidates = sceneNpcCandidatesFromText(text);
+    if (!candidates.length) return;
+
+    let current = tracker();
+    let changed = false;
+    for (const candidate of candidates) {
+        if (current.npcs && Object.values(current.npcs).some(npc => normalizeNameLocal(npc?.name) === normalizeNameLocal(candidate.name))) {
+            if (!/\b(another|second|third|new|additional)\b/i.test(candidate.evidence)) {
+                continue;
+            }
+            candidate.name = nextAvailableSceneNpcName(current, candidate.name);
+        }
+        if (current.npcs && Object.values(current.npcs).some(npc => normalizeNameLocal(npc?.name) === normalizeNameLocal(candidate.name))) {
+            continue;
+        }
+        const before = JSON.stringify(current.npcs || {});
+        current = initializeSceneNpc(current, candidate.name, {
+            condition: candidate.role ? `present ${candidate.role}` : '',
+            explicitPreset: explicitPresetForSceneNpc(candidate, text, activePersonaText()),
+            rank: rankForSceneRole(candidate.role),
+            mainStat: mainStatForSceneRole(candidate.role),
+        });
+        changed = changed || JSON.stringify(current.npcs || {}) !== before;
+    }
+    if (changed) {
+        chat_metadata[METADATA_KEY] = current;
+        saveTracker();
+        renderPanel();
+        console.debug('[RP Engine Tracker] Seeded scene NPCs from GM reply', candidates);
+    }
+}
+
+function seedSceneNpcsFromRecentAssistantMessages(chat = null) {
+    const sourceChat = Array.isArray(chat) && chat.length
+        ? chat
+        : Array.isArray(getContext().chat) && getContext().chat.length
+            ? getContext().chat
+            : liveChat;
+    if (!Array.isArray(sourceChat) || !sourceChat.length) return;
+
+    let latestUserIndex = -1;
+    for (let i = sourceChat.length - 1; i >= 0; i--) {
+        if (isUserMessage(sourceChat[i])) {
+            latestUserIndex = i;
+            break;
+        }
+    }
+    if (latestUserIndex <= 0) return;
+
+    for (let i = latestUserIndex - 1; i >= 0; i--) {
+        const message = sourceChat[i];
+        if (isUserMessage(message)) break;
+        if (isAssistantMessage(message)) seedSceneNpcsFromMessage(message);
+    }
+}
+
+function nextAvailableSceneNpcName(current, baseName) {
+    const base = String(baseName || '').replace(/\s+\d+$/g, '').trim() || 'NPC';
+    const existing = new Set(Object.values(current?.npcs || {}).map(npc => normalizeNameLocal(npc?.name)));
+    for (let i = 2; i < 100; i++) {
+        const candidate = `${base} ${i}`;
+        if (!existing.has(normalizeNameLocal(candidate))) return candidate;
+    }
+    return `${base} ${Date.now()}`;
+}
+
+function rankForSceneRole(role) {
+    if (/\b(captain|knight|soldier|guard|watchman|sentry|assassin|bandit|mage|witch|hunter)\b/i.test(role)) return 'Trained';
+    return 'unknown';
+}
+
+function mainStatForSceneRole(role) {
+    if (/\b(captain|knight|soldier|guard|watchman|sentry|assassin|bandit|hunter)\b/i.test(role)) return 'PHY';
+    if (/\b(mage|witch|healer|priest|priestess)\b/i.test(role)) return 'MND';
+    if (/\b(merchant|innkeeper|noble|messenger)\b/i.test(role)) return 'CHA';
+    return 'unknown';
+}
+
+function explicitPresetForSceneNpc(candidate, sceneText, personaText) {
+    const evidence = `${candidate?.evidence || ''}\n${sceneText || ''}`;
+    if (/\b(?:lover|spouse|wife|husband|partner|girlfriend|boyfriend|beloved|in love|already intimate|romantically involved|willing toward|receptive toward)\b/i.test(evidence)) {
+        return 'romanticOpen';
+    }
+    if (/\b(?:hates?|hated|distrusts?|distrusted|wanted|bad reputation|infamous|enemy of|hostile to|resentful toward|suspicious of)\b[\s\S]{0,80}\b(?:you|user|Aelemar|traveler|demon|outsider)\b/i.test(evidence)
+        || /\b(?:you|user|Aelemar|traveler|demon|outsider)\b[\s\S]{0,80}\b(?:hated|distrusted|wanted|bad reputation|infamous|enemy)\b/i.test(evidence)) {
+        return 'userBadRep';
+    }
+    if (/\b(?:trusts?|trusted|admires?|admired|praised|good reputation|known favorably|friend of|friendly to|welcomes?)\b[\s\S]{0,80}\b(?:you|user|Aelemar|traveler|demon|outsider)\b/i.test(evidence)
+        || /\b(?:you|user|Aelemar|traveler|demon|outsider)\b[\s\S]{0,80}\b(?:trusted|admired|praised|good reputation|known favorably|welcomed)\b/i.test(evidence)) {
+        return 'userGoodRep';
+    }
+    if (userIsExplicitlyVisiblyNonHuman(personaText) && !npcHasExplicitFearImmunity(evidence)) {
+        return 'userNonHuman';
+    }
+    return 'neutralDefault';
+}
+
+function userIsExplicitlyVisiblyNonHuman(personaText) {
+    const source = String(personaText || '');
+    return /\b(?:visibly|obvious|noticeable|appears?|looks?)\b[\s\S]{0,160}\b(?:inhuman|demonic|demon|monstrous|undead|bestial|eldritch|construct|horns?|tail|claws?|slit pupils?)\b/i.test(source)
+        || /\b(?:race|species)\s*[:=]\s*(?:demon|undead|construct|beast|monster|eldritch)\b/i.test(source)
+        || /\b(?:horns?|tail|claws?|slit pupils?)\b[\s\S]{0,220}\b(?:visually obvious|obvious|noticeable|full-blooded demon|inhuman|demonic)\b/i.test(source);
+}
+
+function npcHasExplicitFearImmunity(evidence) {
+    return /\b(?:fear immunity|immune to fear|cannot be frightened|unaffected by fear|mental immunity|immune to mental|same kind|same nature|demon lord|god|deity|superior being|ancient dragon|archdemon)\b/i.test(String(evidence || ''));
 }
 
 function preferKnownValue(primary, fallback, emptyValue = 'unknown') {
