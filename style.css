@@ -395,10 +395,6 @@ body.bubblechat .rp-engine-message-mechanics {
     line-height: 1.35;
 }
 
-#rp_engine_custom_name_style {
-    min-height: 82px;
-}
-
 .rp-engine-creator-prompt {
     padding: 8px;
     border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 25%);

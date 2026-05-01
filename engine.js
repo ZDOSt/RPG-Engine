@@ -3,16 +3,13 @@ export const METADATA_KEY = 'rp_engine_tracker';
 
 export const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
-    debug: true,
     injectHandoff: true,
     showPanel: true,
     panelCollapsed: false,
     panelPosition: null,
-    responseLength: 1800,
+    responseLength: 1200,
     recentMessages: 8,
-    resolverTimeoutMs: 90000,
-    nameStyle: 'balancedFantasy',
-    customNameStyle: '',
+    resolverTimeoutMs: 60000,
     enableNpcArchive: true,
     npcArchiveWorld: '',
     scopeNpcArchivePerChat: true,
@@ -2558,9 +2555,6 @@ function buildResolutionPacket(clean, tracker, rolls) {
     } else if (margin >= 1) {
         packet.OutcomeTier = 'Success';
         packet.Outcome = 'success';
-    } else if (margin === 0) {
-        packet.OutcomeTier = 'Stalemate';
-        packet.Outcome = 'stalemate';
     } else {
         packet.OutcomeTier = 'Failure';
         packet.Outcome = 'failure';
@@ -2928,12 +2922,7 @@ function resolveNpcRelationship(name, packet, clean, tracker) {
     const isAllowed = packet.IntimacyConsent;
     const target = routeDispositionTarget(name, packet, isAllowed, currentDisposition);
     const npcStakes = packet.BenefitedObservers.includes(name) && outcomeImprovesStakes(packet) ? 'Y' : 'N';
-    const lockedDeniedIntimacy = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)
-        && isAllowed === 'N'
-        && (currentDisposition.F >= 3 || currentDisposition.H >= 3);
-    const rapport = lockedDeniedIntimacy
-        ? { currentRapport, rapportEncounterLock }
-        : updateRapport(currentRapport, target, rapportEncounterLock);
+    const rapport = updateRapport(currentRapport, target, rapportEncounterLock);
     let nextRapport = rapport.currentRapport;
     rapportEncounterLock = rapport.rapportEncounterLock;
     const deltas = deriveDirection(target, npcStakes, currentDisposition, nextRapport);
@@ -2987,7 +2976,6 @@ function routeDispositionTarget(name, packet, isAllowed, currentDisposition = nu
     if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g)) {
         if (isAllowed === 'Y') return 'Bond';
-        if (currentDisposition && (currentDisposition.F >= 3 || currentDisposition.H >= 3)) return 'No Change';
         if (g === 'IntimacyAdvancePhysical') return 'FearHostility';
         return 'Hostility';
     }
@@ -3018,9 +3006,9 @@ function updateRapport(currentRapport, target, rapportEncounterLock) {
 }
 
 function deriveDirection(target, audit, currentDisposition, currentRapport) {
-    if (target === 'Hostility') return { b: 0, f: 0, h: 1 };
-    if (target === 'Fear') return { b: 0, f: 1, h: 0 };
-    if (target === 'FearHostility') return { b: 0, f: 1, h: 1 };
+    if (target === 'Hostility') return { b: -1, f: 0, h: 1 };
+    if (target === 'Fear') return { b: -1, f: 1, h: 0 };
+    if (target === 'FearHostility') return { b: -1, f: 1, h: 1 };
 
     if (currentDisposition.F === 4 || currentDisposition.H === 4) {
         if (currentRapport >= 5 && ['Bond', 'No Change'].includes(target)) {
@@ -3067,11 +3055,8 @@ function updateDisposition(currentDisposition, deltas) {
 
 function normalizeLockedDisposition(disposition) {
     if (!disposition) return disposition;
-    if (disposition.F >= 4 || disposition.H >= 4) {
-        return { ...disposition, B: 1 };
-    }
     if (disposition.F >= 3 || disposition.H >= 3) {
-        return { ...disposition, B: 2 };
+        return { ...disposition, B: 1 };
     }
     return disposition;
 }
@@ -3172,8 +3157,7 @@ function combatTier(margin) {
     if (margin >= 8) return { OutcomeTier: 'Critical_Success', LandedActions: 3, Outcome: 'dominant_impact', CounterPotential: 'none' };
     if (margin >= 5) return { OutcomeTier: 'Moderate_Success', LandedActions: 2, Outcome: 'solid_impact', CounterPotential: 'none' };
     if (margin >= 1) return { OutcomeTier: 'Minor_Success', LandedActions: 1, Outcome: 'light_impact', CounterPotential: 'none' };
-    if (margin === 0) return { OutcomeTier: 'Stalemate', LandedActions: 0, Outcome: 'stalemate', CounterPotential: 'none' };
-    if (margin >= -4) return { OutcomeTier: 'Minor_Failure', LandedActions: 0, Outcome: 'checked', CounterPotential: 'light' };
+    if (margin >= -3) return { OutcomeTier: 'Minor_Failure', LandedActions: 0, Outcome: 'checked', CounterPotential: 'light' };
     if (margin >= -7) return { OutcomeTier: 'Moderate_Failure', LandedActions: 0, Outcome: 'deflected', CounterPotential: 'medium' };
     return { OutcomeTier: 'Critical_Failure', LandedActions: 0, Outcome: 'avoided', CounterPotential: 'severe' };
 }
