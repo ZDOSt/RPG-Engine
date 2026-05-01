@@ -122,6 +122,15 @@ let lastMechanicsHandoff = {
     trackerSnapshot: null,
 };
 
+function activePersonaText() {
+    const contextPersona = getContext().powerUserSettings?.persona_description;
+    const directPersona = power_user.persona_description;
+    const selectedPersona = user_avatar ? power_user.persona_descriptions?.[user_avatar]?.description : '';
+    const chatPersona = chat_metadata?.persona ? power_user.persona_descriptions?.[chat_metadata.persona]?.description : '';
+    const uiPersona = $('#persona_description').val();
+    return String(contextPersona || directPersona || selectedPersona || chatPersona || uiPersona || '');
+}
+
 function settings() {
     extension_settings[EXT_ID] = extension_settings[EXT_ID] || structuredClone(DEFAULT_SETTINGS);
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
@@ -195,10 +204,13 @@ function saveTracker() {
 
 function syncUserIdentityFromPersona(current) {
     if (!current?.user) return;
-    const personaText = getContext().powerUserSettings?.persona_description || '';
+    const personaText = activePersonaText();
     const parsedName = parsePersonaName(personaText);
+    const personaName = user_avatar ? String(power_user.personas?.[user_avatar] || '').trim() : '';
     const fallbackName = String(name1 || '').trim();
-    const chosen = parsedName || (/^(user|you|\{\{user\}\})$/i.test(fallbackName) ? '' : fallbackName);
+    const chosen = parsedName
+        || personaName
+        || (/^(user|you|\{\{user\}\})$/i.test(fallbackName) ? '' : fallbackName);
     if (chosen) {
         current.user.name = chosen;
     }
@@ -424,8 +436,8 @@ async function runResolver(chat) {
         Array.isArray(liveChat) ? liveChat : [],
         Array.isArray(chat) ? chat : [],
     ].find(x => x.length) || [];
-    const personaText = getContext().powerUserSettings?.persona_description || '';
-    const userName = parsePersonaName(personaText) || name1;
+    const personaText = activePersonaText();
+    const userName = parsePersonaName(personaText) || (user_avatar ? power_user.personas?.[user_avatar] : '') || name1;
     const userStats = parseCoreStats(personaText);
     if (userStats) {
         current.user.stats = userStats;
@@ -1137,7 +1149,8 @@ function latestUserMessageFromAvailableChats(chat) {
 }
 
 function isSameTurnRegeneration(type, chat) {
-    if (String(type || '').toLowerCase() !== 'regenerate') return false;
+    const normalizedType = String(type || '').toLowerCase();
+    if (!['regenerate', 'swipe'].includes(normalizedType)) return false;
     if (!lastMechanicsHandoff.handoff || !lastMechanicsHandoff.trackerSnapshot) return false;
     const latestUserMessage = latestUserMessageFromAvailableChats(chat);
     const triggerUserMessage = lastMechanicsHandoff.trackerSnapshot?.lastAudit?.triggerUserMessage
@@ -1283,7 +1296,7 @@ function shouldShowCharacterCreatorPrompt() {
     if (!cfg.enableCharacterCreator || !cfg.autoOfferCharacterCreator) return false;
     const current = tracker();
     if (current.characterCreator?.completed || current.characterCreator?.offered) return false;
-    if (parseCoreStats(getContext().powerUserSettings?.persona_description || '')) return false;
+    if (parseCoreStats(activePersonaText())) return false;
     return countUserMessages() === 0;
 }
 
@@ -2248,6 +2261,109 @@ function preferKnownValue(primary, fallback, emptyValue = 'unknown') {
     if (fallbackText && !/^(unknown|none|null|n\/a)$/i.test(fallbackText)) return fallbackText;
     return emptyValue;
 }
+
+function shouldSkipMechanicsForGenerationType(type) {
+    const normalized = String(type || 'normal').toLowerCase();
+    return quietGenerationDepth > 0
+        || normalized === 'quiet'
+        || normalized === 'impersonate'
+        || normalized === 'continue';
+}
+
+function clearMechanicsHandoff() {
+    setExtensionPrompt(PROMPT_KEY, '', extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
+}
+
+async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
+    const cfg = settings();
+    clearLegacyWritingPrompt();
+
+    if (!cfg.enabled) {
+        clearMechanicsHandoff();
+        return;
+    }
+
+    if (shouldSkipMechanicsForGenerationType(type)) {
+        return;
+    }
+
+    if (isSameTurnRegeneration(type, chat)) {
+        preserveSameTurnHandoffForRegeneration();
+        console.debug('[RP Engine Tracker] Preserved mechanics handoff for same-turn regeneration.');
+        return;
+    }
+
+    const latestUserMessage = latestUserMessageFromAvailableChats(chat);
+    if (!latestUserMessage) {
+        clearMechanicsHandoff();
+        console.debug('[RP Engine Tracker] Skipped mechanics: no latest user message found.');
+        return;
+    }
+
+    if (resolving) {
+        console.warn('[RP Engine Tracker] Skipped mechanics: resolver is already running.');
+        return;
+    }
+
+    const preTurnSnapshot = trackerSnapshotForRollback(tracker());
+    resolving = true;
+    try {
+        console.debug('[RP Engine Tracker] Interceptor start', {
+            type,
+            contextSize,
+            latestUserMessage,
+            userStats: tracker().user?.stats,
+            userName: tracker().user?.name,
+        });
+
+        const result = await runResolver(chat);
+        attachTurnRollback(result, latestUserMessage, preTurnSnapshot);
+        chat_metadata[METADATA_KEY] = result.tracker;
+        await syncNpcArchive(result);
+
+        const handoff = cfg.injectHandoff
+            ? buildFinalNarrationPayload({
+                packet: result.packet,
+                npcHandoffs: result.npcHandoffs,
+                chaosHandoff: result.chaosHandoff,
+                proactivityHandoff: result.proactivityHandoff,
+                aggressionResults: result.aggressionResults,
+            })
+            : '';
+
+        setExtensionPrompt(PROMPT_KEY, handoff, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
+        lastMechanicsHandoff = {
+            handoff,
+            trackerSnapshot: trackerSnapshotForRollback(result.tracker),
+        };
+
+        saveTracker();
+        renderPanel();
+        console.debug('[RP Engine Tracker] Interceptor complete', {
+            injected: Boolean(handoff),
+            goal: result.packet?.GOAL,
+            outcome: result.packet?.Outcome,
+            stakes: result.packet?.STAKES,
+            userStats: result.tracker?.user?.stats,
+        });
+    } catch (error) {
+        const current = tracker();
+        current.lastAudit = {
+            at: new Date().toISOString(),
+            error: error?.message || String(error),
+            latestUserMessage,
+        };
+        chat_metadata[METADATA_KEY] = current;
+        saveTracker();
+        renderPanel();
+        clearMechanicsHandoff();
+        console.error('[RP Engine Tracker] Mechanics interceptor failed.', error);
+    } finally {
+        resolving = false;
+    }
+}
+
+globalThis.rpEngineTrackerInterceptor = rpEngineTrackerInterceptor;
 
 jQuery(() => {
     settings();
