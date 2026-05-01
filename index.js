@@ -54,7 +54,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.187';
+} from './engine.js?v=0.1.188';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -1700,7 +1700,7 @@ function renderMechanicsBlock(payload) {
             <details>
                 <summary>${escapeHtml(title)}</summary>
                 <div class="rp-engine-message-mechanics-body">
-                    ${audit ? renderMechanicsSummary(audit) : '<div class="rp-engine-muted">No mechanics summary stored.</div>'}
+                    ${audit ? renderMechanicsSummary(audit, payload) : '<div class="rp-engine-muted">No mechanics summary stored.</div>'}
                     <details>
                         <summary>Narration Handoff</summary>
                         ${handoff ? `<pre>${escapeHtml(handoff)}</pre>` : '<div class="rp-engine-muted">No narration handoff injected.</div>'}
@@ -1711,7 +1711,7 @@ function renderMechanicsBlock(payload) {
     `;
 }
 
-function renderMechanicsSummary(audit) {
+function renderMechanicsSummary(audit, payload = null) {
     if (audit.rollback || audit.error) return renderAudit(audit);
     const extraction = audit.extraction || {};
     const packet = audit.resolutionPacket || {};
@@ -1728,13 +1728,15 @@ function renderMechanicsSummary(audit) {
         .map(([name, item]) => `${name}: ${item.Intent}${item.TargetsUser === 'Y' ? ' -> user' : ''}`);
     const aggressionLines = Object.entries(aggression)
         .map(([name, item]) => `${name}: ${item.ReactionOutcome} (${item.Margin})`);
+    const displayIntent = mechanicsDisplayIntent(audit, payload);
+    const displayAction = mechanicsDisplayAction(audit, payload, displayIntent);
 
     return `
         <div class="rp-engine-audit-card">
             <div class="rp-engine-audit-title">Mechanics Summary</div>
             ${renderKv('Resolver', resolverModeLabel(extraction))}
-            ${renderKv('Goal', packet.GOAL || extraction.goal)}
-            ${renderKv('Action', packet.DecisiveAction || extraction.decisiveAction)}
+            ${renderKv('Goal', displayIntent)}
+            ${renderKv('Action', displayAction)}
             ${renderKv('Stakes', packet.STAKES || extraction.hasStakes)}
             ${renderKv('Target', listText(packet.ActionTargets || extraction.actionTargets))}
             ${renderKv('Opposition', listText([...(packet.OppTargets?.NPC || extraction.oppTargetsNpc || []), ...(packet.OppTargets?.ENV || extraction.oppTargetsEnv || [])]))}
@@ -1761,12 +1763,76 @@ function resolverModeLabel(extraction) {
 function mechanicsSummaryBits(audit, payload) {
     const packet = audit?.resolutionPacket || {};
     const chaos = audit?.chaosHandoff?.CHAOS || {};
+    const status = packet.STAKES === 'Y'
+        ? (packet.Outcome || packet.OutcomeTier || 'resolved')
+        : 'no roll';
+    const target = firstDisplayTarget(packet, audit?.extraction);
     return [
-        packet.GOAL || audit?.extraction?.goal || '',
-        packet.STAKES === 'Y' ? (packet.Outcome || packet.OutcomeTier || 'resolved') : 'no roll',
+        status,
+        target ? `target ${target}` : '',
         chaos.triggered ? `chaos ${chaos.band || 'event'}` : '',
         payload?.at ? new Date(payload.at).toLocaleTimeString() : '',
     ].filter(Boolean).slice(0, 4);
+}
+
+function mechanicsDisplayIntent(audit, payload = null) {
+    const extraction = audit?.extraction || {};
+    const packet = audit?.resolutionPacket || {};
+    const raw = packet.GOAL || extraction.goal || '';
+    if (!isRawUserMessageLike(raw, payload?.triggerUserMessage)) return compactDisplayText(raw, derivedMechanicsIntent(packet, extraction));
+    return derivedMechanicsIntent(packet, extraction);
+}
+
+function mechanicsDisplayAction(audit, payload = null, displayIntent = '') {
+    const extraction = audit?.extraction || {};
+    const packet = audit?.resolutionPacket || {};
+    const raw = packet.DecisiveAction || extraction.decisiveAction || '';
+    if (!raw) return '';
+    if (isRawUserMessageLike(raw, payload?.triggerUserMessage)) return displayIntent || derivedMechanicsIntent(packet, extraction);
+    return compactDisplayText(raw, displayIntent || derivedMechanicsIntent(packet, extraction));
+}
+
+function derivedMechanicsIntent(packet = {}, extraction = {}) {
+    if (packet.OOCMode === 'STOP' || extraction.oocMode === 'STOP') return 'OOC request';
+    if (packet.SystemOnlyUpdate === 'Y' || extraction.systemOnlyUpdate === 'Y') return 'tracker update';
+
+    const goalKind = packet.GOAL && ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)
+        ? packet.GOAL
+        : extraction.goalKind;
+    if (goalKind === 'IntimacyAdvancePhysical') return 'physical intimacy advance';
+    if (goalKind === 'IntimacyAdvanceVerbal') return 'verbal intimacy advance';
+    if (packet.HostilePhysicalHarm === 'Y' || extraction.hostilePhysicalHarm === 'Y') return 'hostile physical action';
+
+    const target = firstDisplayTarget(packet, extraction);
+    if (packet.STAKES === 'Y' || extraction.hasStakes === 'Y') {
+        return target ? `contested action against ${target}` : 'contested action';
+    }
+    return target ? `no-roll interaction with ${target}` : 'no-roll interaction';
+}
+
+function firstDisplayTarget(packet = {}, extraction = {}) {
+    return [
+        ...(packet.ActionTargets || extraction.actionTargets || []),
+        ...(packet.OppTargets?.NPC || extraction.oppTargetsNpc || []),
+        ...(packet.OppTargets?.ENV || extraction.oppTargetsEnv || []),
+    ].map(x => String(x || '').trim()).find(Boolean) || '';
+}
+
+function compactDisplayText(value, fallback = '') {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return fallback;
+    return text.length > 90 ? `${text.slice(0, 87).trim()}...` : text;
+}
+
+function isRawUserMessageLike(value, triggerUserMessage = '') {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    const trigger = String(triggerUserMessage || '').replace(/\s+/g, ' ').trim();
+    if (!text) return false;
+    if (trigger && text === trigger) return true;
+    if (trigger && text.length > 60 && trigger.includes(text)) return true;
+    if (text.length > 120) return true;
+    if (text.split(/\s+/).length > 18 && /["“”]|\bI\b|\bmy\b|\bme\b/i.test(text)) return true;
+    return false;
 }
 
 function formatJsonForDisplay(value) {
