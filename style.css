@@ -99,6 +99,12 @@
     border-radius: 8px;
     font-size: 1.05rem;
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor), var(--SmartThemeBodyColor) 14%);
+    cursor: grab;
+    touch-action: none;
+}
+
+#rp_engine_tracker_panel.rp-engine-collapsed.rp-engine-dragging #rp_engine_tracker_collapse {
+    cursor: grabbing;
 }
 
 .rp-engine-actions button:hover,

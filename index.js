@@ -59,7 +59,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.172';
+} from './engine.js?v=0.1.173';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -3753,7 +3753,7 @@ function setupPanelDrag() {
     const header = root.find('.rp-engine-header');
 
     header.off(`pointerdown.${EXT_ID}`).on(`pointerdown.${EXT_ID}`, (event) => {
-        if ($(event.target).closest('button').length) return;
+        if ($(event.target).closest('button').length && !root.hasClass('rp-engine-collapsed')) return;
         const el = root[0];
         if (!el) return;
 

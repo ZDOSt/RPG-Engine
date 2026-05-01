@@ -2446,92 +2446,287 @@ export function resolveTurn(extraction, tracker, options = {}) {
 }
 
 export function buildNarrationHandoff(packet, npcHandoffs, chaosHandoff = noChaosHandoff(), proactivityHandoff = {}, aggressionResults = {}) {
-    const npcLines = npcHandoffs.map(n => `${n.NPC}: ${n.FinalState}, Lock=${n.Lock}, Behavior=${n.Behavior}, Target=${n.Target}, Gate=${n.IntimacyGate}`).join('\n') || '(none)';
     const chaos = chaosHandoff?.CHAOS || noChaosHandoff().CHAOS;
     const proactiveEntries = Object.entries(proactivityHandoff || {});
-    const activeProactivity = proactiveEntries
-        .filter(([, p]) => p.Proactive === 'Y')
-        .map(([name, p]) => `${name}: Intent=${p.Intent}, Impulse=${p.Impulse}, TargetsUser=${p.TargetsUser}, Tier=${p.ProactivityTier || '(none)'}, Die=${p.ProactivityDie || '(none)'}, Threshold=${p.Threshold || '(none)'}, CounterBonus=${p.CounterBonus || 0}`)
-        .join('\n') || '(none)';
-    const proactivityLines = proactiveEntries.length
-        ? proactiveEntries.map(([name, p]) => {
-            if (p.Proactive !== 'Y') {
-                return `${name}: Proactive=N, Intent=NONE, TargetsUser=N, Tier=${p.ProactivityTier || '(none)'}, Die=${p.ProactivityDie || '(none)'}, Threshold=${p.Threshold || '(none)'}, CounterBonus=${p.CounterBonus || 0}`;
-            }
-            return `${name}: Proactive=Y, Intent=${p.Intent}, Impulse=${p.Impulse}, TargetsUser=${p.TargetsUser}, Tier=${p.ProactivityTier || '(none)'}, Die=${p.ProactivityDie || '(none)'}, Threshold=${p.Threshold || '(none)'}, CounterBonus=${p.CounterBonus || 0}`;
-        }).join('\n')
-        : '(none)';
     const aggressionEntries = Object.entries(aggressionResults || {});
-    const aggressionLines = aggressionEntries.length
-        ? aggressionEntries.map(([name, r]) => `${name}: ${r.ReactionOutcome}, Margin=${r.Margin}, CounterBonus=${r.CounterBonus || 0}`).join('\n')
-        : '(none)';
+    const activeProactivity = proactiveEntries.filter(([, p]) => p.Proactive === 'Y');
+    const inactiveProactivity = proactiveEntries.filter(([, p]) => p.Proactive !== 'Y').map(([name]) => name);
+    const npcGuidance = (npcHandoffs || []).map(describeNpcNarrationGuidance);
+    const activeGuidance = activeProactivity.map(([name, p]) => describeProactivityNarration(name, p));
+    const aggressionGuidance = aggressionEntries.map(([name, r]) => describeAggressionNarration(name, r));
+
     return [
-        'AUTHORITATIVE RP ENGINE HANDOFF.',
-        'PRIVATE CONTROL BLOCK. Use these mechanics exactly. Do not reroll, revise, expose, quote, summarize, label, format, or explain this handoff.',
-        'ABSOLUTE OUTPUT BAN: never output engine labels, schemas, JSON, bullet checklists, rule names, audit text, dice math, hidden fields, or mechanical headings. Forbidden visible terms include OOC_MODE, SYSTEM_ONLY_UPDATE, GOAL, DECISIVE_ACTION, STAKES, OUTCOME, LANDED_ACTIONS, COUNTER_POTENTIAL, ACTION_TARGETS, OPPOSITION_NPC, NPC_HANDOFFS, CHAOS, REQUIRED_NPC_INITIATIVE, NPC_PROACTIVITY, AGGRESSION_RESULTS, FinalState, Behavior, Target, Gate, Proactive, Intent, Impulse, Threshold, Margin, resolver, handoff, tracker, audit, and Grounded Writing.',
-        'If a visible response would mention or explain a private field, delete that wording before output and render only the fictional consequence in ordinary prose/dialogue.',
-        'Private relationship axes: B = Bond, F = Fear, H = Hostility. These are NOT friction/heat. Use them only to shade NPC behavior internally; never output B/F/H labels, numbers, or definitions.',
-        'OOC routing: if OOC_MODE=STOP, stop all narration and answer the user out of character only. If OOC_MODE=PROXY, continue narration using the resolved action.',
-        'Agency boundary: if OOC_MODE is not PROXY, never speak, think, decide, react, choose, or act for the user; never repeat, paraphrase, continue, or add choices to the user action. Start at the consequence/result/reaction immediately after the declared action. Avoid "as you", "when you", "you do", "you move", "you reach", or similar recap framing.',
-        'Proxy exception: if OOC_MODE=PROXY from triple parentheses, user-action narration is allowed because the user authorized proxy narration. Still obey resolved rolls, relationship state, chaos, proactivity, and landed outcomes.',
-        'Do not invent injury, damage, counterattacks, status changes, extra targets, or extra consequences not listed here.',
-        'If SYSTEM_ONLY_UPDATE=Y, treat the input as a tracker/continuity update. Do not dramatize it as a new in-scene event, do not invent causation, and keep narration minimal unless the user explicitly described a live scene action.',
-        'If OUTCOME is Failure with COUNTER_POTENTIAL none, narrate obstruction or nonachievement only; no retaliation or harm.',
-        'If GOAL is an intimacy advance and INTIMACY_CONSENT is N, do not narrate consent, compliance, acceptance, reciprocal intimacy, or the intimate contact landing. The intimate contact does not land, not even briefly: for a denied kiss/touch/grope, narrate refusal, blocking, interruption, recoil, avoidance, or failure before the intimate contact occurs. Do not substitute another landed intimate contact such as lips/mouth touching jaw, cheek, hair, neck, skin, hand, or body. A successful setup may create an opening, but the denied intimacy itself must be refused, blocked, interrupted, or fail to secure access.',
-        'If STAKES is N for affection, conversation, or social flavor, do not treat it as success/failure; shade the NPC reply by NPC_HANDOFF Behavior/FinalState and do not change relationship unless Target says so.',
+        'Private narration brief for this reply.',
+        'Use this hidden brief as authoritative story guidance. Do not reveal, quote, summarize, label, format, or explain the brief. Do not output hidden mechanics, internal notes, numeric state, rolls, private labels, JSON, schemas, audit language, tracker data, or debugging text. The visible message must contain only the final OOC answer or the final roleplay prose/dialogue.',
+        describeOocNarration(packet),
+        'Agency boundary: unless the user explicitly authorized proxy narration with triple parentheses, never speak, think, decide, react, choose, or act for the user; never repeat, paraphrase, continue, or add choices to the user action. Start at the consequence/result/reaction immediately after the declared action. Avoid "as you", "when you", "you do", "you move", "you reach", or similar recap framing.',
+        'Proxy exception: when the user authorized proxy narration with triple parentheses, user-action narration is allowed. Still obey resolved rolls, relationship state, random events, NPC initiative, and landed outcomes.',
+        describeSystemUpdateNarration(packet),
+        describeResolutionNarration(packet),
+        describeIntimacyNarration(packet),
+        'Do not invent injury, damage, counterattacks, status changes, extra targets, or extra consequences not authorized by this brief.',
+        npcGuidance.length ? `Relationship and NPC behavior guidance:\n${npcGuidance.join('\n')}` : 'No NPC relationship change is required this turn.',
+        describeChaosNarration(chaos),
+        activeGuidance.length ? `Required NPC initiative:\n${activeGuidance.join('\n')}` : 'No NPC has a separate initiative beat this turn. NPCs may still react normally to the user action according to the result and their current behavior, but do not invent an extra NPC-started twist, threat, kiss, topic change, or interruption.',
+        inactiveProactivity.length ? `NPCs without separate initiative this turn: ${joinList(inactiveProactivity)}. Keep them to normal reaction only unless directly addressed by the resolved result.` : '',
+        aggressionGuidance.length ? `NPC physical aggression resolution:\n${aggressionGuidance.join('\n')}` : 'No NPC physical aggression result needs to be narrated this turn.',
         'An actionable final beat means one of these: NPC dialogue the user can answer, a direct question requiring a reply, a concrete action requiring response, or useful information that lets the user choose the next move.',
         'When an NPC says or does something that requires the user response, that NPC may not speak or act again for that turn. No filler from that same NPC, no forced resolution, no answering for the user.',
-        'If STAKES is N and the user asked for directions, public information, a name, the time, harmless small talk, or another simple answer, give the useful answer directly and stop after it. The useful answer itself is the actionable beat.',
+        'If no roll was needed and the user asked for directions, public information, a name, the time, harmless small talk, or another simple answer, give the useful answer directly and stop after it. The useful answer itself is the actionable beat.',
         'For completed no-stakes answers, do not append idle filler or fake turn prompts such as waiting, still waiting, waiting for you to act/follow/respond, standing there, lowering a hand and waiting, silence settling, the room/air changing, or an NPC holding position for no reason.',
-        'For hostile combat only, LANDED_ACTIONS controls how many attacks land. For noncombat binary Success/Failure, use OUTCOME instead.',
-        'If CHAOS_TRIGGERED is N, do not invent new environmental stimuli, accidents, interruptions, arrivals, noises, objects, hazards, or outside causes. Resolve only from the user action, named NPC behavior, and already established scene facts.',
-        'OUTCOME MEANINGS are authoritative narration constraints:',
-        '- dominant_impact: Critical success. Up to three listed hostile actions land, or the user clearly controls the exchange; strong damage/control but no invented extra actions.',
-        '- solid_impact: Moderate success. Up to two listed hostile actions land, or one lands cleanly with meaningful damage/control.',
-        '- light_impact: Minor success. One listed hostile action lands lightly, partially, or with limited control; no decisive advantage.',
-        '- stalemate: Tie. No clean progress for either side; no landed hostile action, no counter opening, no winner.',
-        '- checked: Minor failure. The user is stopped at contact or near-contact; no hit lands; light counter opening.',
-        '- deflected: Moderate failure. The user is turned aside, displaced, or put off-line; no hit lands; medium counter opening.',
-        '- avoided: Critical failure. The user misses badly, overextends, or is badly out-positioned; no hit lands; severe counter opening.',
-        'CHAOS is an optional random event seed. If triggered=true, incorporate a fitting event using band/magnitude/anchor/vector, but do not contradict the resolution packet.',
-        'NPC_PROACTIVITY is initiative only, not ordinary reaction. NPCs may always react normally to the user action according to Relationship state and outcome. Proactive=N means no extra NPC-initiated beat beyond normal reaction; do not infer mood, intent, aggression, attraction, or topic changes from inactive proactivity fields.',
-        'If REQUIRED_NPC_INITIATIVE is not (none), every listed NPC must take one clear initiative beat after the normal reaction. Do not omit active proactivity.',
-        'If GOAL/DECISIVE_ACTION says no active user action and every relevant NPC has Proactive=N, hold the existing quiet/passive scene. Do not invent NPC-initiated contact, kisses, threats, plans, interruptions, or new topics.',
-        'If Proactive=Y, the NPC seizes initiative after the normal reaction. This beat may follow from the user action or be an ambient scene/life beat from the NPC, as long as it matches Intent, Impulse, relationship state, and scene context.',
-        'Intent examples: PLAN_OR_BANTER may be a friend suggesting a thing to do, changing topic, teasing, or pursuing a small personal goal; INTIMACY_OR_FLIRT may be the NPC initiating closeness, flirtation, or a kiss when the gate/state allows; SUPPORT_ACT means they help or back the user; anger/fear intents may posture, withdraw, call help, block, or attack.',
-        'TargetsUser=Y is primarily for hostile/boundary/aggression resolution. Non-hostile initiative can still be directed toward the user when the scene and relationship make that natural.',
-        'Forced counters from failed hostile physical attacks may include CounterBonus: light=+1, medium=+2, severe=+3 applied to the NPC aggression total. This improves the counter roll but does not guarantee success.',
-        'If TargetsUser=Y and AGGRESSION_RESULTS exists, that result controls the physical exchange.',
-        'For NPC-initiated physical aggression, AGGRESSION_RESULTS is authoritative: npc_overpowers, npc_succeeds, user_resists, or user_dominates. Do not add extra hits or outcomes beyond that result.',
-        'If AGGRESSION_RESULTS is user_resists or user_dominates, the NPC attack fails against the user. Narrate only the failed attack reaching the block, avoidance, failed contact, or exposed opening point. Do not narrate the user counterattacking, pursuing, deciding, speaking, or choosing a follow-up. Stop with the opening available for the user to answer.',
-        `OOC_MODE: ${packet.OOCMode || 'IC'}`,
-        `OOC_INSTRUCTION: ${packet.OOCInstruction || '(none)'}`,
-        `SYSTEM_ONLY_UPDATE: ${packet.SystemOnlyUpdate || 'N'}`,
-        `SYSTEM_ONLY_REASON: ${packet.SystemOnlyUpdateReason || '(none)'}`,
-        `GOAL: ${packet.GOAL}`,
-        `DECISIVE_ACTION: ${packet.DecisiveAction || packet.GOAL}`,
-        `ON_SUCCESS: ${packet.OutcomeOnSuccess || 'Apply only the listed successful outcome.'}`,
-        `ON_FAILURE: ${packet.OutcomeOnFailure || 'Apply only the listed failed outcome.'}`,
-        `STAKES: ${packet.STAKES}`,
-        `INTIMACY_CONSENT: ${packet.IntimacyConsent}`,
-        `OUTCOME: ${packet.OutcomeTier} / ${packet.Outcome}`,
-        `LANDED_ACTIONS: ${packet.LandedActions}`,
-        `COUNTER_POTENTIAL: ${packet.CounterPotential}`,
-        `SCENE_TIME: ${packet.SceneTime || '(unknown)'}`,
-        `TIME_ADVANCE: ${packet.TimeAdvance || '(none)'}`,
-        `ACTION_TARGETS: ${packet.ActionTargets.join(', ') || '(none)'}`,
-        `OPPOSITION_NPC: ${packet.OppTargets.NPC.join(', ') || '(none)'}`,
-        `OPPOSITION_ENV: ${packet.OppTargets.ENV.join(', ') || '(none)'}`,
-        'NPC_HANDOFFS:',
-        npcLines,
-        `CHAOS: triggered=${chaos.triggered}, band=${chaos.band}, magnitude=${chaos.magnitude}, anchor=${chaos.anchor}, vector=${chaos.vector}, personVector=${chaos.personVector}`,
-        'REQUIRED_NPC_INITIATIVE:',
-        activeProactivity,
-        'NPC_PROACTIVITY:',
-        proactivityLines,
-        'AGGRESSION_RESULTS:',
-        aggressionLines,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
+}
+
+function describeOocNarration(packet) {
+    if (packet.OOCMode === 'STOP') {
+        return `The latest user message is out of character. Stop all narration and answer only the user's out-of-character request: ${packet.OOCInstruction || 'answer directly'}.`;
+    }
+    if (packet.OOCMode === 'PROXY') {
+        return 'The latest user message authorizes proxy narration with triple parentheses. Continue in scene using the declared proxy action and the resolved engine result.';
+    }
+    return 'The latest user message is in character. Continue the roleplay from the resolved consequence.';
+}
+
+function describeSystemUpdateNarration(packet) {
+    if (packet.SystemOnlyUpdate === 'Y') {
+        return `This is a tracker or continuity update, not a new dramatic scene beat. Keep narration minimal unless the user explicitly described live action. Reason: ${packet.SystemOnlyUpdateReason || 'system update'}.`;
+    }
+    const details = [];
+    if (packet.SceneTime) details.push(`Current scene time: ${packet.SceneTime}.`);
+    if (packet.TimeAdvance) details.push(`Time movement this turn: ${packet.TimeAdvance}.`);
+    return details.join(' ');
+}
+
+function describeResolutionNarration(packet) {
+    const goal = packet.GOAL || 'the user action';
+    const decisive = packet.DecisiveAction || goal;
+    const targets = joinList([...(packet.ActionTargets || []), ...(packet.OppTargets?.NPC || []), ...(packet.OppTargets?.ENV || [])]);
+    const targetText = targets ? ` Relevant target or obstacle: ${targets}.` : '';
+    const successText = packet.OutcomeOnSuccess ? ` If showing success, preserve this meaning: ${packet.OutcomeOnSuccess}.` : '';
+    const failureText = packet.OutcomeOnFailure ? ` If showing failure, preserve this meaning: ${packet.OutcomeOnFailure}.` : '';
+    const counter = describeCounterPotential(packet.CounterPotential);
+
+    if (packet.STAKES !== 'Y') {
+        return `Resolved intent: ${goal}. Decisive action: ${decisive}. No roll was needed because the explicit action has no meaningful contested stakes or is an automatic/simple answer.${targetText} Do not frame it as success versus failure, and do not change relationship state unless the relationship guidance says so.${successText}${failureText}`;
+    }
+
+    const hostileCombat = packet.HostilePhysicalHarm === 'Y' || Number.isFinite(Number(packet.LandedActions));
+    if (hostileCombat) {
+        const landed = Number(packet.LandedActions);
+        const declared = Array.isArray(packet.actions) ? packet.actions.length : 1;
+        let combat;
+        switch (packet.Outcome) {
+            case 'dominant_impact':
+                combat = `Critical combat success. Up to ${Math.min(3, declared)} declared hostile actions may land with strong damage or control. Do not invent extra attacks.`;
+                break;
+            case 'solid_impact':
+                combat = `Moderate combat success. Up to ${Math.min(2, declared)} declared hostile actions may land cleanly or with meaningful control. Do not invent extra attacks.`;
+                break;
+            case 'light_impact':
+                combat = 'Minor combat success. One declared hostile action may land lightly, partially, or with limited control. Do not give decisive advantage.';
+                break;
+            case 'stalemate':
+                combat = 'Combat stalemate. No clean progress for either side, no landed hostile action, no counter opening, and no winner.';
+                break;
+            case 'checked':
+                combat = 'Minor combat failure. No hostile action lands. The user is stopped at contact or near-contact, creating only a light counter opening.';
+                break;
+            case 'deflected':
+                combat = 'Moderate combat failure. No hostile action lands. The user is turned aside, displaced, or put off-line, creating a medium counter opening.';
+                break;
+            case 'avoided':
+                combat = 'Critical combat failure. No hostile action lands. The user misses badly, overextends, or is badly out-positioned, creating a severe counter opening.';
+                break;
+            default:
+                combat = landed > 0
+                    ? `Hostile physical action succeeds with ${landed} declared action${landed === 1 ? '' : 's'} landing.`
+                    : 'Hostile physical action does not land.';
+        }
+        return `Resolved intent: ${goal}. Decisive action: ${decisive}.${targetText} ${combat} ${counter}${successText}${failureText}`;
+    }
+
+    if (packet.Outcome === 'success') {
+        return `Resolved intent: ${goal}. Decisive action: ${decisive}.${targetText} The contested action succeeds. Narrate the explicit success consequence only; do not add extra consequences.${counter}${successText}${failureText}`;
+    }
+    if (packet.Outcome === 'failure') {
+        return `Resolved intent: ${goal}. Decisive action: ${decisive}.${targetText} The contested action fails. Narrate obstruction or nonachievement only; no retaliation or harm unless another part of the brief authorizes it.${counter}${successText}${failureText}`;
+    }
+    if (packet.Outcome === 'stalemate') {
+        return `Resolved intent: ${goal}. Decisive action: ${decisive}.${targetText} The contest stalls with no clear progress for either side. Do not choose a winner.${counter}${successText}${failureText}`;
+    }
+    return `Resolved intent: ${goal}. Decisive action: ${decisive}.${targetText} Apply the resolved result conservatively without inventing consequences.${counter}${successText}${failureText}`;
+}
+
+function describeIntimacyNarration(packet) {
+    if (!['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)) return '';
+    if (packet.IntimacyConsent === 'Y') {
+        return 'The intimacy gate allows this advance. Narrate acceptance or reciprocal intimacy only within the established relationship state and explicit scene facts.';
+    }
+    if (packet.GOAL === 'IntimacyAdvancePhysical') {
+        return 'The intimacy gate denies this physical advance. Do not narrate consent, compliance, acceptance, reciprocal intimacy, or the intimate contact landing. The contact does not land, not even briefly: show refusal, blocking, interruption, recoil, avoidance, or failure before lips, hands, body, or other intimate contact reaches the target. A successful setup may create an opening, but the denied intimacy itself must still be refused or blocked.';
+    }
+    return 'The intimacy gate denies this verbal advance. Do not narrate acceptance, consent, reciprocal intimacy, or compliance. Show refusal, boundary setting, avoidance, anger, fear, or nonacceptance according to relationship guidance.';
+}
+
+function describeCounterPotential(value) {
+    if (value === 'light') return ' A light counter opening exists only if proactivity/aggression guidance uses it; otherwise do not invent a counterattack.';
+    if (value === 'medium') return ' A medium counter opening exists only if proactivity/aggression guidance uses it; otherwise do not invent a counterattack.';
+    if (value === 'severe') return ' A severe counter opening exists only if proactivity/aggression guidance uses it; otherwise do not invent a counterattack.';
+    return ' No counterattack is authorized by the resolution result alone.';
+}
+
+function describeNpcNarrationGuidance(handoff) {
+    const name = handoff.NPC || 'The NPC';
+    const fin = parseFinalState(handoff.FinalState);
+    const parts = [
+        `${name}: ${describeRelationshipTarget(handoff.Target)} ${describeRelationshipBehavior(fin, handoff.Lock, handoff.Behavior)}`,
+    ];
+    if (handoff.NPC_STAKES === 'Y') {
+        parts.push('Their material stakes improved this turn; show benefit only through concrete behavior or dialogue.');
+    }
+    if (handoff.Landed === 'Y') {
+        parts.push('They were affected by a landed hostile action; keep the reaction consistent with the resolved impact.');
+    }
+    if (handoff.IntimacyGate === 'ALLOW') {
+        parts.push('Intimacy may be accepted or initiated only if the scene naturally supports it.');
+    } else if (handoff.IntimacyGate === 'DENY') {
+        parts.push('Intimacy must be refused, blocked, avoided, or otherwise unavailable.');
+    }
+    if (handoff.Override && handoff.Override !== 'NONE') {
+        parts.push(`A specific intimacy override exists: ${handoff.Override}. Use it only within the explicit scene facts.`);
+    }
+    return `- ${parts.join(' ')}`;
+}
+
+function describeRelationshipTarget(target) {
+    switch (target) {
+        case 'Bond': return 'This turn moves them toward trust or cooperation.';
+        case 'Fear': return 'This turn makes them more afraid.';
+        case 'Hostility': return 'This turn makes them more hostile or obstructive.';
+        case 'FearHostility': return 'This turn makes them both afraid and hostile.';
+        default: return 'No relationship shift is caused by this turn.';
+    }
+}
+
+function describeRelationshipBehavior(fin, lock, behavior) {
+    const activeLock = lock && lock !== 'None' ? lock : deriveLock(fin);
+    if (activeLock === 'TERROR') {
+        return 'Their resulting state is terror: panic, flight, surrender, desperate compliance, calling for help, or fear-dominant behavior. Do not portray calm resistance, playful banter, trust, or casual compliance.';
+    }
+    if (activeLock === 'HATRED') {
+        return 'Their resulting state is violent hatred: active opposition, sabotage, attack intent, or refusal. Do not portray warmth, trust, flirtation, softening, or easy cooperation.';
+    }
+    if (activeLock === 'FREEZE') {
+        if (fin.F >= 3 && fin.H >= 3) {
+            return 'Their resulting state is fear and hostility lock: frozen, guarded, obstructive, avoidant, or unable to respond freely. Do not portray them as relaxed, trusting, playful, or easily compliant.';
+        }
+        if (fin.F >= 3) {
+            return 'Their resulting state is fear lock: frozen, submissive, avoidant, hesitant, or seeking escape/help. Do not portray them as relaxed, trusting, playful, or freely aggressive.';
+        }
+        return 'Their resulting state is hostility lock: obstructive, resentful, argumentative, interfering, or escalating. Do not portray warmth, trust, or easy compliance.';
+    }
+    if (behavior === 'CLOSE' || fin.B >= 4) {
+        return 'Their resulting stance is close and trusting: confiding, seeking closeness, or warmly cooperative is allowed when scene-appropriate.';
+    }
+    if (behavior === 'FRIENDLY' || fin.B >= 3) {
+        return 'Their resulting stance is friendly and comfortable: cooperative, relaxed, familiar, or conversational behavior is appropriate.';
+    }
+    if (behavior === 'BROKEN' || fin.B <= 1) {
+        return 'Their resulting stance is avoidant or distant: keep distance, disengage, refuse closeness, or respond transactionally.';
+    }
+    return 'Their resulting stance is neutral or cautious: polite, businesslike, guarded, or transactional behavior is appropriate.';
+}
+
+function describeChaosNarration(chaos) {
+    if (!chaos?.triggered) {
+        return 'No random event occurs. Do not invent new environmental stimuli, accidents, interruptions, arrivals, noises, objects, hazards, or outside causes. Resolve only from the user action, named NPC behavior, and already established scene facts.';
+    }
+    const band = String(chaos.band || '').toLowerCase();
+    const magnitude = String(chaos.magnitude || '').toLowerCase();
+    const relation = describeChaosAnchor(chaos.anchor);
+    const source = describeChaosVector(chaos.vector);
+    return `A random event must occur. It should be ${articleFor(band)} ${band || 'complication'} event of ${magnitude || 'minor'} magnitude, relate to ${relation}, and come through ${source}. It must not contradict the resolved action, relationship state, or established scene facts.`;
+}
+
+function describeChaosAnchor(anchor) {
+    switch (anchor) {
+        case 'GOAL': return 'the user action or its immediate goal';
+        case 'ENVIRONMENT': return 'the established environment';
+        case 'KNOWN_NPC': return 'a known NPC already connected to the scene';
+        case 'RESOURCE': return 'a resource, item, supply, or material concern';
+        case 'CLUE': return 'a clue, information, sign, or discovery';
+        default: return 'the existing scene';
+    }
+}
+
+function describeChaosVector(vector) {
+    switch (vector) {
+        case 'NPC': return 'an NPC';
+        case 'CROWD': return 'the crowd or public surroundings';
+        case 'AUTHORITY': return 'an authority figure or enforcement presence';
+        case 'ENVIRONMENT': return 'the environment';
+        case 'SYSTEM': return 'a non-person system, mechanism, rule, weather, structure, or circumstance';
+        case 'ENTITY': return 'an entity appropriate to the isolated scene';
+        default: return 'the established scene';
+    }
+}
+
+function describeProactivityNarration(name, action) {
+    const impulse = describeImpulse(action.Impulse);
+    const intent = describeIntent(action.Intent);
+    const target = action.TargetsUser === 'Y'
+        ? 'This initiative targets the user; obey any physical aggression result if present.'
+        : 'This initiative does not require a hostile physical exchange with the user unless the scene makes a non-hostile address natural.';
+    const counter = action.CounterBonus ? ` A failed-user-action counter opening strengthens this initiative by ${action.CounterBonus}, but does not guarantee success.` : '';
+    return `- ${name} must take one clear initiative beat after the normal reaction. Motivation: ${impulse}. Action shape: ${intent}. ${target}${counter}`;
+}
+
+function describeImpulse(impulse) {
+    if (impulse === 'ANGER') return 'anger, hostility, boundary enforcement, or opposition';
+    if (impulse === 'FEAR') return 'fear, withdrawal, caution, submission, or seeking help';
+    if (impulse === 'BOND') return 'bond, cooperation, trust, support, flirtation, or friendly initiative';
+    return 'the current relationship state';
+}
+
+function describeIntent(intent) {
+    switch (intent) {
+        case 'ESCALATE_VIOLENCE': return 'escalate into violence or an attack attempt';
+        case 'BOUNDARY_PHYSICAL': return 'set a physical boundary, block, shove away, restrain access, or otherwise prevent contact';
+        case 'THREAT_OR_POSTURE': return 'threaten, posture, challenge, warn, or obstruct without resolving a full attack unless aggression guidance says so';
+        case 'CALL_HELP_OR_AUTHORITY': return 'call for help, alert authority, shout, flee toward help, or make danger public';
+        case 'WITHDRAW_OR_BOUNDARY': return 'withdraw, refuse, retreat, set a boundary, or create distance';
+        case 'INTIMACY_OR_FLIRT': return 'initiate closeness, flirtation, affectionate contact, or intimacy only if relationship and consent guidance allow it';
+        case 'SUPPORT_ACT': return 'help, back up, assist, protect, guide, or support the user or their goal';
+        case 'PLAN_OR_BANTER': return 'suggest a plan, change topic, tease, banter, or pursue a small personal/scene beat';
+        default: return 'no extra action beyond normal reaction';
+    }
+}
+
+function describeAggressionNarration(name, result) {
+    switch (result.ReactionOutcome) {
+        case 'npc_overpowers':
+            return `- ${name}'s physical aggression overpowers the user. Narrate the NPC's external action and its immediate physical result, but do not decide the user's thoughts, choices, or follow-up.`;
+        case 'npc_succeeds':
+            return `- ${name}'s physical aggression succeeds. Narrate the immediate external result only; do not add extra hits or decide the user's voluntary response.`;
+        case 'user_resists':
+            return `- ${name}'s physical aggression fails against the user because the user resists. Stop at the failed contact, block, avoidance, or exposed opening. Do not narrate the user counterattacking, pursuing, deciding, speaking, or choosing a follow-up.`;
+        case 'user_dominates':
+            return `- ${name}'s physical aggression fails badly against the user. Stop at the failed contact, avoided strike, compromised position, or exposed opening. Do not narrate the user counterattacking, pursuing, deciding, speaking, or choosing a follow-up.`;
+        default:
+            return `- ${name}'s physical aggression has an unresolved result. Keep it conservative and do not add extra hits or user agency.`;
+    }
+}
+
+function joinList(values) {
+    const list = (values || []).filter(Boolean).map(x => String(x).trim()).filter(Boolean);
+    if (!list.length) return '';
+    if (list.length === 1) return list[0];
+    if (list.length === 2) return `${list[0]} and ${list[1]}`;
+    return `${list.slice(0, -1).join(', ')}, and ${list[list.length - 1]}`;
+}
+
+function articleFor(text) {
+    return /^[aeiou]/i.test(String(text || '')) ? 'an' : 'a';
 }
 
 export function buildFinalNarrationPayload({
@@ -2582,26 +2777,19 @@ function buildNameGenerationHandoff(payload) {
     const styleGuidance = cleanText(payload.styleGuidance || NAME_STYLE_PRESETS.balancedFantasy.description);
     const customStyle = cleanText(payload.customStyle || '');
     return [
-        'AUTHORITATIVE NAME GENERATION HANDOFF - CURRENT TURN.',
-        'Use with NameGenerationEngine from the early system layer. Invisible system; do not explain, expose, or mention this section.',
-        `NAME_STYLE_PRESET: ${styleLabel}`,
-        `NAME_STYLE_GUIDANCE: ${styleGuidance}`,
-        customStyle ? `CUSTOM_NAME_STYLE: ${customStyle}` : '',
-        'REVEAL DISCIPLINE: use a candidate only when the immediate response actually reveals, names, mentions, or identifies a previously unnamed person/location. Otherwise keep the reserved name hidden.',
-        'EXPLICIT NAMES WIN: if scene/card/tracker/lorebook already names the entity, use that exact name and do not generate another.',
-        'CANDIDATE PRIORITY: when a reveal occurs and a matching candidate exists, MUST copy the next matching candidate exactly. Do not invent or substitute a generic modern-Western or Western-fantasy name such as Garrick, Cedric, Alaric, Marcus, Dorian, Coran, or Denan.',
-        'POOL SELECTION: male/female/neutral/location must follow explicit in-scene evidence only. Use MALE candidates only for explicitly male-presenting or he/him NPCs. Unknown, masked, nonbinary, mixed, or unstated gender uses NEUTRAL.',
-        'Do not attach a generated name to a generic guard, merchant, stranger, passerby, or other unnamed NPC unless the name is actually introduced, spoken, read, asked for, or formally identified in-scene.',
-        'CUSTOM STYLE: if CUSTOM_NAME_STYLE is present and a listed candidate clearly violates it, generate one clean proper name that follows CUSTOM_NAME_STYLE; still obey reveal discipline.',
-        'USE ONCE: each candidate may be used at most once. Person candidates are for people/NPCs. Location candidates are for places/structures/regions/sites.',
-        `NEXT_MALE_NAME: ${maleNames[0] || '(none)'}`,
-        `NEXT_FEMALE_NAME: ${femaleNames[0] || '(none)'}`,
-        `NEXT_NEUTRAL_NAME: ${neutralNames[0] || '(none)'}`,
-        `NEXT_LOCATION_NAME: ${locationNames[0] || '(none)'}`,
-        `MALE_NAME_CANDIDATES: ${maleNames.join(', ') || '(none)'}`,
-        `FEMALE_NAME_CANDIDATES: ${femaleNames.join(', ') || '(none)'}`,
-        `NEUTRAL_NAME_CANDIDATES: ${neutralNames.join(', ') || '(none)'}`,
-        `LOCATION_NAME_CANDIDATES: ${locationNames.join(', ') || '(none)'}`,
+        'Private naming brief for this reply.',
+        'Use this hidden brief only when the visible scene actually reveals, names, mentions, or formally identifies a previously unnamed person or location. Do not reveal, quote, explain, list, or summarize this brief.',
+        `Naming style: ${styleLabel}. ${styleGuidance}`,
+        customStyle ? `Additional naming style: ${customStyle}.` : '',
+        'If a person or place already has an explicit name in scene, card, tracker, or lore, use that exact name and do not generate another.',
+        'If a new name must be revealed and a matching reserved candidate exists, copy the matching candidate exactly. Do not invent or substitute a generic modern-Western or Western-fantasy name such as Garrick, Cedric, Alaric, Marcus, Dorian, Coran, or Denan.',
+        'Use male candidates only for explicitly male-presenting or he/him NPCs. Use female candidates only for explicitly female-presenting or she/her NPCs. Use neutral candidates when gender is unknown, masked, unstated, mixed, or nonbinary. Use location candidates only for places, structures, regions, or sites.',
+        'Do not attach a reserved name to a generic guard, merchant, stranger, passerby, or other unnamed NPC unless the name is actually introduced, spoken, read, asked for, or formally identified in scene.',
+        'Each reserved candidate may be used at most once. If a listed candidate clearly violates the custom style, generate one clean proper name that follows the custom style and still obeys reveal discipline.',
+        maleNames.length ? `Reserved male person candidates, in priority order: ${joinList(maleNames)}.` : '',
+        femaleNames.length ? `Reserved female person candidates, in priority order: ${joinList(femaleNames)}.` : '',
+        neutralNames.length ? `Reserved neutral person candidates, in priority order: ${joinList(neutralNames)}.` : '',
+        locationNames.length ? `Reserved location candidates, in priority order: ${joinList(locationNames)}.` : '',
     ].filter(Boolean).join('\n');
 }
 

@@ -446,10 +446,12 @@ const payload = buildFinalNarrationPayload({
     renderRules: DEFAULT_RENDER_RULES,
     writingStyle: Array.isArray(DEFAULT_WRITING_STYLE) ? DEFAULT_WRITING_STYLE.join('\n') : String(DEFAULT_WRITING_STYLE),
 });
-assert.match(payload, /AUTHORITATIVE NAME GENERATION/);
-assert.match(payload, /OUTCOME MEANINGS are authoritative narration constraints/);
-assert.match(payload, /dominant_impact: Critical success/);
-assert.match(payload, /stalemate: Tie\. No clean progress for either side/);
+assert.match(payload, /Private naming brief for this reply/);
+assert.match(payload, /Private narration brief for this reply/);
+assert.match(payload, /No NPC relationship change is required this turn/);
+assert.match(payload, /No random event occurs/);
+assert.doesNotMatch(payload, /NPC_HANDOFFS:/);
+assert.doesNotMatch(payload, /FinalState/);
 assert.match(payload, /AUTHORITATIVE RENDER RULES/);
 assert.match(payload, /epistemicRender\(response, smellGate, context\)/);
 assert.match(payload, /jaws setting/);
@@ -459,12 +461,13 @@ assert.match(payload, /Proxy exception/);
 assert.match(payload, /Start at the consequence\/result\/reaction/);
 assert.match(payload, /Radical literalism/);
 assert.match(payload, /WRITING STYLE OVERLAY/);
-assert.match(payload, /Do not attach a generated name to a generic guard/);
-assert.match(payload, /MALE_NAME_CANDIDATES:/);
-assert.match(payload, /FEMALE_NAME_CANDIDATES:/);
-assert.match(payload, /NEUTRAL_NAME_CANDIDATES:/);
-assert.match(payload, /NEXT_MALE_NAME:/);
-assert.match(payload, /MUST copy the next matching candidate exactly/);
+assert.match(payload, /Do not attach a reserved name to a generic guard/);
+assert.match(payload, /Reserved male person candidates/);
+assert.match(payload, /Reserved female person candidates/);
+assert.match(payload, /Reserved neutral person candidates/);
+assert.doesNotMatch(payload, /MALE_NAME_CANDIDATES:/);
+assert.doesNotMatch(payload, /NEXT_MALE_NAME:/);
+assert.match(payload, /copy the matching candidate exactly/);
 report.push('');
 report.push('Render/name payload checks passed for: hidden name candidates, reveal discipline, epistemic render, strict behaviorism, radical literalism, agency separation, and writing style overlay.');
 report.push('');
