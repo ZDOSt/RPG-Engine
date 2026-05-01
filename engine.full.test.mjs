@@ -3,15 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-    DEFAULT_RENDER_RULES,
-    DEFAULT_WRITING_STYLE,
-    NAME_STYLE_PRESETS,
     buildFinalNarrationPayload,
     createTracker,
     inferFallbackExtraction,
-    markRevealedNames,
     mergeExtractionWithFallback,
-    reserveNameCandidates,
     resolveTurn,
 } from './engine.js';
 
@@ -406,24 +401,8 @@ for (let i = 0; i < 120; i++) {
 }
 
 report.push('');
-report.push('## Name Generation And Render Payload');
+report.push('## Mechanics Payload');
 report.push('');
-const nameTracker = createTracker();
-for (const style of Object.keys(NAME_STYLE_PRESETS)) {
-    const names = reserveNameCandidates(nameTracker, 4, { style, customStyle: 'desert empire names with Persian and Byzantine influence' });
-    assert.equal(names.male.length, 4);
-    assert.equal(names.female.length, 4);
-    assert.equal(names.neutral.length, 4);
-    assert.equal(names.location.length, 2);
-    report.push(`- ${names.styleLabel}: male=${names.male.join(', ')}; female=${names.female.join(', ')}; neutral=${names.neutral.join(', ')}; location=${names.location.join(', ')}${names.customStyle ? `; custom=${names.customStyle}` : ''}`);
-}
-const reserved = reserveNameCandidates(nameTracker, 4, { style: 'tolkienic' });
-const beforeReveal = [...reserved.female];
-markRevealedNames(nameTracker, `The guard says, "Ask ${beforeReveal[0]}."`);
-assert.equal(nameTracker.nameState.used.includes(beforeReveal[0]), true);
-assert.equal(nameTracker.nameState.reserved.female.includes(beforeReveal[0]), false);
-report.push(`- Reveal tracking: ${beforeReveal[0]} moved from reserved to used after appearing in generated text.`);
-
 const payload = buildFinalNarrationPayload({
     packet: {
         GOAL: 'ask the guard about the temple',
@@ -442,34 +421,21 @@ const payload = buildFinalNarrationPayload({
         OppTargets: { NPC: [], ENV: [] },
     },
     npcHandoffs: [],
-    namePayload: { ...reserved, customStyle: '' },
-    renderRules: DEFAULT_RENDER_RULES,
-    writingStyle: Array.isArray(DEFAULT_WRITING_STYLE) ? DEFAULT_WRITING_STYLE.join('\n') : String(DEFAULT_WRITING_STYLE),
 });
-assert.match(payload, /Private naming brief for this reply/);
-assert.match(payload, /Private narration brief for this reply/);
+assert.match(payload, /Private mechanics brief for this reply/);
 assert.match(payload, /No NPC relationship change is required this turn/);
 assert.match(payload, /No random event occurs/);
 assert.doesNotMatch(payload, /NPC_HANDOFFS:/);
 assert.doesNotMatch(payload, /FinalState/);
-assert.match(payload, /AUTHORITATIVE RENDER RULES/);
-assert.match(payload, /epistemicRender\(response, smellGate, context\)/);
-assert.match(payload, /jaws setting/);
-assert.match(payload, /temple pulses/);
-assert.match(payload, /small physical tells are allowed only when they produce or reveal concrete scene behavior/);
-assert.match(payload, /Proxy exception/);
-assert.match(payload, /Start at the consequence\/result\/reaction/);
-assert.match(payload, /Radical literalism/);
-assert.match(payload, /WRITING STYLE OVERLAY/);
-assert.match(payload, /Do not attach a reserved name to a generic guard/);
-assert.match(payload, /Reserved male person candidates/);
-assert.match(payload, /Reserved female person candidates/);
-assert.match(payload, /Reserved neutral person candidates/);
+assert.doesNotMatch(payload, /Private naming brief for this reply/);
+assert.doesNotMatch(payload, /AUTHORITATIVE RENDER RULES/);
+assert.doesNotMatch(payload, /<think>/);
+assert.doesNotMatch(payload, /GroundedWritingEngine/);
+assert.doesNotMatch(payload, /epistemicRender\(response, smellGate, context\)/);
 assert.doesNotMatch(payload, /MALE_NAME_CANDIDATES:/);
 assert.doesNotMatch(payload, /NEXT_MALE_NAME:/);
-assert.match(payload, /copy the matching candidate exactly/);
 report.push('');
-report.push('Render/name payload checks passed for: hidden name candidates, reveal discipline, epistemic render, strict behaviorism, radical literalism, agency separation, and writing style overlay.');
+report.push('Mechanics payload checks passed: outcome brief is present, old name/render/writing payloads are absent, and no schema-style fields leak.');
 report.push('');
 report.push(`Total checks recorded: ${caseNo - 1}`);
 

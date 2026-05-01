@@ -1,18 +1,15 @@
 import assert from 'node:assert/strict';
 import {
-    DEFAULT_RENDER_RULES,
     buildFinalNarrationPayload,
     chaosInterrupt,
     createTracker,
     describeNpcFeeling,
     inferFallbackExtraction,
     mergeExtractionWithFallback,
-    markRevealedNames,
     npcAggressionResolution,
     npcProactivityEngine,
     parseCoreStats,
     parseNpcArchiveContent,
-    reserveNameCandidates,
     resolveTurn,
     serializeNpcArchiveEntry,
     upsertArchivedNpc,
@@ -901,39 +898,6 @@ assert.equal(aggression.Mira.ReactionOutcome, 'npc_succeeds');
 }
 
 {
-    const tracker = createTracker();
-    const names = reserveNameCandidates(tracker, 4);
-    assert.equal(names.male.length, 4);
-    assert.equal(names.female.length, 4);
-    assert.equal(names.neutral.length, 4);
-    assert.equal(names.location.length, 2);
-    assert.equal(new Set([...names.male, ...names.female, ...names.neutral, ...names.location]).size, 14);
-    for (const name of [...names.male, ...names.female, ...names.neutral]) {
-        assert.match(name, /^[A-Z][a-z]{4,9}$/);
-        assert.doesNotMatch(name, /^(Elara|Mara|Valric|Coran|Denan|Fosan|Halan|Dorian|Marcus|Sarah|Elena)$/i);
-        assert.doesNotMatch(name, /(?:son|ton|ley|ly|bert|rick)$/i);
-    }
-    for (const name of names.location) {
-        assert.match(name, /^[A-Z][a-z]{6,13}$/);
-        assert.doesNotMatch(name, /(?:shire|ton|town|burg|burgh|wich|field)$/i);
-    }
-    const tolkienic = reserveNameCandidates(createTracker(), 4, { style: 'tolkienic' });
-    assert.match(tolkienic.styleLabel, /Tolkienic/);
-    assert.equal(tolkienic.male.length, 4);
-    assert.equal(tolkienic.female.length, 4);
-    assert.equal(tolkienic.neutral.length, 4);
-    const custom = reserveNameCandidates(createTracker(), 4, {
-        style: 'custom',
-        customStyle: 'soft desert empire names, Persian and Byzantine influence, no modern English names',
-    });
-    assert.equal(custom.style, 'custom');
-    assert.match(custom.customStyle, /desert empire/);
-    markRevealedNames(tracker, `The merchant says, "Ask ${names.male[0]}."`);
-    assert.equal(tracker.nameState.used.includes(names.male[0]), true);
-    assert.equal(tracker.nameState.reserved.male.includes(names.male[0]), false);
-}
-
-{
     const payload = buildFinalNarrationPayload({
         packet: {
             GOAL: 'ask the guard about the temple',
@@ -952,41 +916,16 @@ assert.equal(aggression.Mira.ReactionOutcome, 'npc_succeeds');
             OppTargets: { NPC: [], ENV: [] },
         },
         npcHandoffs: [],
-        namePayload: {
-            male: ['Maelor'],
-            female: ['Aelith'],
-            neutral: ['Caelis'],
-            location: ['Eldmere'],
-            styleLabel: 'Custom',
-            styleGuidance: 'Use the custom style description from settings.',
-            customStyle: 'elegant desert empire names',
-        },
-        renderRules: DEFAULT_RENDER_RULES,
-        writingStyle: 'Write plainly.',
     });
-    assert.match(payload, /Private naming brief for this reply/);
-    assert.match(payload, /Private narration brief for this reply/);
+    assert.match(payload, /Private mechanics brief for this reply/);
     assert.match(payload, /No NPC relationship change is required this turn/);
     assert.doesNotMatch(payload, /NPC_HANDOFFS:/);
     assert.doesNotMatch(payload, /FinalState/);
-    assert.match(payload, /Naming style: Custom/);
-    assert.match(payload, /Additional naming style: elegant desert empire names/);
-    assert.match(payload, /Reserved male person candidates, in priority order: Maelor/);
-    assert.match(payload, /Reserved female person candidates, in priority order: Aelith/);
-    assert.match(payload, /Reserved neutral person candidates, in priority order: Caelis/);
-    assert.match(payload, /copy the matching candidate exactly/);
-    assert.match(payload, /Use male candidates/);
-    assert.match(payload, /Do not attach a reserved name to a generic guard/);
-    assert.match(payload, /AUTHORITATIVE RENDER RULES/);
-    assert.match(payload, /epistemicRender\(response, smellGate, context\)/);
-    assert.match(payload, /strict behaviorism/);
-    assert.match(payload, /jaws setting/);
-    assert.match(payload, /temple pulses/);
-    assert.match(payload, /small physical tells are allowed only when they produce or reveal concrete scene behavior/);
-    assert.match(payload, /Proxy exception/);
-    assert.match(payload, /Start at the consequence\/result\/reaction/);
-    assert.match(payload, /Radical literalism/);
-    assert.match(payload, /WRITING STYLE OVERLAY/);
+    assert.doesNotMatch(payload, /Private naming brief for this reply/);
+    assert.doesNotMatch(payload, /AUTHORITATIVE RENDER RULES/);
+    assert.doesNotMatch(payload, /<think>/);
+    assert.doesNotMatch(payload, /GroundedWritingEngine/);
+    assert.doesNotMatch(payload, /epistemicRender\(response, smellGate, context\)/);
 }
 
 {

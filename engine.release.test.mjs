@@ -1,8 +1,6 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {
-    DEFAULT_RENDER_RULES,
-    DEFAULT_WRITING_STYLE,
     buildFinalNarrationPayload,
     buildCharacterSheet,
     chaosInterrupt,
@@ -12,7 +10,6 @@ import {
     npcAggressionResolution,
     npcProactivityEngine,
     parseNpcArchiveContent,
-    reserveNameCandidates,
     resolveTurn,
     rollCharacterCreatorBasics,
     rollCharacterCreatorStats,
@@ -304,11 +301,6 @@ const forcedAgg = withSequence([0.8, 0.1], () => npcAggressionResolution(forcedP
 assert.equal(forcedPro.Garron.Proactive, 'Y');
 assert.equal(forcedPro.Garron.CounterBonus, 3);
 
-const nameTracker = createTracker();
-const names = reserveNameCandidates(nameTracker, 6, { style: 'tolkienic', customStyle: '' });
-assert.equal(names.person.length, 6);
-assert(names.person.every(n => n.length >= 5 && n.length <= 10));
-assert(names.location.every(n => n.length >= 7 && n.length <= 14));
 const payload = buildFinalNarrationPayload({
     packet: {
         GOAL: 'Normal',
@@ -324,28 +316,13 @@ const payload = buildFinalNarrationPayload({
         OppTargets: { NPC: [], ENV: [] },
     },
     npcHandoffs: [],
-    namePayload: {
-        person: names.person.slice(0, 2),
-        male: names.male.slice(0, 2),
-        female: names.female.slice(0, 2),
-        neutral: names.neutral.slice(0, 2),
-        location: names.location.slice(0, 2),
-        styleLabel: 'Tolkienic / High Fantasy',
-        styleGuidance: 'lyrical fantasy names',
-        customStyle: '',
-    },
-    renderRules: textBlock(DEFAULT_RENDER_RULES),
-    writingStyle: textBlock(DEFAULT_WRITING_STYLE),
 });
-assert(payload.includes('AUTHORITATIVE RENDER RULES'));
-assert(payload.includes('AUTHORITATIVE NAME GENERATION'));
-assert(payload.includes('WRITING STYLE OVERLAY'));
-assert(payload.includes('direct in-scene sensory evidence'));
-assert(payload.includes('jaws setting'));
-assert(payload.includes('temple pulses'));
-assert(payload.includes('small physical tells are allowed only when they produce or reveal concrete scene behavior'));
-assert(payload.includes('Proxy exception'));
-assert(payload.includes('Start at the consequence/result/reaction'));
+assert(payload.includes('Private mechanics brief for this reply.'));
+assert(!payload.includes('AUTHORITATIVE RENDER RULES'));
+assert(!payload.includes('AUTHORITATIVE NAME GENERATION'));
+assert(!payload.includes('WRITING STYLE OVERLAY'));
+assert(!payload.includes('<think>'));
+assert(!payload.includes('GroundedWritingEngine'));
 
 const archiveContent = serializeNpcArchiveEntry(baseTracker().npcs.Seraphina, { includeHeader: true, chatId: 'release-chat' });
 assert.match(archiveContent, /ArchiveScope: Chat/);
@@ -405,8 +382,7 @@ const allCases = [
     ...resolutionCases,
     ...chaosCases,
     { id: 81, forcedProactivity: forcedPro, forcedAggression: forcedAgg },
-    { id: 82, names },
-    { id: 83, archive: parsedArchive },
+    { id: 82, archive: parsedArchive },
     ...creatorCases,
 ];
 
@@ -419,7 +395,7 @@ reportLines.push('## Summary');
 reportLines.push(`- Resolution/relationship message cases: ${resolutionCases.length}`);
 reportLines.push(`- Chaos/proactivity direct cases: ${chaosCases.length}`);
 reportLines.push('- Forced counter/aggression case: 1');
-reportLines.push('- Name/render/style/lorebook checks: 3');
+reportLines.push('- Mechanics payload/archive checks: 2');
 reportLines.push(`- Character creator passes: ${creatorCases.length}`);
 reportLines.push(`- Total checks/cases represented: ${allCases.length}`);
 reportLines.push('');
@@ -452,11 +428,10 @@ reportLines.push('## Forced Counter');
 reportLines.push(`- Proactivity: ${JSON.stringify(forcedPro)}`);
 reportLines.push(`- Aggression: ${JSON.stringify(forcedAgg)}`);
 reportLines.push('');
-reportLines.push('## Name / Render / Style / Lorebook');
-reportLines.push(`- Reserved names: ${JSON.stringify(names)}`);
+reportLines.push('## Mechanics Payload / Lorebook');
+reportLines.push(`- Payload includes mechanics brief: ${payload.includes('Private mechanics brief for this reply.')}`);
 reportLines.push(`- Payload includes render rules: ${payload.includes('AUTHORITATIVE RENDER RULES')}`);
 reportLines.push(`- Payload includes style overlay: ${payload.includes('WRITING STYLE OVERLAY')}`);
-reportLines.push(`- Payload includes grounded POV/render scaffolding: ${payload.includes('direct in-scene sensory evidence')}`);
 reportLines.push(`- Parsed archive NPC: ${parsedArchive.name}; feeling=${parsedArchive.feeling || '(none)'}; archiveStatus=${parsedArchive.archiveStatus}`);
 reportLines.push('');
 reportLines.push('## Character Creator');
@@ -476,7 +451,6 @@ fs.writeFileSync(`${OUT_DIR}/RELEASE_STRESS_OUTPUT.json`, JSON.stringify({
     chaosCases,
     forcedPro,
     forcedAgg,
-    names,
     archive: parsedArchive,
     creatorCases,
 }, null, 2));
