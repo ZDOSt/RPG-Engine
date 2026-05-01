@@ -8,6 +8,7 @@ import {
     Generate,
     name1,
     name2,
+    saveChatDebounced,
     saveSettingsDebounced,
     setUserName,
     setExtensionPrompt,
@@ -52,11 +53,12 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.180';
+} from './engine.js?v=0.1.182';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
+const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
 const DEFAULT_ARCHIVE_WORLD = 'RP Engine NPC Archive';
 const ARCHIVE_COMMENT_PREFIX = '[RPE NPC]';
 const CHARACTER_CREATOR_SCHEMA = {
@@ -120,7 +122,9 @@ let characterCreatorState = null;
 let lastMechanicsHandoff = {
     handoff: '',
     trackerSnapshot: null,
+    display: null,
 };
+let pendingMechanicsDisplay = null;
 
 function activePersonaText() {
     const contextPersona = getContext().powerUserSettings?.persona_description;
@@ -1162,8 +1166,112 @@ function isSameTurnRegeneration(type, chat) {
 function preserveSameTurnHandoffForRegeneration() {
     setExtensionPrompt(PROMPT_KEY, lastMechanicsHandoff.handoff, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
     chat_metadata[METADATA_KEY] = structuredClone(lastMechanicsHandoff.trackerSnapshot);
+    pendingMechanicsDisplay = lastMechanicsHandoff.display ? structuredClone(lastMechanicsHandoff.display) : null;
     saveTracker();
     renderPanel();
+}
+
+function buildMechanicsDisplayPayload(result, handoff, latestUserMessage) {
+    const audit = cloneAuditForDisplay(result?.audit || result?.tracker?.lastAudit || null);
+    return {
+        version: 1,
+        at: new Date().toISOString(),
+        triggerUserMessage: String(latestUserMessage || '').trim(),
+        resolverSchema: audit,
+        narrationHandoff: String(handoff || ''),
+    };
+}
+
+function cloneAuditForDisplay(audit) {
+    if (!audit) return null;
+    const cloned = structuredClone(audit);
+    delete cloned.preTurnTrackerSnapshot;
+    return cloned;
+}
+
+function bindPendingMechanicsToMessage(messageId) {
+    if (!pendingMechanicsDisplay) return false;
+    const message = getMessageById(messageId);
+    if (!isAssistantMessage(message)) return false;
+
+    message[MESSAGE_MECHANICS_KEY] = structuredClone(pendingMechanicsDisplay);
+    pendingMechanicsDisplay = null;
+    saveChatDebounced();
+    renderMechanicsBlocks();
+    return true;
+}
+
+function bindPendingMechanicsToLatestAssistant() {
+    if (!pendingMechanicsDisplay) return false;
+    const sourceChat = Array.isArray(getContext().chat) && getContext().chat.length ? getContext().chat : liveChat;
+    for (let i = sourceChat.length - 1; i >= 0; i--) {
+        if (isAssistantMessage(sourceChat[i])) {
+            return bindPendingMechanicsToMessage(i);
+        }
+    }
+    return false;
+}
+
+function renderMechanicsBlocks() {
+    $('#chat .rp-engine-message-mechanics').remove();
+    const sourceChat = Array.isArray(getContext().chat) ? getContext().chat : [];
+    $('#chat .mes').each((_, element) => {
+        const messageId = Number(element.getAttribute('mesid'));
+        if (!Number.isFinite(messageId)) return;
+        const message = sourceChat[messageId];
+        const payload = message?.[MESSAGE_MECHANICS_KEY];
+        if (!payload) return;
+        $(element).after(renderMechanicsBlock(payload));
+    });
+}
+
+function renderMechanicsBlock(payload) {
+    const audit = payload?.resolverSchema || null;
+    const handoff = String(payload?.narrationHandoff || '').trim();
+    const summaryBits = mechanicsSummaryBits(audit, payload);
+    const title = summaryBits.length ? `Mechanics | ${summaryBits.join(' | ')}` : 'Mechanics';
+    return `
+        <div class="rp-engine-message-mechanics">
+            <details>
+                <summary>${escapeHtml(title)}</summary>
+                <div class="rp-engine-message-mechanics-body">
+                    <details>
+                        <summary>Resolver Schema</summary>
+                        ${audit?.extraction ? `<pre>${escapeHtml(formatJsonForDisplay(audit.extraction))}</pre>` : '<div class="rp-engine-muted">No resolver schema stored.</div>'}
+                        ${audit ? `
+                            <details>
+                                <summary>Computed Audit</summary>
+                                ${renderAudit(audit)}
+                            </details>
+                        ` : ''}
+                    </details>
+                    <details>
+                        <summary>Narration Handoff</summary>
+                        ${handoff ? `<pre>${escapeHtml(handoff)}</pre>` : '<div class="rp-engine-muted">No narration handoff injected.</div>'}
+                    </details>
+                </div>
+            </details>
+        </div>
+    `;
+}
+
+function mechanicsSummaryBits(audit, payload) {
+    const packet = audit?.resolutionPacket || {};
+    const chaos = audit?.chaosHandoff?.CHAOS || {};
+    return [
+        packet.GOAL || audit?.extraction?.goal || '',
+        packet.STAKES === 'Y' ? (packet.Outcome || packet.OutcomeTier || 'resolved') : 'no roll',
+        chaos.triggered ? `chaos ${chaos.band || 'event'}` : '',
+        payload?.at ? new Date(payload.at).toLocaleTimeString() : '',
+    ].filter(Boolean).slice(0, 4);
+}
+
+function formatJsonForDisplay(value) {
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value ?? '');
+    }
 }
 
 function renderPanel() {
@@ -2335,7 +2443,9 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
         lastMechanicsHandoff = {
             handoff,
             trackerSnapshot: trackerSnapshotForRollback(result.tracker),
+            display: buildMechanicsDisplayPayload(result, handoff, latestUserMessage),
         };
+        pendingMechanicsDisplay = structuredClone(lastMechanicsHandoff.display);
 
         saveTracker();
         renderPanel();
@@ -2372,21 +2482,30 @@ jQuery(() => {
     eventSource.on(event_types.CHAT_CHANGED, () => {
         tracker();
         renderPanel();
+        renderMechanicsBlocks();
         maybeOfferCharacterCreator();
     });
     eventSource.on(event_types.MESSAGE_UPDATED, (messageId) => {
         renderPanel();
+        renderMechanicsBlocks();
     });
     eventSource.on(event_types.MESSAGE_SWIPED, () => {
         renderPanel();
+        renderMechanicsBlocks();
     });
     eventSource.on(event_types.MESSAGE_RECEIVED, (messageId, type) => {
+        bindPendingMechanicsToMessage(messageId);
+    });
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, () => {
+        renderMechanicsBlocks();
     });
     eventSource.on(event_types.GENERATION_ENDED, (messageCount) => {
+        bindPendingMechanicsToLatestAssistant();
     });
     eventSource.on(event_types.MESSAGE_DELETED, () => {
         rollbackLastTurnIfTriggerDeleted();
         renderPanel();
+        renderMechanicsBlocks();
     });
     eventSource.on(event_types.CHAT_DELETED, deleteNpcArchiveEntriesForChat);
     eventSource.on(event_types.GROUP_CHAT_DELETED, deleteNpcArchiveEntriesForChat);

@@ -293,6 +293,65 @@
     font-weight: 500;
 }
 
+.rp-engine-message-mechanics {
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+    margin: 0;
+    padding: 6px 12px;
+    color: var(--SmartThemeBodyColor);
+}
+
+body.bubblechat .rp-engine-message-mechanics {
+    padding-inline: 10px;
+}
+
+.rp-engine-message-mechanics > details {
+    width: 100%;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 28%);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor), transparent 8%);
+}
+
+.rp-engine-message-mechanics > details > summary {
+    cursor: pointer;
+    padding: 7px 10px;
+    font-size: 0.88rem;
+    font-weight: 700;
+    user-select: none;
+}
+
+.rp-engine-message-mechanics-body {
+    padding: 0 10px 10px;
+}
+
+.rp-engine-message-mechanics-body > details {
+    margin: 7px 0 0;
+    padding: 7px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 42%);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.12);
+}
+
+.rp-engine-message-mechanics-body > details > summary {
+    cursor: pointer;
+    margin: 0 0 6px;
+    font-size: 0.86rem;
+    font-weight: 700;
+}
+
+.rp-engine-message-mechanics pre {
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 0;
+    padding: 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.22);
+    font-size: 0.82rem;
+}
+
 #rp_engine_extension_settings .inline-drawer-content {
     padding: 8px 10px 10px;
 }
