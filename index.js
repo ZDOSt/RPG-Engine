@@ -54,7 +54,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.188';
+} from './engine.js?v=0.1.189';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -503,12 +503,12 @@ function buildMechanicsPassPrompt({ chatExcerpt, latestUserMessage, tracker, use
         '- goalKind: IntimacyAdvancePhysical or IntimacyAdvanceVerbal only for explicit direct intimacy advances toward a specific NPC; otherwise Normal.',
         '- If the user uses deception, distraction, stealth, pressure, or setup to enable a kiss, touch, embrace, cuddle, grope, or similar physical intimacy toward a specific NPC, goalKind is still IntimacyAdvancePhysical.',
         '- Flirting, compliments, teasing, affectionate tone, romance-coded attention, and non-explicit social behavior do not count as intimacy advances.',
-        '- actionTargets: living entities directly targeted by the user action.',
+        '- actionTargets: living entities directly targeted by the user action. In a one-on-one character chat, direct second-person address to "you/your" targets the active CHARACTER/ASSISTANT NAME.',
         '- oppTargetsNpc: living entities actively/passively opposing, resisting, refusing, guarding, perceiving, defending, or attacked. Empty for NO_STAKES unless opposition matters, in which case use STAKES.',
         '- oppTargetsEnv: nonliving obstacle/hazard/object/terrain directly obstructing the action. Empty for NO_STAKES unless obstruction matters, in which case use STAKES.',
         '- Never put a living being in oppTargetsEnv. If a guard, witness, owner, victim, pursuer, target, or observer is the thing the action must get past, use oppTargetsNpc.',
         '- benefitedObservers/harmedObservers: living observers whose material stakes improve/worsen; never use for mere mood or pleasant tone.',
-        '- npcInScene: NPCs directly interacted with plus benefited/harmed observers.',
+        '- npcInScene: NPCs directly interacted with plus benefited/harmed observers. Include the active character if the user acts toward them by name, pronoun, or direct second-person context.',
         '- actionCount: 1 for noncombat; 1-3 only for explicit hostile/combat attack sequences.',
         '- Do not count setup, movement, repositioning, defense, recovery, or non-attack flavor as combat actions.',
         '- userStat/oppStat: for NO_STAKES use MND/ENV defaults unless explicit semantics are clear. For STAKES, map from decisive action using PHY/MND/CHA definitions.',
