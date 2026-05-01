@@ -53,7 +53,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.182';
+} from './engine.js?v=0.1.184';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -61,6 +61,127 @@ const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
 const DEFAULT_ARCHIVE_WORLD = 'RP Engine NPC Archive';
 const ARCHIVE_COMMENT_PREFIX = '[RPE NPC]';
+const COMPACT_RESOLVER_SCHEMA = Object.freeze({
+    name: 'rp_engine_compact_no_roll_v1',
+    schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+            mode: { type: 'string', enum: ['NO_ROLL', 'SYSTEM_UPDATE', 'OOC_STOP', 'FULL_REQUIRED'] },
+            reason: { type: 'string' },
+            goal: { type: 'string' },
+            goalEvidence: { type: 'string' },
+            decisiveAction: { type: 'string' },
+            decisiveActionEvidence: { type: 'string' },
+            stakesEvidence: { type: 'string' },
+            actionTargets: { type: 'array', items: { type: 'string' } },
+            benefitedObservers: { type: 'array', items: { type: 'string' } },
+            harmedObservers: { type: 'array', items: { type: 'string' } },
+            npcInScene: { type: 'array', items: { type: 'string' } },
+            relationshipRoute: { type: 'string', enum: ['No Change', 'Bond', 'Hostility', 'Fear', 'FearHostility', 'unknown'] },
+            newEncounter: { type: 'string', enum: ['Y', 'N'] },
+            timeDeltaMinutes: { type: 'integer', minimum: -10080, maximum: 10080 },
+            timeSkipReason: { type: 'string' },
+            scene: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    location: { type: 'string' },
+                    time: { type: 'string' },
+                    weather: { type: 'string' },
+                },
+                required: ['location', 'time', 'weather'],
+            },
+            npcFacts: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        name: { type: 'string' },
+                        present: { type: 'boolean' },
+                        position: { type: 'string' },
+                        condition: { type: 'string' },
+                        knowsUser: { type: 'string' },
+                        explicitPreset: {
+                            type: 'string',
+                            enum: ['romanticOpen', 'userBadRep', 'userGoodRep', 'userNonHuman', 'neutralDefault', 'unknown'],
+                        },
+                        rank: { type: 'string', enum: ['Weak', 'Average', 'Trained', 'Elite', 'Boss', 'unknown'] },
+                        mainStat: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'Balanced', 'unknown'] },
+                        explicitStats: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                PHY: { type: 'integer', minimum: 1, maximum: 10 },
+                                MND: { type: 'integer', minimum: 1, maximum: 10 },
+                                CHA: { type: 'integer', minimum: 1, maximum: 10 },
+                            },
+                        },
+                        override: {
+                            type: 'string',
+                            enum: ['Transactional', 'Hedonist', 'Exploitation', 'Established', 'NONE', 'unknown'],
+                        },
+                        archiveStatus: {
+                            type: 'string',
+                            enum: ['Active', 'Inactive', 'Dead', 'Retired', 'Forgotten', 'unknown'],
+                        },
+                    },
+                    required: ['name', 'position', 'condition', 'knowsUser', 'explicitPreset', 'rank', 'mainStat', 'override'],
+                },
+            },
+            inventoryDeltas: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        action: { type: 'string', enum: ['gain', 'lose', 'equip', 'unequip', 'use', 'damage'] },
+                        item: { type: 'string' },
+                        evidence: { type: 'string' },
+                    },
+                    required: ['action', 'item', 'evidence'],
+                },
+            },
+            taskDeltas: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        action: { type: 'string', enum: ['add', 'complete', 'cancel'] },
+                        task: { type: 'string' },
+                        due: { type: 'string' },
+                        source: { type: 'string' },
+                        evidence: { type: 'string' },
+                    },
+                    required: ['action', 'task', 'due', 'source', 'evidence'],
+                },
+            },
+        },
+        required: [
+            'mode',
+            'reason',
+            'goal',
+            'goalEvidence',
+            'decisiveAction',
+            'decisiveActionEvidence',
+            'stakesEvidence',
+            'actionTargets',
+            'benefitedObservers',
+            'harmedObservers',
+            'npcInScene',
+            'relationshipRoute',
+            'newEncounter',
+            'timeDeltaMinutes',
+            'timeSkipReason',
+            'scene',
+            'npcFacts',
+            'inventoryDeltas',
+            'taskDeltas'
+        ],
+    },
+});
 const CHARACTER_CREATOR_SCHEMA = {
     type: 'object',
     properties: {
@@ -124,7 +245,6 @@ let lastMechanicsHandoff = {
     trackerSnapshot: null,
     display: null,
 };
-let pendingMechanicsDisplay = null;
 
 function activePersonaText() {
     const contextPersona = getContext().powerUserSettings?.persona_description;
@@ -281,6 +401,187 @@ function isUsefulExtraction(value) {
     return true;
 }
 
+function isUsefulCompactExtraction(value) {
+    if (!value || typeof value !== 'object') return false;
+    return ['NO_ROLL', 'SYSTEM_UPDATE', 'OOC_STOP', 'FULL_REQUIRED'].includes(value.mode);
+}
+
+function shouldTryCompactResolver(latestUserMessage, fallback = {}) {
+    const text = String(latestUserMessage || '').trim();
+    if (!text) return false;
+    if (fallback?.resolverBypass) return false;
+    if (fallback?.hasStakes === 'Y') return false;
+    if (fallback?.goalKind && fallback.goalKind !== 'Normal') return false;
+    if (fallback?.hostilePhysicalHarm === 'Y') return false;
+    if (Array.isArray(fallback?.oppTargetsNpc) && fallback.oppTargetsNpc.length) return false;
+    if (Array.isArray(fallback?.oppTargetsEnv) && fallback.oppTargetsEnv.length) return false;
+
+    if (/^\s*\(\((?!\()[\s\S]*?(?<!\))\)\)\s*$/.test(text)) return true;
+    if (/^\s*\(\(\(/.test(text)) return false;
+
+    const highRisk = /\b(attack|strike|hit|punch|kick|slap|stab|slash|cut|shoot|kill|wound|injure|hurt|slam|knee|swing|swipe|thrust|grapple|tackle|restrain|pin|drag|yank|shove|force|break|smash|jump|leap|climb|swim|dodge|chase|sneak|stealth|hide|pickpocket|steal|snatch|palm|deceive|lie|bluff|trick|distract|misdirect|threaten|intimidate|coerce|blackmail|demand|order|persuade|convince|negotiate|bargain|plead|let me pass|allow me|permission|restricted|kiss|touch|grope|fondle|caress|undress|strip|seduce|spell|magic|cast|channel|curse|hex|charm|glamou?r|compel|dominate|ward|dispel|counterspell|summon|teleport|trap|lock|locked|chasm|ravine|pit|hazard|poison|fire|combat)\b/i;
+    if (highRisk.test(text)) return false;
+
+    const simpleIntent = /\b(say|tell|ask|answer|reply|greet|wave|smile|nod|bow|thank|apologize|compliment|praise|chat|talk|sit|stand|wait|rest|sleep|travel|walk|look|listen|watch|observe|inspect casually|hand|give|offer|return|accept|decline|take a seat|leave|enter)\b/i;
+    const systemIntent = /\b(no longer present|enters?|arrives?|leaves?|exits?|dead|forgotten|retired|inactive|wait(?:ing)?|sleep|rest|travel|later|after \d+|time skip|timeskip|minutes?|hours?|days?|accept(?:ed)? (?:the )?(?:task|quest|job)|complete(?:d)? (?:the )?(?:task|quest|job)|cancel(?:ed|led)? (?:the )?(?:task|quest|job))\b/i;
+
+    return simpleIntent.test(text) || systemIntent.test(text);
+}
+
+function buildCompactResolverPrompt({ chatExcerpt, latestUserMessage, tracker, userName, characterName }) {
+    return [
+        'You are the compact hidden resolver gate for a SillyTavern roleplay mechanics extension. Return JSON only.',
+        '',
+        'PURPOSE:',
+        '- Decide whether this turn is clearly safe to resolve as NO_ROLL / SYSTEM_UPDATE / OOC_STOP, or whether the full resolver is required.',
+        '- This is still semantic/contextual. Use language understanding, current tracker, persona/card/lore context in the prompt, and the latest user message.',
+        '- EXPLICIT-ONLY. Never invent targets, stakes, stats, NPC facts, scene facts, motives, outcomes, or relationship changes.',
+        '- Uncertain = FULL_REQUIRED. If any target, consequence, resistance, or observer stakes are ambiguous, choose FULL_REQUIRED.',
+        '',
+        'WHEN TO RETURN FULL_REQUIRED:',
+        '- Any meaningful stakes: physical risk, harm, danger, detection, material gain/loss, social status shift, loss of autonomy, obstacle resolution, restricted information, or explicit goal advancement/failure.',
+        '- Any combat, hostile physical action, intimidation, coercion, threat, demand, blackmail, deception, distraction, stealth, theft, chase, grapple, restraint, forced movement, or obstacle/hazard.',
+        '- Any explicit intimacy advance, physical boundary issue, sexual/romantic proposition with possible refusal, or consent/intimacy gate relevance.',
+        '- Any magic/supernatural exertion where limits, resistance, cost, target, risk, or uncertainty matter.',
+        '- Any benefitedObservers/harmedObservers uncertainty, target uncertainty, opposition uncertainty, or NPC initialization/stat/rank uncertainty that matters mechanically.',
+        '- If a roll might be needed, return FULL_REQUIRED. Do not attempt a partial roll schema.',
+        '',
+        'WHEN NO_ROLL IS ALLOWED:',
+        '- Only when the latest user action has no meaningful contested stakes and no dice should be rolled.',
+        '- Ordinary harmless conversation, greetings, thanks, apologies, compliments, casual questions, harmless posture/movement, or automatic simple answers can be NO_ROLL.',
+        '- No-roll can still be relationship-relevant. Include exact actionTargets and npcInScene for NPCs the user directly addresses or acts toward.',
+        '- Include benefitedObservers/harmedObservers only if explicit material stakes improve/worsen. Pleasant tone alone is not a benefit.',
+        '',
+        'WHEN SYSTEM_UPDATE IS ALLOWED:',
+        '- Pure tracker/continuity updates with no live contested action: explicit time passage, scene presence changes, archive status, task updates, inventory bookkeeping.',
+        '- Keep npcFacts, inventoryDeltas, taskDeltas, scene, timeDeltaMinutes, and timeSkipReason accurate if explicitly stated.',
+        '',
+        'OOC:',
+        '- Double parentheses ((like this)) are OOC_STOP. Return OOC_STOP and do not create in-scene targets.',
+        '- Triple parentheses are proxy narration and require FULL_REQUIRED unless the inner action is absolutely pure system bookkeeping.',
+        '',
+        'FIELD GUIDANCE:',
+        '- goal: short practical intent of the latest user message.',
+        '- decisiveAction: the explicit action-attempt. For NO_ROLL this is usually the same harmless speech/action.',
+        '- relationshipRoute is advisory only: No Change for ordinary talk, Bond for explicit material help/gift/return/aid, Hostility/Fear/FearHostility only if fully explicit but still no roll. If uncertain, unknown or FULL_REQUIRED.',
+        '- npcFacts: only exact explicit facts. For a new visible ordinary NPC, use explicitPreset neutralDefault only if no better explicit preset exists; rank/mainStat unknown unless explicit.',
+        '',
+        `USER NAME: ${userName || '{{user}}'}`,
+        `CHARACTER/ASSISTANT NAME: ${characterName || '{{char}}'}`,
+        '',
+        'CURRENT TRACKER JSON:',
+        JSON.stringify(tracker),
+        '',
+        'LATEST USER MESSAGE TO RESOLVE:',
+        latestUserMessage || '(none)',
+        '',
+        'RECENT CHAT EXCERPT:',
+        chatExcerpt,
+        '',
+        'Return only valid JSON matching the compact schema.',
+    ].join('\n');
+}
+
+async function runCompactResolver({
+    sourceChat,
+    latestUserMessage,
+    current,
+    fallback,
+    userName,
+    characterName,
+}) {
+    if (!shouldTryCompactResolver(latestUserMessage, fallback)) return null;
+
+    const prompt = buildCompactResolverPrompt({
+        chatExcerpt: makeChatExcerpt(sourceChat),
+        latestUserMessage,
+        tracker: current,
+        userName,
+        characterName,
+    });
+
+    let response = '';
+    try {
+        response = await generateQuietPromptWithTimeout({
+            quietPrompt: prompt,
+            skipWIAN: false,
+            jsonSchema: COMPACT_RESOLVER_SCHEMA,
+            removeReasoning: true,
+        }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
+        const compact = parseJsonResponse(response);
+        if (!isUsefulCompactExtraction(compact)) return null;
+        if (compact.mode === 'FULL_REQUIRED') {
+            console.debug('[RP Engine Tracker] Compact resolver requested full resolver', { reason: compact.reason });
+            return { mode: 'FULL_REQUIRED', compact, response };
+        }
+        return {
+            mode: compact.mode,
+            compact,
+            response,
+            extraction: expandCompactExtraction(compact, latestUserMessage),
+        };
+    } catch (error) {
+        console.warn('[RP Engine Tracker] Compact resolver failed or timed out; falling back to full resolver.', error);
+        return null;
+    }
+}
+
+function expandCompactExtraction(compact, latestUserMessage) {
+    const mode = ['NO_ROLL', 'SYSTEM_UPDATE', 'OOC_STOP'].includes(compact?.mode) ? compact.mode : 'NO_ROLL';
+    const text = String(latestUserMessage || '').trim();
+    const fallbackGoal = text.slice(0, 140) || 'no-roll action';
+    const isOocStop = mode === 'OOC_STOP';
+    const oocInstruction = isOocStop ? extractDoubleParenInner(text) || String(compact.reason || '').trim().slice(0, 300) : '';
+    return {
+        ooc: isOocStop ? 'Y' : 'N',
+        oocMode: isOocStop ? 'STOP' : 'IC',
+        oocInstruction,
+        goal: String(compact.goal || '').trim() || (isOocStop ? 'OOC clarification or instruction' : fallbackGoal),
+        goalKind: 'Normal',
+        goalEvidence: String(compact.goalEvidence || '').trim() || text,
+        decisiveAction: String(compact.decisiveAction || '').trim() || (isOocStop ? 'OOC clarification or instruction' : fallbackGoal),
+        decisiveActionEvidence: String(compact.decisiveActionEvidence || '').trim() || text,
+        outcomeOnSuccess: '',
+        outcomeOnFailure: '',
+        actionTargets: arrayFromCompact(compact.actionTargets),
+        oppTargetsNpc: [],
+        oppTargetsEnv: [],
+        benefitedObservers: arrayFromCompact(compact.benefitedObservers),
+        harmedObservers: arrayFromCompact(compact.harmedObservers),
+        npcInScene: arrayFromCompact(compact.npcInScene),
+        hasStakes: 'N',
+        stakesEvidence: String(compact.stakesEvidence || compact.reason || '').trim() || 'Compact resolver classified this as no-roll with no meaningful contested stakes.',
+        actionCount: 1,
+        userStat: 'MND',
+        userStatEvidence: '',
+        oppStat: 'ENV',
+        oppStatEvidence: '',
+        hostilePhysicalHarm: 'N',
+        newEncounter: compact.newEncounter === 'Y' ? 'Y' : 'N',
+        timeDeltaMinutes: Number.isFinite(Number(compact.timeDeltaMinutes)) ? Number(compact.timeDeltaMinutes) : 0,
+        timeSkipReason: String(compact.timeSkipReason || '').trim(),
+        systemOnlyUpdate: mode === 'SYSTEM_UPDATE' ? 'Y' : 'N',
+        systemOnlyUpdateReason: mode === 'SYSTEM_UPDATE' ? String(compact.reason || 'Compact resolver classified this as a pure tracker/continuity update.').trim() : '',
+        scene: {
+            location: String(compact.scene?.location || '').trim(),
+            time: String(compact.scene?.time || '').trim(),
+            weather: String(compact.scene?.weather || '').trim(),
+        },
+        npcFacts: Array.isArray(compact.npcFacts) ? compact.npcFacts : [],
+        inventoryDeltas: Array.isArray(compact.inventoryDeltas) ? compact.inventoryDeltas : [],
+        taskDeltas: Array.isArray(compact.taskDeltas) ? compact.taskDeltas : [],
+    };
+}
+
+function arrayFromCompact(value) {
+    return Array.isArray(value) ? value.map(x => String(x || '').trim()).filter(Boolean) : [];
+}
+
+function extractDoubleParenInner(text) {
+    const match = String(text || '').match(/^\s*\(\((?!\()([\s\S]*?)(?<!\))\)\)\s*$/);
+    return match ? match[1].trim() : '';
+}
+
 function extractBalancedJsonObjects(raw) {
     const spans = [];
     let start = -1;
@@ -423,15 +724,6 @@ function getPreviousUserMessageStrictForId(messageId) {
     return '';
 }
 
-function makeWritingValidationSignature(messageId, response) {
-    const text = String(response || '');
-    let hash = 0;
-    for (let i = 0; i < text.length; i++) {
-        hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
-    }
-    return `${Number(messageId)}:${text.length}:${hash}`;
-}
-
 async function runResolver(chat) {
     let current = tracker();
     const context = getContext();
@@ -464,6 +756,34 @@ async function runResolver(chat) {
         resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
         resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
         console.debug('[RP Engine Tracker] Resolver bypassed for deterministic fallback', resolved.packet);
+        return resolved;
+    }
+
+    const compactResult = await runCompactResolver({
+        sourceChat,
+        latestUserMessage,
+        current,
+        fallback,
+        userName,
+        characterName: name2,
+    });
+    if (compactResult?.extraction) {
+        let parsed = mergeExtractionWithFallback(compactResult.extraction, fallback);
+        parsed = await guardDeadArchiveReentry(parsed, latestUserMessage);
+        const resolved = resolveTurn(parsed, current, { userStats });
+        applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
+        resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
+        resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
+        if (resolved.audit?.extraction) {
+            resolved.audit.extraction.resolverMode = 'compact';
+            resolved.audit.extraction.compactMode = compactResult.mode;
+            resolved.audit.extraction.compactReason = compactResult.compact?.reason || '';
+        }
+        console.debug('[RP Engine Tracker] Resolver compact complete', {
+            mode: compactResult.mode,
+            goal: resolved.packet?.GOAL,
+            stakes: resolved.packet?.STAKES,
+        });
         return resolved;
     }
 
@@ -949,9 +1269,14 @@ async function syncNpcArchive(result) {
 
     const { worldName, data } = archive;
     const presentIds = new Set(result.tracker.presentNpcIds || []);
+    let archiveChanged = false;
     for (const npc of Object.values(result.tracker.npcs || {})) {
         if (!npc?.name) continue;
-        const entry = findNpcArchiveEntry(data, npc.name) || createWorldInfoEntry(worldName, data);
+        let entry = findNpcArchiveEntry(data, npc.name);
+        if (!entry) {
+            entry = createWorldInfoEntry(worldName, data);
+            archiveChanged = true;
+        }
         if (!entry) continue;
         const previous = parseNpcArchiveContent(entry.content) || {};
         const chatId = currentArchiveChatId();
@@ -973,24 +1298,33 @@ async function syncNpcArchive(result) {
             pending: preferKnownValue(npc.pending, previous.pending, 'none'),
             misc: preferKnownValue(npc.misc, previous.misc, 'none'),
         };
-        entry.comment = `${ARCHIVE_COMMENT_PREFIX} ${archiveOwner} / ${chatId} / ${npc.name}`;
-        entry.key = settings().scopeNpcArchivePerChat
+        const nextEntry = {
+            comment: `${ARCHIVE_COMMENT_PREFIX} ${archiveOwner} / ${chatId} / ${npc.name}`,
+            key: settings().scopeNpcArchivePerChat
             ? uniqueLocal([entryKey, ...(mergedNpc.aliases || []).map(alias => archiveEntryKey(alias, chatId))])
-            : uniqueLocal([npc.name, ...(mergedNpc.aliases || [])]);
-        entry.keysecondary = [];
-        entry.content = serializeNpcArchiveEntry(mergedNpc, {
-            chatId,
-            archiveOwner,
-            archiveEntryKey: entryKey,
-            location: result.tracker.scene?.location,
-            audit: result.audit,
-        });
-        entry.disable = false;
-        entry.constant = false;
-        entry.selective = true;
-        entry.order = Number.isFinite(Number(entry.order)) ? entry.order : 100;
+            : uniqueLocal([npc.name, ...(mergedNpc.aliases || [])]),
+            keysecondary: [],
+            content: serializeNpcArchiveEntry(mergedNpc, {
+                chatId,
+                archiveOwner,
+                archiveEntryKey: entryKey,
+                location: result.tracker.scene?.location,
+                audit: result.audit,
+            }),
+            disable: false,
+            constant: false,
+            selective: true,
+            order: Number.isFinite(Number(entry.order)) ? entry.order : 100,
+        };
+        for (const [key, value] of Object.entries(nextEntry)) {
+            if (worldInfoEntryValueEqual(entry[key], value)) continue;
+            entry[key] = value;
+            archiveChanged = true;
+        }
     }
-    await saveWorldInfo(worldName, data, true);
+    if (archiveChanged) {
+        await saveWorldInfo(worldName, data, true);
+    }
 
     if (cfg.pruneArchivedAbsentNpcs) {
         const pruned = createTracker(result.tracker);
@@ -1002,6 +1336,15 @@ async function syncNpcArchive(result) {
         pruned.presentNpcIds = pruned.presentNpcIds.filter(id => pruned.npcs[id]);
         result.tracker = pruned;
     }
+}
+
+function worldInfoEntryValueEqual(current, next) {
+    if (Array.isArray(next) || Array.isArray(current)) {
+        return JSON.stringify(Array.isArray(current) ? current : []) === JSON.stringify(Array.isArray(next) ? next : []);
+    }
+    if (typeof next === 'boolean') return Boolean(current) === next;
+    if (typeof next === 'number') return Number(current) === next;
+    return String(current ?? '') === String(next ?? '');
 }
 
 async function pruneForgottenNpcs() {
@@ -1166,7 +1509,11 @@ function isSameTurnRegeneration(type, chat) {
 function preserveSameTurnHandoffForRegeneration() {
     setExtensionPrompt(PROMPT_KEY, lastMechanicsHandoff.handoff, extension_prompt_types.IN_PROMPT, 0, false, extension_prompt_roles.SYSTEM);
     chat_metadata[METADATA_KEY] = structuredClone(lastMechanicsHandoff.trackerSnapshot);
-    pendingMechanicsDisplay = lastMechanicsHandoff.display ? structuredClone(lastMechanicsHandoff.display) : null;
+    const display = lastMechanicsHandoff.display ? structuredClone(lastMechanicsHandoff.display) : null;
+    if (display) {
+        display.triggerUserMessageId = findLatestUserMessageIdByText(display.triggerUserMessage);
+        bindMechanicsDisplayToTrigger(display);
+    }
     saveTracker();
     renderPanel();
 }
@@ -1177,6 +1524,7 @@ function buildMechanicsDisplayPayload(result, handoff, latestUserMessage) {
         version: 1,
         at: new Date().toISOString(),
         triggerUserMessage: String(latestUserMessage || '').trim(),
+        triggerUserMessageId: findLatestUserMessageIdByText(latestUserMessage),
         resolverSchema: audit,
         narrationHandoff: String(handoff || ''),
     };
@@ -1189,27 +1537,28 @@ function cloneAuditForDisplay(audit) {
     return cloned;
 }
 
-function bindPendingMechanicsToMessage(messageId) {
-    if (!pendingMechanicsDisplay) return false;
-    const message = getMessageById(messageId);
-    if (!isAssistantMessage(message)) return false;
+function bindMechanicsDisplayToTrigger(payload) {
+    if (!payload) return false;
+    const id = Number(payload.triggerUserMessageId);
+    if (!Number.isFinite(id)) return false;
+    const message = getMessageById(id);
+    if (!isUserMessage(message)) return false;
 
-    message[MESSAGE_MECHANICS_KEY] = structuredClone(pendingMechanicsDisplay);
-    pendingMechanicsDisplay = null;
+    message[MESSAGE_MECHANICS_KEY] = structuredClone(payload);
     saveChatDebounced();
     renderMechanicsBlocks();
     return true;
 }
 
-function bindPendingMechanicsToLatestAssistant() {
-    if (!pendingMechanicsDisplay) return false;
+function findLatestUserMessageIdByText(text) {
+    const needle = String(text || '').trim();
     const sourceChat = Array.isArray(getContext().chat) && getContext().chat.length ? getContext().chat : liveChat;
     for (let i = sourceChat.length - 1; i >= 0; i--) {
-        if (isAssistantMessage(sourceChat[i])) {
-            return bindPendingMechanicsToMessage(i);
-        }
+        if (!isUserMessage(sourceChat[i])) continue;
+        const candidate = messageText(sourceChat[i]).trim();
+        if (!needle || candidate === needle) return i;
     }
-    return false;
+    return null;
 }
 
 function renderMechanicsBlocks() {
@@ -2445,7 +2794,7 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
             trackerSnapshot: trackerSnapshotForRollback(result.tracker),
             display: buildMechanicsDisplayPayload(result, handoff, latestUserMessage),
         };
-        pendingMechanicsDisplay = structuredClone(lastMechanicsHandoff.display);
+        bindMechanicsDisplayToTrigger(lastMechanicsHandoff.display);
 
         saveTracker();
         renderPanel();
@@ -2493,14 +2842,8 @@ jQuery(() => {
         renderPanel();
         renderMechanicsBlocks();
     });
-    eventSource.on(event_types.MESSAGE_RECEIVED, (messageId, type) => {
-        bindPendingMechanicsToMessage(messageId);
-    });
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, () => {
         renderMechanicsBlocks();
-    });
-    eventSource.on(event_types.GENERATION_ENDED, (messageCount) => {
-        bindPendingMechanicsToLatestAssistant();
     });
     eventSource.on(event_types.MESSAGE_DELETED, () => {
         rollbackLastTurnIfTriggerDeleted();
