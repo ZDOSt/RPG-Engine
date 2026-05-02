@@ -631,8 +631,10 @@ export function buildResolverPrompt({ chatExcerpt, latestUserMessage, tracker, u
         '',
         'TIME TRACKING GUIDANCE:',
         '- scene.time is authoritative when an explicit current in-world time is stated or revealed.',
-        '- timeDeltaMinutes is only for explicit in-scene time passage or time skips: waiting, sleeping, travel time, "three hours later", "after 20 minutes", "at dawn after the night passes", or similar.',
-        '- If the user explicitly skips forward, waits, travels for a stated duration, sleeps for a stated duration, or the narration says a duration passes, return the signed minute delta in timeDeltaMinutes and explain in timeSkipReason.',
+        '- timeDeltaMinutes is only allowed from the latest user message, never from prior assistant narration or recent chat context.',
+        '- Return timeDeltaMinutes only when the user explicitly declares a time skip/time passage, goes to sleep in-character, or completes travel to another destination such as "I go to the next town".',
+        '- Do not return timeDeltaMinutes for ordinary movement, approach, walking in-scene, or travel being roleplayed along the way. Prior chat may describe elapsed time, but it is not a new time skip unless the latest user message says so.',
+        '- If the user explicitly skips forward, waits, travels for a stated duration, sleeps for a stated duration, or completes destination travel, return the signed minute delta in timeDeltaMinutes and explain in timeSkipReason.',
         '- If the user sets a specific clock time instead of a duration, put it in scene.time and set timeDeltaMinutes=0.',
         '- If no explicit time change is stated, timeDeltaMinutes=0 and scene.time empty.',
         '',
@@ -1637,15 +1639,21 @@ function directInteractionAction(text, target) {
 
 function inferTimeDeltaMinutes(text) {
     const source = String(text || '').toLowerCase();
+    const outsideQuotes = source.replace(/["“”][\s\S]*?["“”]/g, ' ');
     if (/["“”][\s\S]*\b(?:minutes?|mins?|hours?|hrs?|days?|weeks?|month|year)s?\b[\s\S]*["“”]/.test(source)
         && !/\b(wait|sleep|rest|travel|ride|skip|timeskip|time skip|after|later|pass(?:es|ed)?|until)\b/.test(source.replace(/["“”][\s\S]*?["“”]/g, ''))) {
         return null;
     }
-    if (!/\b(wait|sleep|rest|travel|walk|ride|after|later|pass|skip|timeskip|time skip)\b/.test(source)) return null;
-    const match = source.match(/\b(?:(\d+(?:\.\d+)?)|(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter))\s*(minutes?|mins?|hours?|hrs?|days?)\b/);
+    const destinationTravel = /\b(?:go|head|travel|ride|set out|depart|leave)\s+(?:to|for|into)\s+(?:the\s+)?(?:next\s+)?(?:town|city|village|camp|castle|keep|forest|market|temple|destination)\b/.test(outsideQuotes)
+        && !/\b(along the way|on the way|as I go|while traveling|roleplay|scene by scene|slowly|carefully|continue walking|approach|walk up to)\b/.test(outsideQuotes);
+    if (!/\b(wait|sleep|go to sleep|fall asleep|rest until|after|later|pass|skip|timeskip|time skip|until|overnight)\b/.test(outsideQuotes) && !destinationTravel) return null;
+    const match = outsideQuotes.match(/\b(?:(\d+(?:\.\d+)?)|(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter))\s*(minutes?|mins?|hours?|hrs?|days?)\b/);
     if (!match) {
-        if (/\bovernight\b|\buntil\s+(?:morning|dawn|sunrise)\b/.test(source)) {
+        if (/\bovernight\b|\buntil\s+(?:morning|dawn|sunrise)\b|\b(go to sleep|fall asleep|sleep)\b/.test(outsideQuotes)) {
             return { minutes: 8 * 60, reason: 'overnight or until morning/dawn' };
+        }
+        if (destinationTravel) {
+            return { minutes: 60, reason: 'destination travel' };
         }
         return null;
     }

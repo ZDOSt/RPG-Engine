@@ -54,9 +54,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.203';
+} from './engine.js?v=0.1.204';
 
 const EXT_ID = 'rpEngineTracker';
+const EXT_VERSION = '0.1.204';
+const MECHANICS_ARTIFACT_VERSION = 2;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -563,7 +565,9 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- npc position, condition, and knowsUser only from explicit facts. Otherwise empty/unknown.',
     '- inventoryDeltas require explicit evidence that an item was gained, lost, equipped, unequipped, used, or damaged.',
     '- taskDeltas add only when the user explicitly agrees/accepts/promises/schedules or an NPC explicitly assigns a task and the user accepts. Complete/cancel only with explicit evidence.',
-    '- timeDeltaMinutes is only for explicit in-scene time passage or time skips: waiting, sleeping, travel time, after X minutes/hours/days, or similar.',
+    '- timeDeltaMinutes is only allowed from the latest user message, never from prior assistant narration or recent chat context.',
+    '- Return timeDeltaMinutes only when the user explicitly declares a time skip/time passage, goes to sleep in-character, or completes travel to another destination such as "I go to the next town".',
+    '- Do not return timeDeltaMinutes for ordinary movement, approach, walking in-scene, or travel being roleplayed along the way. Prior chat may describe elapsed time, but it is not a new time skip unless the latest user message says so.',
     '',
     'COMPACT OUTPUT FORMAT:',
     '- Use clear engine field names, but keep values short. Do not write paragraphs.',
@@ -831,6 +835,29 @@ function expandMechanicsPass(pass, latestUserMessage) {
         mechanicsPassMode: mode,
         mechanicsPassReason: reason,
     };
+}
+
+function latestUserMessageHasExplicitTimeChange(text) {
+    const source = String(text || '').toLowerCase();
+    const outsideQuotes = source.replace(/["“”][\s\S]*?["“”]/g, ' ');
+    if (/\b(skip|timeskip|time skip|wait|sleep|go to sleep|fall asleep|rest until|after|later|pass(?:es|ed)?|until|overnight)\b/.test(outsideQuotes)
+        && /\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter)\s*(?:minutes?|mins?|hours?|hrs?|days?)\b|\bovernight\b|\buntil\s+(?:morning|dawn|sunrise)\b/.test(outsideQuotes)) {
+        return true;
+    }
+    if (/\b(?:go|head|travel|ride|set out|depart|leave)\s+(?:to|for|into)\s+(?:the\s+)?(?:next\s+)?(?:town|city|village|camp|castle|keep|forest|market|temple|destination)\b/.test(outsideQuotes)
+        && !/\b(along the way|on the way|as I go|while traveling|roleplay|scene by scene|slowly|carefully|continue walking|approach|walk up to)\b/.test(outsideQuotes)) {
+        return true;
+    }
+    return false;
+}
+
+function validateTimeExtractionForLatestUserMessage(extraction, latestUserMessage) {
+    if (!extraction || typeof extraction !== 'object') return extraction;
+    if (!Number(extraction.timeDeltaMinutes || 0)) return extraction;
+    if (latestUserMessageHasExplicitTimeChange(latestUserMessage)) return extraction;
+    extraction.timeDeltaMinutes = 0;
+    extraction.timeSkipReason = '';
+    return extraction;
 }
 
 function arrayFromCompact(value) {
@@ -1124,6 +1151,7 @@ async function runResolver(chat) {
     }
 
     parsed = mechanicsResult?.extraction ? mergeMechanicsPassWithFallback(parsed, fallback) : mergeExtractionWithFallback(parsed, fallback);
+    parsed = validateTimeExtractionForLatestUserMessage(parsed, latestUserMessage);
     parsed = await guardDeadArchiveReentry(parsed, latestUserMessage);
     const resolved = resolveTurn(parsed, current, { userStats });
     applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
@@ -1227,6 +1255,7 @@ function cachedMechanicsForLatestUserMessage(chat, latestUserMessage) {
     const message = getMessageById(id);
     const payload = message?.[MESSAGE_MECHANICS_KEY];
     if (!payload?.mechanicsArtifact) return null;
+    if (Number(payload.mechanicsArtifact.version || 0) < MECHANICS_ARTIFACT_VERSION) return null;
     if (String(payload.triggerUserMessage || '').trim() !== String(latestUserMessage || '').trim()) return null;
     return hydrateResultFromMechanicsArtifact(payload, latestUserMessage);
 }
@@ -2037,7 +2066,8 @@ function latestAuditDisplayPayload() {
 function buildMechanicsArtifact(result) {
     if (!result?.tracker || !result?.packet) return null;
     return {
-        version: 1,
+        version: MECHANICS_ARTIFACT_VERSION,
+        extensionVersion: EXT_VERSION,
         trackerSnapshot: trackerSnapshotForRollback(result.tracker),
         packet: structuredClone(result.packet),
         npcHandoffs: structuredClone(result.npcHandoffs || []),
