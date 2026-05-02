@@ -42,8 +42,6 @@ import {
     buildCharacterSheet,
     createTracker,
     describeNpcFeeling,
-    inferFallbackExtraction,
-    mergeExtractionWithFallback,
     parseCoreStats,
     parseNpcArchiveContent,
     rollCharacterCreatorBasics,
@@ -54,10 +52,10 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.211';
+} from './engine.js?v=0.1.214';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.211';
+const EXT_VERSION = '0.1.214';
 const MECHANICS_ARTIFACT_VERSION = 9;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
@@ -65,27 +63,100 @@ const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
 const DEFAULT_ARCHIVE_WORLD = 'RP Engine NPC Archive';
 const ARCHIVE_COMMENT_PREFIX = '[RPE NPC]';
 const MECHANICS_PASS_SCHEMA = Object.freeze({
-    name: 'rp_engine_mechanics_pass_v3_clear',
+    name: 'rp_engine_mechanics_pass_v4_engine_functions',
     schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
             mode: { type: 'string', enum: ['NO_STAKES', 'STAKES', 'SYSTEM_UPDATE', 'OOC_STOP'] },
-            identifyGoal: { type: 'string', maxLength: 140 },
-            goalKind: { type: 'string', enum: ['Normal', 'IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'] },
+            identifyGoal: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    goal: { type: 'string', maxLength: 140 },
+                    goalKind: { type: 'string', enum: ['Normal', 'IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'] },
+                    evidence: { type: 'string', maxLength: 180 },
+                },
+                required: ['goal', 'goalKind'],
+            },
+            identifyTargets: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    ActionTargets: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
+                    OppTargets: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            NPC: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
+                            ENV: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 80 } },
+                        },
+                        required: ['NPC', 'ENV'],
+                    },
+                    BenefitedObservers: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
+                    HarmedObservers: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
+                    NPCInScene: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 60 } },
+                    evidence: { type: 'string', maxLength: 180 },
+                },
+                required: ['ActionTargets', 'OppTargets', 'BenefitedObservers', 'HarmedObservers', 'NPCInScene'],
+            },
+            hasStakes: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    STAKES: { type: 'string', enum: ['Y', 'N'] },
+                    evidence: { type: 'string', maxLength: 180 },
+                },
+                required: ['STAKES'],
+            },
+            mapStats: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    USER: { type: 'string', enum: ['PHY', 'MND', 'CHA'] },
+                    OPP: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'ENV'] },
+                    userEvidence: { type: 'string', maxLength: 160 },
+                    oppEvidence: { type: 'string', maxLength: 160 },
+                },
+                required: ['USER', 'OPP'],
+            },
+            genStats: {
+                type: 'array',
+                maxItems: 8,
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        target: { type: 'string', maxLength: 60 },
+                        Rank: { type: 'string', enum: ['Weak', 'Average', 'Trained', 'Elite', 'Boss', 'unknown'] },
+                        MainStat: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'Balanced', 'unknown'] },
+                        PHY: { type: 'integer', minimum: 1, maximum: 10 },
+                        MND: { type: 'integer', minimum: 1, maximum: 10 },
+                        CHA: { type: 'integer', minimum: 1, maximum: 10 },
+                        evidence: { type: 'string', maxLength: 180 },
+                    },
+                    required: ['target', 'Rank', 'MainStat', 'PHY', 'MND', 'CHA'],
+                },
+            },
+            NPC_STAKES: {
+                type: 'array',
+                maxItems: 8,
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                        NPC: { type: 'string', maxLength: 60 },
+                        NPC_STAKES: { type: 'string', enum: ['Y', 'N'] },
+                        evidence: { type: 'string', maxLength: 180 },
+                    },
+                    required: ['NPC', 'NPC_STAKES'],
+                },
+            },
             decisiveAction: { type: 'string', maxLength: 140 },
             why: { type: 'string', maxLength: 180 },
             outcomeOnSuccess: { type: 'string', maxLength: 160 },
             outcomeOnFailure: { type: 'string', maxLength: 160 },
-            ActionTargets: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
-            OppTargetsNPC: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
-            OppTargetsENV: { type: 'array', maxItems: 6, items: { type: 'string', maxLength: 80 } },
-            BenefitedObservers: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
-            HarmedObservers: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 60 } },
-            NPCInScene: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 60 } },
             actionCount: { type: 'integer', minimum: 1, maximum: 3 },
-            USER: { type: 'string', enum: ['PHY', 'MND', 'CHA'] },
-            OPP: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'ENV'] },
             hostilePhysicalHarm: { type: 'string', enum: ['Y', 'N'] },
             newEncounterExplicit: { type: 'string', enum: ['Y', 'N'] },
             timeDeltaMinutes: { type: 'integer', minimum: -10080, maximum: 10080 },
@@ -175,17 +246,12 @@ const MECHANICS_PASS_SCHEMA = Object.freeze({
         required: [
             'mode',
             'identifyGoal',
-            'goalKind',
+            'identifyTargets',
+            'hasStakes',
+            'mapStats',
+            'NPC_STAKES',
             'decisiveAction',
-            'ActionTargets',
-            'OppTargetsNPC',
-            'OppTargetsENV',
-            'BenefitedObservers',
-            'HarmedObservers',
-            'NPCInScene',
             'actionCount',
-            'USER',
-            'OPP',
             'hostilePhysicalHarm',
             'newEncounterExplicit'
         ],
@@ -524,40 +590,12 @@ function expandMechanicsMode(value) {
     return ['NO_STAKES', 'STAKES', 'SYSTEM_UPDATE', 'OOC_STOP'].includes(mode) ? mode : 'NO_STAKES';
 }
 
-function shouldUseDeterministicFallback(latestUserMessage, fallback = {}, currentTracker = null) {
-    const text = String(latestUserMessage || '').trim();
-    if (!text) return false;
-    if (fallback?.resolverBypass) return true;
-    if (fallback?.goalKind && fallback.goalKind !== 'Normal') return false;
-    if (fallback?.hostilePhysicalHarm === 'Y') return false;
-    if (Array.isArray(fallback?.oppTargetsNpc) && fallback.oppTargetsNpc.length) return false;
-    if (Array.isArray(fallback?.oppTargetsEnv) && fallback.oppTargetsEnv.length) return false;
-    if (fallback?.hasStakes === 'Y') return false;
-    if (hasUntrackedDirectNpcTarget(fallback, currentTracker)) return false;
-
-    if (/^\s*\(\((?!\()[\s\S]*?(?<!\))\)\)\s*$/.test(text)) return true;
-    if (/^\s*\(\(\(/.test(text)) return false;
-
-    const highRisk = /\b(attack|strike|hit|punch|kick|slap|stab|slash|cut|shoot|kill|wound|injure|hurt|slam|knee|swing|swipe|thrust|grapple|tackle|restrain|pin|drag|yank|shove|force|break|smash|jump|leap|climb|swim|dodge|chase|sneak|stealth|hide|pickpocket|steal|snatch|palm|deceive|lie|bluff|trick|distract|misdirect|threaten|intimidate|coerce|blackmail|demand|order|persuade|convince|negotiate|bargain|plead|let me pass|allow me|permission|restricted|kiss|touch|grope|fondle|caress|undress|strip|seduce|spell|magic|cast|channel|curse|hex|charm|glamou?r|compel|dominate|ward|dispel|counterspell|summon|teleport|trap|lock|locked|chasm|ravine|pit|hazard|poison|fire|combat)\b/i;
-    if (highRisk.test(text)) return false;
-
-    const simpleIntent = /\b(say|tell|ask|answer|reply|greet|wave|smile|nod|bow|thank|apologize|compliment|praise|chat|talk|sit|stand|wait|rest|sleep|travel|walk|look|listen|watch|observe|inspect casually|hand|give|offer|return|accept|decline|take a seat|leave|enter)\b/i;
-    const systemIntent = /\b(no longer present|enters?|arrives?|leaves?|exits?|dead|forgotten|retired|inactive|wait(?:ing)?|sleep|rest|travel|later|after \d+|time skip|timeskip|minutes?|hours?|days?|accept(?:ed)? (?:the )?(?:task|quest|job)|complete(?:d)? (?:the )?(?:task|quest|job)|cancel(?:ed|led)? (?:the )?(?:task|quest|job))\b/i;
-
-    return fallback?.hasStakes === 'N' && (simpleIntent.test(text) || systemIntent.test(text));
-}
-
-function hasUntrackedDirectNpcTarget(fallback = {}, currentTracker = null) {
-    const targets = Array.isArray(fallback.actionTargets) ? fallback.actionTargets : [];
-    if (!targets.length) return false;
-    return targets.some(name => !findNpcIdLocal(currentTracker || {}, name));
-}
-
 const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     'You are the single hidden Mechanics Pass for a SillyTavern roleplay mechanics extension. Return JSON only.',
     '',
     'PURPOSE:',
-    '- Use semantic/contextual language understanding to classify the latest user action once.',
+    '- You are the semantic/contextual authority for the latest user action.',
+    '- Code will not decide what the user action means. Code only validates fields, rolls dice, applies deterministic math, updates state, and builds narration handoff.',
     '- Return mode=NO_STAKES when no dice roll is needed, but still provide the short packet needed by Relationship, Chaos, Proactivity, tracker updates, and narration handoff.',
     '- Return mode=STAKES when success/failure has meaningful stakes or an explicit intimacy gate, combat, opposition, risk, obstacle, or contested action matters.',
     '- Return mode=SYSTEM_UPDATE for pure tracker/continuity updates with no live contested action.',
@@ -567,15 +605,19 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- FIRST-YES-WINS. For ordered rule ladders, the first explicit matching rule is final. Do not reconsider later.',
     '- EXPLICIT-ONLY. Never invent targets, stakes, stats, NPC facts, scene facts, motives, outcomes, or relationship changes.',
     '- Uncertain = conservative defaults. If a roll might be needed, use mode=STAKES. If no explicit target/fact exists, leave lists empty.',
+    '- Contextual target resolution is semantic, not keyword-based. Use the latest user message, currentInteractionTarget, present NPCs, explicit speaker labels, and recent chat excerpt to determine who the user is acting on or speaking to.',
+    '- If the user uses pronouns, quoted speech, continued dialogue, or short actions like "I slap her", resolve the target from the active exchange when the context makes one living referent clear.',
+    '- If exactly one NPC is present or one NPC is the currentInteractionTarget and the latest user action clearly addresses/acts on that person, use that NPC as ActionTargets/NPCInScene even if their name is not repeated.',
+    '- If multiple living referents are plausible and context does not select one, do not invent certainty; leave target fields empty or use only an explicit group phrase if the user acts on the group.',
     '',
     'RESOLUTION ORDER:',
     '1. Check OOC.',
-    '2. Identify final goal and intimacy category.',
-    '3. Identify the decisive action or combat attack sequence.',
-    '4. Identify living and environmental targets/opposition.',
-    '5. Decide whether meaningful stakes exist.',
-    '6. Count combat actions only when the input is a hostile attack sequence.',
-    '7. Map stats from decisive action and opposition mode.',
+    '2. identifyGoal(input): return the practical final goal/intent of the latest user input. If explicit direct intimacy toward a specific NPC, use IntimacyAdvancePhysical or IntimacyAdvanceVerbal.',
+    '3. identifyTargets(input, goal, context): ActionTargets are living entities targeted by the user; OppTargetsNPC are living entities opposing/resisting/being attacked/refusing; OppTargetsENV are nonliving obstacles; Benefited/Harmed observers are living entities whose material stakes improve/worsen.',
+    '4. checkIntimacyGate(goal, targets, context): if goal is intimacy, target identity must be explicit or contextually clear from active exchange/tracker. Code will compute ALLOW/DENY after you identify goal and target.',
+    '5. hasStakes(input, goal, targets, context): return STAKES when success/failure could materially change user/NPC stakes or when denied/uncertain intimacy, combat, opposition, risk, obstacle, coercion, deception, stealth, theft, magic, or harm matters.',
+    '6. actionCount(input, goal): only explicit hostile/combat attack sequences count, max 3. Do not count setup, movement, defense, or flavor as extra attacks.',
+    '7. mapStats(input, goal, targets, context): use DEF.STATS on the explicit decisive action; use final goal only if no distinct means exists. Living opposition cannot be ENV.',
     '8. Extract only explicit NPC, inventory, task, scene, and time facts needed for tracker updates.',
     '',
     'WHEN TO RETURN STAKES:',
@@ -619,6 +661,7 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- If multiple same-role unnamed NPCs are present, use the exact tracker label, alias, or descriptor that identifies the intended one: Goblin 1, Goblin 2, Guard 1, the wounded goblin, the younger guard.',
     '- If "the goblin", "the guard", or a similar role phrase is ambiguous among multiple present NPCs and context does not identify one, do not invent certainty. Use the explicit group phrase only if the user acts on the group; otherwise keep target lists conservative and state ambiguity in why.',
     '- If currentInteractionTarget is present in tracker context and the latest user message uses a pronoun, reply/answer, payment, offer, gesture, or quoted speech that clearly continues the previous exchange, use currentInteractionTarget as the NPC target even if the role/name is not repeated.',
+    '- If currentInteractionTarget or a single present NPC exists and the latest user message is a short physical/social action with a pronoun or omitted-but-obvious object, resolve that NPC as the target. Example pattern: prior NPC is speaking/holding/touching the user, then "I slap her" targets that NPC.',
     '- actionCount: 1 for noncombat; 1-3 only for explicit hostile/combat attack sequences.',
     '- Do not count setup, movement, repositioning, defense, recovery, or non-attack flavor as combat actions.',
     '- USER/OPP: for NO_STAKES use MND/ENV defaults unless explicit semantics are clear. For STAKES, map from decisiveAction using PHY/MND/CHA definitions.',
@@ -677,22 +720,24 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- Do not return timeDeltaMinutes for ordinary movement, approach, walking in-scene, or travel being roleplayed along the way. Prior chat may describe elapsed time, but it is not a new time skip unless the latest user message says so.',
     '',
     'COMPACT OUTPUT FORMAT:',
-    '- Use clear engine field names, but keep values short. Do not write paragraphs.',
+    '- Use the exact engine function/schema names below. Keep values short. Do not write paragraphs.',
     '- mode: NO_STAKES/STAKES/SYSTEM_UPDATE/OOC_STOP.',
-    '- identifyGoal: final goal. goalKind: Normal/IntimacyAdvancePhysical/IntimacyAdvanceVerbal. decisiveAction: decisive action. why: short evidence/why, optional.',
-    '- ActionTargets, OppTargetsNPC, OppTargetsENV, BenefitedObservers, HarmedObservers, NPCInScene are short name lists.',
-    '- actionCount, USER, OPP, hostilePhysicalHarm, newEncounterExplicit are compact enum/number answers.',
+    '- identifyGoal={goal, goalKind, evidence}. goalKind is Normal/IntimacyAdvancePhysical/IntimacyAdvanceVerbal.',
+    '- identifyTargets={ActionTargets, OppTargets:{NPC,ENV}, BenefitedObservers, HarmedObservers, NPCInScene, evidence}. Every list contains short names/descriptors only.',
+    '- hasStakes={STAKES, evidence}. STAKES is Y/N.',
+    '- mapStats={USER, OPP, userEvidence, oppEvidence}. USER is PHY/MND/CHA. OPP is PHY/MND/CHA/ENV.',
+    '- genStats=[{target,Rank,MainStat,PHY,MND,CHA,evidence}...] only for NPCs whose currentCoreStats are missing and whose rank/mainStat can be semantically determined from explicit context. If uncertain, use Rank=unknown/MainStat=unknown and ordinary generated stats are deterministic code fallback.',
+    '- NPC_STAKES=[{NPC,NPC_STAKES,evidence}...] for every relevant NPC whose material stakes are evaluated for relationship movement. NPC_STAKES=Y only when safety, resources, status, autonomy, or explicit goal progress materially improves this turn. Conversation, compliments, flirtation, tone, or mere witnessing do not count.',
+    '- decisiveAction, actionCount, hostilePhysicalHarm, newEncounterExplicit are compact answers.',
     '- outcomeOnSuccess/outcomeOnFailure are optional short consequence meanings. scene/npcFacts/inventoryDeltas/taskDeltas are optional and only for explicit updates.',
     '',
     'ENGINE FIELD MAP:',
-    '- identifyGoal -> identifyGoal.',
-    '- identifyTargets.ActionTargets -> ActionTargets.',
-    '- identifyTargets.OppTargets.NPC -> OppTargetsNPC.',
-    '- identifyTargets.OppTargets.ENV -> OppTargetsENV.',
-    '- identifyTargets.BenefitedObservers -> BenefitedObservers.',
-    '- identifyTargets.HarmedObservers -> HarmedObservers.',
-    '- NPCInScene -> NPCInScene.',
-    '- mapStats.USER -> USER; mapStats.OPP -> OPP.',
+    '- identifyGoal(input) -> identifyGoal.',
+    '- identifyTargets(input, goal, context) -> identifyTargets.ActionTargets / identifyTargets.OppTargets.NPC / identifyTargets.OppTargets.ENV / identifyTargets.BenefitedObservers / identifyTargets.HarmedObservers / identifyTargets.NPCInScene.',
+    '- hasStakes(input, goal, targets, context) -> hasStakes.STAKES.',
+    '- mapStats(input, goal, targets, context) -> mapStats.USER / mapStats.OPP.',
+    '- genStats(target, context) -> genStats[].',
+    '- auditInteraction(npc, resolutionPacket) for relationship stakes -> NPC_STAKES[].',
     '- hostile/combat intent to hurt or injure -> hostilePhysicalHarm.',
     '- newEncounterExplicit -> newEncounterExplicit.',
     '- Output compact JSON only. Prefer short names, enums, empty arrays, and omitted optional objects over prose.',
@@ -711,6 +756,8 @@ function buildMechanicsPassPrompt({ chatExcerpt, latestUserMessage, tracker, use
         '',
         'CONTEXT NOTE:',
         '- The tracker context is a compact relevant slice for speed. Use it as current explicit state.',
+        '- userProfile.fullPersona is authoritative for user identity, visible traits, stats, abilities, and starting inventory context.',
+        '- activeExchange identifies the latest user message, the most recent assistant message before it, and the best current living target if the chat makes one clear.',
         '- If a fact is absent from this compact context, treat it as unknown/no new evidence. Absence is never permission to invent facts, targets, stats, motives, outcomes, or relationship state.',
         '',
         'LATEST USER MESSAGE TO RESOLVE:',
@@ -786,6 +833,7 @@ function buildResolverContext(currentTracker, latestUserMessage = '', chatExcerp
         worldClock: compactClockForResolver(current.worldClock),
         user: current.user,
         userProfile: current.user?.profile || {},
+        activeExchange: current.activeExchange || null,
         presentNpcNames: (current.presentNpcIds || [])
             .map(id => current.npcs?.[id]?.name)
             .filter(Boolean),
@@ -894,37 +942,68 @@ function expandMechanicsPass(pass, latestUserMessage) {
     const fallbackGoal = text.slice(0, 140) || 'latest user action';
     const isOocStop = mode === 'OOC_STOP';
     const isSystemUpdate = mode === 'SYSTEM_UPDATE';
-    const hasStakes = mode === 'STAKES' ? 'Y' : 'N';
+    const hasStakesValue = pass?.hasStakes?.STAKES ?? pass?.hasStakes ?? pass?.STAKES;
+    const hasStakes = mode === 'STAKES' || String(hasStakesValue || '').toUpperCase() === 'Y' ? 'Y' : 'N';
     const reason = compactString(pass?.why ?? pass?.e ?? pass?.reason, 300);
-    const goal = compactString(pass?.identifyGoal ?? pass?.g ?? pass?.goal, 140);
+    const identifyGoal = pass?.identifyGoal && typeof pass.identifyGoal === 'object'
+        ? pass.identifyGoal
+        : { goal: pass?.identifyGoal ?? pass?.g ?? pass?.goal, goalKind: pass?.k ?? pass?.goalKind, evidence: pass?.goalEvidence };
+    const identifyTargets = pass?.identifyTargets && typeof pass.identifyTargets === 'object'
+        ? pass.identifyTargets
+        : {
+            ActionTargets: pass?.ActionTargets ?? pass?.at ?? pass?.actionTargets,
+            OppTargets: {
+                NPC: pass?.OppTargetsNPC ?? pass?.on ?? pass?.oppTargetsNpc,
+                ENV: pass?.OppTargetsENV ?? pass?.oe ?? pass?.oppTargetsEnv,
+            },
+            BenefitedObservers: pass?.BenefitedObservers ?? pass?.bo ?? pass?.benefitedObservers,
+            HarmedObservers: pass?.HarmedObservers ?? pass?.ho ?? pass?.harmedObservers,
+            NPCInScene: pass?.NPCInScene ?? pass?.ns ?? pass?.npcInScene,
+            evidence: pass?.targetEvidence,
+        };
+    const mapStats = pass?.mapStats && typeof pass.mapStats === 'object'
+        ? pass.mapStats
+        : {
+            USER: pass?.USER ?? pass?.us ?? pass?.userStat,
+            OPP: pass?.OPP ?? pass?.os ?? pass?.oppStat,
+            userEvidence: pass?.userStatEvidence,
+            oppEvidence: pass?.oppStatEvidence,
+        };
+    const goal = compactString(identifyGoal.goal, 140);
     const decisiveAction = compactString(pass?.a ?? pass?.decisiveAction, 140);
     const oocInstruction = isOocStop ? extractDoubleParenInner(text) || reason : '';
+    const npcFacts = mergeGenStatsIntoNpcFacts(
+        expandCompactNpcFacts(pass?.npcFacts ?? pass?.nf),
+        expandGenStats(pass?.genStats),
+    );
+    const targetEvidence = compactString(identifyTargets.evidence, 300);
+    const stakeEvidence = compactString(pass?.hasStakes?.evidence ?? pass?.stakesEvidence, 300);
     return {
         ooc: isOocStop ? 'Y' : 'N',
         oocMode: isOocStop ? 'STOP' : 'IC',
         oocInstruction,
         goal: goal || (isOocStop ? 'OOC clarification or instruction' : fallbackGoal),
-        goalKind: ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(pass?.k || pass?.goalKind) ? (pass.k || pass.goalKind) : 'Normal',
-        goalEvidence: reason || compactString(pass?.goalEvidence, 300) || text,
+        goalKind: ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(identifyGoal.goalKind) ? identifyGoal.goalKind : 'Normal',
+        goalEvidence: compactString(identifyGoal.evidence, 300) || reason || text,
         decisiveAction: decisiveAction || (isOocStop ? 'OOC clarification or instruction' : fallbackGoal),
         decisiveActionEvidence: reason || compactString(pass?.decisiveActionEvidence, 300) || text,
         outcomeOnSuccess: compactString(pass?.win ?? pass?.outcomeOnSuccess, 160),
         outcomeOnFailure: compactString(pass?.fail ?? pass?.outcomeOnFailure, 160),
-        actionTargets: arrayFromCompact(pass?.ActionTargets ?? pass?.at ?? pass?.actionTargets),
-        oppTargetsNpc: hasStakes === 'Y' ? arrayFromCompact(pass?.OppTargetsNPC ?? pass?.on ?? pass?.oppTargetsNpc) : [],
-        oppTargetsEnv: hasStakes === 'Y' ? arrayFromCompact(pass?.OppTargetsENV ?? pass?.oe ?? pass?.oppTargetsEnv) : [],
-        benefitedObservers: arrayFromCompact(pass?.BenefitedObservers ?? pass?.bo ?? pass?.benefitedObservers),
-        harmedObservers: arrayFromCompact(pass?.HarmedObservers ?? pass?.ho ?? pass?.harmedObservers),
-        npcInScene: arrayFromCompact(pass?.NPCInScene ?? pass?.ns ?? pass?.npcInScene),
+        actionTargets: arrayFromCompact(identifyTargets.ActionTargets),
+        oppTargetsNpc: hasStakes === 'Y' ? arrayFromCompact(identifyTargets.OppTargets?.NPC) : [],
+        oppTargetsEnv: hasStakes === 'Y' ? arrayFromCompact(identifyTargets.OppTargets?.ENV) : [],
+        benefitedObservers: arrayFromCompact(identifyTargets.BenefitedObservers),
+        harmedObservers: arrayFromCompact(identifyTargets.HarmedObservers),
+        npcInScene: arrayFromCompact(identifyTargets.NPCInScene),
         hasStakes,
-        stakesEvidence: compactString(pass?.stakesEvidence ?? reason, 300) || (hasStakes === 'Y'
+        stakesEvidence: stakeEvidence || targetEvidence || reason || (hasStakes === 'Y'
             ? 'Mechanics pass found explicit meaningful stakes.'
             : 'Mechanics pass classified this as no-roll with no meaningful contested stakes.'),
         actionCount: Math.max(1, Math.min(3, Number(pass?.ac ?? pass?.actionCount) || 1)),
-        userStat: ['PHY', 'MND', 'CHA'].includes(pass?.USER || pass?.us || pass?.userStat) ? (pass.USER || pass.us || pass.userStat) : 'MND',
-        userStatEvidence: compactString(pass?.userStatEvidence, 160),
-        oppStat: ['PHY', 'MND', 'CHA', 'ENV'].includes(pass?.OPP || pass?.os || pass?.oppStat) ? (pass.OPP || pass.os || pass.oppStat) : 'ENV',
-        oppStatEvidence: compactString(pass?.oppStatEvidence, 160),
+        userStat: ['PHY', 'MND', 'CHA'].includes(mapStats.USER) ? mapStats.USER : 'MND',
+        userStatEvidence: compactString(mapStats.userEvidence, 160),
+        oppStat: ['PHY', 'MND', 'CHA', 'ENV'].includes(mapStats.OPP) ? mapStats.OPP : 'ENV',
+        oppStatEvidence: compactString(mapStats.oppEvidence, 160),
         hostilePhysicalHarm: (pass?.hp ?? pass?.hostilePhysicalHarm) === 'Y' ? 'Y' : 'N',
         newEncounter: (pass?.newEncounterExplicit ?? pass?.ne ?? pass?.newEncounter) === 'Y' ? 'Y' : 'N',
         timeDeltaMinutes: Number.isFinite(Number(pass?.tdm ?? pass?.timeDeltaMinutes)) ? Number(pass.tdm ?? pass.timeDeltaMinutes) : 0,
@@ -936,7 +1015,8 @@ function expandMechanicsPass(pass, latestUserMessage) {
             time: compactString(pass?.scene?.time ?? pass?.sc?.t, 80),
             weather: compactString(pass?.scene?.weather ?? pass?.sc?.w, 80),
         },
-        npcFacts: expandCompactNpcFacts(pass?.npcFacts ?? pass?.nf),
+        npcFacts,
+        npcStakes: expandNpcStakes(pass?.NPC_STAKES ?? pass?.npcStakes),
         inventoryDeltas: expandCompactInventoryDeltas(pass?.inventoryDeltas ?? pass?.inv),
         taskDeltas: expandCompactTaskDeltas(pass?.taskDeltas ?? pass?.tasks),
         resolverMode: 'mechanics_pass',
@@ -1025,6 +1105,65 @@ function expandCompactNpcFacts(value) {
         override: fact?.o ?? fact?.override ?? 'unknown',
         archiveStatus: fact?.arc ?? fact?.archiveStatus ?? 'unknown',
     })).filter(fact => fact.name);
+}
+
+function expandGenStats(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(entry => {
+        const stats = {
+            PHY: Number(entry?.PHY),
+            MND: Number(entry?.MND),
+            CHA: Number(entry?.CHA),
+        };
+        const hasStats = ['PHY', 'MND', 'CHA'].every(stat => Number.isFinite(stats[stat]) && stats[stat] >= 1 && stats[stat] <= 10);
+        return {
+            name: compactString(entry?.target ?? entry?.name, 60),
+            rank: entry?.Rank ?? entry?.rank ?? 'unknown',
+            mainStat: entry?.MainStat ?? entry?.mainStat ?? 'unknown',
+            explicitStats: hasStats ? stats : null,
+        };
+    }).filter(entry => entry.name);
+}
+
+function mergeGenStatsIntoNpcFacts(facts, genStats) {
+    const output = Array.isArray(facts) ? [...facts] : [];
+    for (const statFact of genStats || []) {
+        const index = output.findIndex(fact => normalizeNameLocal(fact.name) === normalizeNameLocal(statFact.name));
+        if (index >= 0) {
+            output[index] = {
+                ...output[index],
+                rank: statFact.rank || output[index].rank,
+                mainStat: statFact.mainStat || output[index].mainStat,
+                explicitStats: statFact.explicitStats || output[index].explicitStats,
+            };
+        } else {
+            output.push({
+                name: statFact.name,
+                aliases: [],
+                descriptor: '',
+                revealedFrom: '',
+                position: '',
+                condition: '',
+                knowsUser: '',
+                explicitPreset: 'unknown',
+                rank: statFact.rank,
+                mainStat: statFact.mainStat,
+                explicitStats: statFact.explicitStats,
+                override: 'unknown',
+                archiveStatus: 'unknown',
+            });
+        }
+    }
+    return output;
+}
+
+function expandNpcStakes(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(entry => ({
+        NPC: compactString(entry?.NPC ?? entry?.npc ?? entry?.name, 60),
+        NPC_STAKES: String((entry?.NPC_STAKES ?? entry?.npcStakes ?? entry?.stakes) || '').toUpperCase() === 'Y' ? 'Y' : 'N',
+        evidence: compactString(entry?.evidence ?? entry?.why, 180),
+    })).filter(entry => entry.NPC);
 }
 
 function expandCompactInventoryDeltas(value) {
@@ -1132,7 +1271,40 @@ function inferCurrentInteractionTargetFromChat(chat) {
     return '';
 }
 
+function buildActiveExchangeContext(chat, latestUserMessage = '') {
+    const source = Array.isArray(chat) ? chat : [];
+    const latestUserIndex = source.findLastIndex?.(isUserMessage) ?? (() => {
+        for (let i = source.length - 1; i >= 0; i--) {
+            if (isUserMessage(source[i])) return i;
+        }
+        return -1;
+    })();
+    let previousAssistant = null;
+    if (latestUserIndex > 0) {
+        for (let i = latestUserIndex - 1; i >= 0; i--) {
+            const message = source[i];
+            if (isUserMessage(message)) break;
+            if (isAssistantMessage(message)) {
+                previousAssistant = message;
+                break;
+            }
+        }
+    }
+    const assistantText = messageText(previousAssistant).replace(/\s+/g, ' ').trim();
+    const speaker = currentSpeakerLabel(previousAssistant);
+    return {
+        latestUserMessage: String(latestUserMessage || '').trim(),
+        previousAssistantSpeaker: speaker,
+        previousAssistantText: assistantText.slice(0, 1200),
+        currentInteractionTarget: speaker,
+    };
+}
+
 function currentSpeakerLabel(message) {
+    const explicitName = String(message?.name || '').trim();
+    if (explicitName && !isGenericNarratorName(explicitName)) {
+        return cleanSceneNpcName(explicitName);
+    }
     const text = messageText(message).trim();
     const firstLine = text.split(/\r?\n/).map(x => x.trim()).find(Boolean) || '';
     if (/^[-–—]*\s*[A-Z][A-Za-z0-9_'\- ]{1,50}\s*:?$/.test(firstLine)) {
@@ -1143,6 +1315,10 @@ function currentSpeakerLabel(message) {
     const roleLine = text.match(/^\s*[-–—]\s*([A-Z][A-Za-z0-9_'\- ]{1,50})\s*\n/);
     if (roleLine) return cleanSceneNpcName(roleLine[1]);
     return '';
+}
+
+function isGenericNarratorName(value) {
+    return /^(assistant|system|narrator|narration|storyteller|game master|gamemaster|gm|dungeon master|dm|world|scenario)$/i.test(String(value || '').trim());
 }
 
 function getLatestUserMessage(chat) {
@@ -1250,40 +1426,20 @@ async function runResolver(chat) {
         || getLatestUserMessage(chat);
     await rehydrateArchivedNpcsForText(`${latestUserMessage}\n${makeChatExcerpt(sourceChat)}`);
     current = tracker();
-    current.currentInteractionTarget = inferCurrentInteractionTargetFromChat(sourceChat);
-    let fallback = inferFallbackExtraction(latestUserMessage, name2, current);
-    fallback = await guardDeadArchiveReentry(fallback, latestUserMessage);
-    console.debug('[RP Engine Tracker] Resolver start', { latestUserMessage, hasFallback: Object.keys(fallback).length > 0 });
-
-    if (fallback.resolverBypass) {
-        fallback = validateTimeExtractionForLatestUserMessage(fallback, latestUserMessage);
-        const resolved = resolveTurn(fallback, current, { userStats });
-        applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
-        resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
-        resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
-        scrubUnauthorizedTimeAdvance(resolved, latestUserMessage);
-        console.debug('[RP Engine Tracker] Resolver bypassed for deterministic fallback', resolved.packet);
-        return resolved;
-    }
+    current.activeExchange = buildActiveExchangeContext(sourceChat, latestUserMessage);
+    current.currentInteractionTarget = current.activeExchange?.currentInteractionTarget || inferCurrentInteractionTargetFromChat(sourceChat);
+    console.debug('[RP Engine Tracker] Resolver start', { latestUserMessage, currentInteractionTarget: current.currentInteractionTarget });
 
     let parsed = null;
-    const useFallbackOnly = shouldUseDeterministicFallback(latestUserMessage, fallback, current);
-    const mechanicsResult = useFallbackOnly
-        ? null
-        : await runMechanicsPass({
-            sourceChat,
-            latestUserMessage,
-            current,
-            userName,
-            characterName: name2,
-        });
+    const mechanicsResult = await runMechanicsPass({
+        sourceChat,
+        latestUserMessage,
+        current,
+        userName,
+        characterName: name2,
+    });
     if (mechanicsResult?.extraction) {
         parsed = mechanicsResult.extraction;
-    }
-
-    if (!parsed && Object.keys(fallback).length) {
-        console.debug('[RP Engine Tracker] Using deterministic fallback extraction');
-        parsed = fallback;
     }
 
     if (!parsed) {
@@ -1291,7 +1447,6 @@ async function runResolver(chat) {
         parsed = buildFailClosedExtraction(latestUserMessage, mechanicsResult?.response || '');
     }
 
-    parsed = mechanicsResult?.extraction ? mergeMechanicsPassWithFallback(parsed, fallback) : mergeExtractionWithFallback(parsed, fallback);
     parsed = validateTimeExtractionForLatestUserMessage(parsed, latestUserMessage);
     parsed = await guardDeadArchiveReentry(parsed, latestUserMessage);
     const resolved = resolveTurn(parsed, current, { userStats });
@@ -1302,51 +1457,9 @@ async function runResolver(chat) {
     console.debug('[RP Engine Tracker] Resolver complete', {
         packet: resolved.packet,
         elapsedMs: Date.now() - resolverStartedAt,
-        mechanicsPassMode: mechanicsResult?.mode || (useFallbackOnly ? 'deterministic' : 'fallback'),
+        mechanicsPassMode: mechanicsResult?.mode || 'fail_closed',
     });
     return resolved;
-}
-
-function mergeMechanicsPassWithFallback(parsed, fallback) {
-    const merged = mergeExtractionWithFallback(parsed, fallback);
-    if (!parsed || !fallback || !Object.keys(fallback).length) return merged;
-
-    if (parsed.resolverMode === 'mechanics_pass') {
-        merged.resolverMode = parsed.resolverMode;
-        merged.mechanicsPassMode = parsed.mechanicsPassMode;
-        merged.mechanicsPassReason = parsed.mechanicsPassReason;
-
-        if (parsed.mechanicsPassMode === 'NO_STAKES') {
-            merged.hasStakes = 'N';
-            merged.oppTargetsNpc = [];
-            merged.oppTargetsEnv = [];
-            merged.hostilePhysicalHarm = 'N';
-            merged.actionCount = 1;
-            if (fallback.actionTargets?.length && !parsed.actionTargets?.length) {
-                merged.actionTargets = fallback.actionTargets;
-            }
-            if (fallback.npcInScene?.length && !parsed.npcInScene?.length) {
-                merged.npcInScene = fallback.npcInScene;
-            }
-            if (fallback.npcFacts?.length && !parsed.npcFacts?.length) {
-                merged.npcFacts = fallback.npcFacts;
-            }
-            if (fallback.goal && (!parsed.goal || isRawUserMessageLike(parsed.goal, fallback.goalEvidence || ''))) {
-                merged.goal = fallback.goal;
-            }
-            if (fallback.decisiveAction && (!parsed.decisiveAction || isRawUserMessageLike(parsed.decisiveAction, fallback.decisiveActionEvidence || ''))) {
-                merged.decisiveAction = fallback.decisiveAction;
-            }
-            merged.outcomeOnSuccess = parsed.outcomeOnSuccess || '';
-            merged.outcomeOnFailure = parsed.outcomeOnFailure || '';
-            merged.userStat = parsed.userStat || 'MND';
-            merged.oppStat = parsed.oppStat || 'ENV';
-            merged.userStatEvidence = parsed.userStatEvidence || '';
-            merged.oppStatEvidence = parsed.oppStatEvidence || '';
-        }
-    }
-
-    return merged;
 }
 
 function trackerSnapshotForRollback(value) {
