@@ -3368,16 +3368,23 @@ function combatTier(margin) {
 }
 
 function applyInventoryDeltas(tracker, deltas) {
+    let changed = false;
     for (const delta of deltas) {
         if (!delta.item || !delta.evidence) continue;
         const item = String(delta.item).trim();
         if (!item) continue;
         if (['gain', 'equip'].includes(delta.action) && !tracker.inventory.some(x => normalizeName(x) === normalizeName(item))) {
             tracker.inventory.push(item);
+            changed = true;
         }
         if (['lose', 'use'].includes(delta.action)) {
+            const before = tracker.inventory.length;
             tracker.inventory = tracker.inventory.filter(x => normalizeName(x) !== normalizeName(item));
+            changed = changed || tracker.inventory.length !== before;
         }
+    }
+    if (changed) {
+        tracker.inventorySource = 'runtime';
     }
 }
 

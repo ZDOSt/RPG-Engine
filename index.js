@@ -54,11 +54,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.210';
+} from './engine.js?v=0.1.211';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.210';
-const MECHANICS_ARTIFACT_VERSION = 8;
+const EXT_VERSION = '0.1.211';
+const MECHANICS_ARTIFACT_VERSION = 9;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -369,11 +369,23 @@ function buildUserProfileFromPersona(personaText) {
 }
 
 function seedInventoryFromPersona(current, personaText) {
-    if (!current || Array.isArray(current.inventory) && current.inventory.length) return;
-    const inventory = parsePersonaInventory(personaText);
-    if (inventory.length) {
-        current.inventory = inventory;
+    if (!current) return;
+    const inventory = parsePersonaInventoryLines(personaText);
+    if (!inventory.length) return;
+    current.inventory = Array.isArray(current.inventory) ? current.inventory : [];
+    const personaNorm = new Set(inventory.map(normalizeNameLocal));
+    const currentIsPersonaSubset = current.inventory.length
+        && current.inventory.every(item => personaNorm.has(normalizeNameLocal(item)));
+    const canMergeSeed = !current.inventory.length || current.inventorySource === 'persona' || currentIsPersonaSubset;
+    if (!canMergeSeed) return;
+    const currentNorm = new Set(current.inventory.map(normalizeNameLocal));
+    for (const item of inventory) {
+        if (!currentNorm.has(normalizeNameLocal(item))) {
+            current.inventory.push(item);
+            currentNorm.add(normalizeNameLocal(item));
+        }
     }
+    current.inventorySource = 'persona';
 }
 
 function parsePersonaInventory(personaText) {
@@ -387,6 +399,43 @@ function parsePersonaInventory(personaText) {
         .filter(line => !/^=+$/.test(line))
         .map(line => line.replace(/\s+/g, ' ').slice(0, 160))
         .slice(0, 30);
+}
+
+function parsePersonaInventoryLines(personaText) {
+    const lines = String(personaText || '').split(/\r?\n/);
+    const items = [];
+    let inInventory = false;
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        const heading = personaHeadingText(line);
+        if (!inInventory) {
+            if (/^inventory\b/i.test(heading)) inInventory = true;
+            continue;
+        }
+        if (!line || /^=+$/.test(line)) continue;
+        if (isPersonaSectionHeading(line)) break;
+        const item = line
+            .replace(/^\s*[-*•]\s*/u, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (item) items.push(item.slice(0, 160));
+        if (items.length >= 30) break;
+    }
+    return items;
+}
+
+function personaHeadingText(line) {
+    return String(line || '')
+        .trim()
+        .replace(/^#+\s*/, '')
+        .replace(/^[^\p{L}\p{N}]+/u, '')
+        .trim();
+}
+
+function isPersonaSectionHeading(line) {
+    const heading = personaHeadingText(line);
+    return /^[A-Z][A-Z0-9 /&'-]{2,}:?$/.test(heading)
+        || /^(basic info|appearance|stats|corestats|racial traits|traits|abilities|notes|additional notes|fighting style)\b/i.test(heading);
 }
 
 function extractPersonaField(text, label) {
