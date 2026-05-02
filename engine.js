@@ -739,8 +739,9 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     const namedDeadNpc = text.match(/\b(?!I\b|Me\b|My\b)([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:is|was|lies|lay|has been)?\s*(?:dead|killed|slain|destroyed|deceased)\b|\b(?!I\b|Me\b|My\b)([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:dies|died)\b/i);
     const namedForgottenNpc = text.match(/\b(?:forget|prune|remove|delete)\s+([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:from\s+)?(?:the\s+)?(?:archive|lorebook|tracker|continuity)\b/i);
     const sceneSingleTarget = singlePresentNpcName(contextTracker);
+    const contextTarget = String(contextTracker?.currentInteractionTarget || '').trim();
     const activeCharacterName = String(characterName || '').trim();
-    const pronounTarget = /\b(her|him|them|their)\b/i.test(text) ? sceneSingleTarget : '';
+    const pronounTarget = /\b(her|him|them|their)\b/i.test(text) ? (sceneSingleTarget || contextTarget) : '';
     const directSceneTarget = sceneSingleTarget && /\b(look over there|distract|point)\b/i.test(text) ? sceneSingleTarget : '';
     const target = firstCleanNpcName([
         namedAtTarget?.[1],
@@ -770,6 +771,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         containsAttack && namedIntroducedTarget?.[1],
         activeCharacterName && lower.includes(activeCharacterName.toLowerCase()) ? activeCharacterName : '',
         pronounTarget,
+        contextTarget && (contextualInteractionUsesCurrentTarget(text) || containsAttack || physicalContextActionUsesCurrentTarget(text)) ? contextTarget : '',
         directSceneTarget,
     ]);
     const hasTarget = Boolean(target);
@@ -826,6 +828,15 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     const taskDelta = inferTaskDelta(text, target || characterName || '');
     const targetedMagic = hasTarget && /\b(magic|spell|cast|channel|invoke|weave|curse|hex|charm|glamour|compel|bewitch|enchant|dominate|blast|burn|freeze|shock|smite|firebolt|ward|dispel|counterspell)\b/i.test(text);
     const socialMagic = targetedMagic && /\b(charm|glamour|compel|bewitch|enchant|dominate|aura|presence|fear)\b/i.test(text);
+    const simpleDirectInteraction = hasTarget
+        && !containsAttack
+        && !physicalCoercion
+        && !targetedMagic
+        && !sexualPhysicalIntimacy
+        && !distractionTheft
+        && !stealthLiving
+        && !sleightVsAwareness
+        && /\b(nod|wave|smile|look|glance|bow|greet|say|tell|ask|thank|apologize|compliment|praise)\b/i.test(text);
     const introducedPreset = /\b(girlfriend|boyfriend|lover|spouse|wife|husband|partner|romantic|in love|close and trusting|currentDisposition\s*B\s*4|B4\s*\/\s*F\s*1\s*\/\s*H\s*1)\b/i.test(text)
         ? 'romanticOpen'
         : /\b(currentDisposition\s*B\s*3|B3\s*\/\s*F\s*1\s*\/\s*H\s*2|trusted|admired|known favorably)\b/i.test(text)
@@ -1137,8 +1148,11 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
 
     if (hasTarget && socialVerb && !distractionTheft && !distractionIntimacy && !Object.keys(fallback).length) {
         const harmlessSocial = ordinaryHarmlessRequest || harmlessSocialExpression;
-        fallback.decisiveAction = text.match(/\b(tell|say|ask|convince|persuade|lie|deceive|bluff|threaten|warn|promise|negotiate|intimidate|coerce|demand|order|thank|apologize|compliment|praise|greet|mock|insult|taunt|humiliate|ridicule)[^.?!]*/i)?.[0] || text.slice(0, 140);
-        fallback.goal = fallback.decisiveAction;
+        const transaction = contextTarget && /\b(coin|coins|silver|gold|copper|pay|pays|paid|place|places|set|sets|put|puts|take|buy|room|meal|nights?|pouch|table|counter)\b/i.test(text);
+        fallback.decisiveAction = transaction
+            ? directInteractionAction(text, target)
+            : text.match(/\b(tell|say|ask|convince|persuade|lie|deceive|bluff|threaten|warn|promise|negotiate|intimidate|coerce|demand|order|thank|apologize|compliment|praise|greet|mock|insult|taunt|humiliate|ridicule)[^.?!]*/i)?.[0] || text.slice(0, 140);
+        fallback.goal = transaction ? `complete transaction with ${target}` : fallback.decisiveAction;
         fallback.goalKind = 'Normal';
         fallback.goalEvidence = fallback.decisiveAction;
         fallback.decisiveActionEvidence = text;
@@ -1155,6 +1169,38 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         fallback.userStatEvidence = text.match(/\b(convince|persuade|lie|deceive|bluff|threaten|promise|negotiate|intimidate|coerce|demand|order|tell|say|ask|thank|apologize|compliment|praise|greet|mock|insult|taunt|humiliate|ridicule)\b/i)?.[0] || 'social action';
         fallback.oppStat = harmlessSocial ? 'ENV' : (hostileSocial ? 'MND' : 'CHA');
         fallback.oppStatEvidence = harmlessSocial ? '' : (hostileSocial ? 'Target resists pressure, deception, fear, or coercion with will/awareness.' : 'Target resists or contests interpersonal influence.');
+        fallback.hostilePhysicalHarm = 'N';
+        fallback.npcFacts = [{
+            name: target,
+            position: '',
+            condition: '',
+            knowsUser: '',
+            explicitPreset: 'neutralDefault',
+            rank: 'unknown',
+            mainStat: 'unknown',
+            override: 'NONE',
+        }];
+    }
+
+    if (simpleDirectInteraction && !Object.keys(fallback).length) {
+        fallback.goal = `interact with ${target}`;
+        fallback.goalKind = 'Normal';
+        fallback.goalEvidence = text;
+        fallback.decisiveAction = directInteractionAction(text, target);
+        fallback.decisiveActionEvidence = text;
+        fallback.outcomeOnSuccess = '';
+        fallback.outcomeOnFailure = '';
+        fallback.actionTargets = [target];
+        fallback.oppTargetsNpc = [];
+        fallback.oppTargetsEnv = [];
+        fallback.npcInScene = [target];
+        fallback.hasStakes = 'N';
+        fallback.stakesEvidence = 'Direct harmless interaction with a named NPC; initialize/track the NPC but do not roll.';
+        fallback.actionCount = 1;
+        fallback.userStat = 'CHA';
+        fallback.userStatEvidence = 'direct harmless interaction';
+        fallback.oppStat = 'ENV';
+        fallback.oppStatEvidence = '';
         fallback.hostilePhysicalHarm = 'N';
         fallback.npcFacts = [{
             name: target,
@@ -1527,7 +1573,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     }
 
     const timeDelta = inferTimeDeltaMinutes(text);
-    if (timeDelta) {
+    if (timeDelta && (!Object.keys(fallback).length || fallback.systemOnlyUpdate === 'Y')) {
         if (!Object.keys(fallback).length) {
             fallback.goal = 'advance scene time';
             fallback.goalKind = 'Normal';
@@ -1565,8 +1611,36 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     return fallback;
 }
 
+function contextualInteractionUsesCurrentTarget(text) {
+    const source = String(text || '');
+    if (!source.trim()) return false;
+    if (/\b(he|him|his|she|her|hers|they|them|their)\b/i.test(source)) return true;
+    if (/"[^"]+"/.test(source) && /\b(I|I'll|I will|thank|thanks|yes|no|take|buy|pay|give|hand|place|set|offer|accept|decline|agree|ask|tell|say)\b/i.test(source)) return true;
+    return /\b(look|glance|nod|smile|bow|gesture|hand|give|offer|place|set|pay|buy|take|accept|decline|thank|apologize|answer|reply)\b/i.test(source);
+}
+
+function physicalContextActionUsesCurrentTarget(text) {
+    const source = String(text || '');
+    return /\b(hit|punch|kick|slap|cut|slash|stab|shoot|strike|attack|slam|knee|swing|swipe|sweep|thrust|jab|grab|yank|drag|pin|restrain|tackle|trip|shove|push|barge|force)\b/i.test(source);
+}
+
+function directInteractionAction(text, target) {
+    const source = String(text || '');
+    const direct = source.match(new RegExp(`\\b(nod|wave|smile|look|glance|bow|greet|say|tell|ask|thank|apologize|compliment|praise)\\b[^.?!]{0,80}\\b${escapeRegExp(target)}\\b`, 'i'))?.[0];
+    if (direct) return cleanText(direct);
+    const pronoun = source.match(/\b(look|glance|nod|smile|bow|gesture|hand|give|offer|place|set|pay|buy|take|accept|decline|thank|apologize|answer|reply)\b[^.?!]{0,80}\b(?:him|her|them|his|hers|their)\b/i)?.[0];
+    if (pronoun) return cleanText(`${pronoun} (${target})`);
+    const quoted = source.match(/["“]([^"”]{1,120})["”]/)?.[1];
+    if (quoted) return cleanText(`speak to ${target}: "${quoted}"`);
+    return `interact with ${target}`;
+}
+
 function inferTimeDeltaMinutes(text) {
     const source = String(text || '').toLowerCase();
+    if (/["“”][\s\S]*\b(?:minutes?|mins?|hours?|hrs?|days?|weeks?|month|year)s?\b[\s\S]*["“”]/.test(source)
+        && !/\b(wait|sleep|rest|travel|ride|skip|timeskip|time skip|after|later|pass(?:es|ed)?|until)\b/.test(source.replace(/["“”][\s\S]*?["“”]/g, ''))) {
+        return null;
+    }
     if (!/\b(wait|sleep|rest|travel|walk|ride|after|later|pass|skip|timeskip|time skip)\b/.test(source)) return null;
     const match = source.match(/\b(?:(\d+(?:\.\d+)?)|(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter))\s*(minutes?|mins?|hours?|hrs?|days?)\b/);
     if (!match) {

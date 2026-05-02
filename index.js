@@ -43,7 +43,6 @@ import {
     createTracker,
     describeNpcFeeling,
     inferFallbackExtraction,
-    initializeSceneNpc,
     mergeExtractionWithFallback,
     parseCoreStats,
     parseNpcArchiveContent,
@@ -55,7 +54,7 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.197';
+} from './engine.js?v=0.1.202';
 
 const EXT_ID = 'rpEngineTracker';
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
@@ -253,6 +252,9 @@ let lastMechanicsHandoff = {
     trackerSnapshot: null,
     display: null,
 };
+let pendingPanelRefreshAfterGeneration = false;
+let pendingAuditDisplayAfterGeneration = null;
+let visibleTrackerSnapshot = null;
 
 function activePersonaText() {
     const contextPersona = getContext().powerUserSettings?.persona_description;
@@ -507,6 +509,7 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- NPCInScene: NPCs directly interacted with plus benefited/harmed observers. Include newly introduced scene NPCs only when explicitly present or directly interacted with.',
     '- If multiple same-role unnamed NPCs are present, use the exact tracker label, alias, or descriptor that identifies the intended one: Goblin 1, Goblin 2, Guard 1, the wounded goblin, the younger guard.',
     '- If "the goblin", "the guard", or a similar role phrase is ambiguous among multiple present NPCs and context does not identify one, do not invent certainty. Use the explicit group phrase only if the user acts on the group; otherwise keep target lists conservative and state ambiguity in why.',
+    '- If currentInteractionTarget is present in tracker context and the latest user message uses a pronoun, reply/answer, payment, offer, gesture, or quoted speech that clearly continues the previous exchange, use currentInteractionTarget as the NPC target even if the role/name is not repeated.',
     '- actionCount: 1 for noncombat; 1-3 only for explicit hostile/combat attack sequences.',
     '- Do not count setup, movement, repositioning, defense, recovery, or non-attack flavor as combat actions.',
     '- USER/OPP: for NO_STAKES use MND/ENV defaults unless explicit semantics are clear. For STAKES, map from decisiveAction using PHY/MND/CHA definitions.',
@@ -674,6 +677,7 @@ function buildResolverContext(currentTracker, latestUserMessage = '', chatExcerp
         presentNpcNames: (current.presentNpcIds || [])
             .map(id => current.npcs?.[id]?.name)
             .filter(Boolean),
+        currentInteractionTarget: current.currentInteractionTarget || '',
         relevantNpcs,
         inventory: relevantListForResolver(current.inventory, text, 16),
         pendingTasks: relevantTasksForResolver(current.pendingTasks, text, 8),
@@ -942,6 +946,39 @@ function makeChatExcerpt(chat) {
         .join('\n');
 }
 
+function inferCurrentInteractionTargetFromChat(chat) {
+    const source = Array.isArray(chat) ? chat : [];
+    const latestUserIndex = source.findLastIndex?.(isUserMessage) ?? (() => {
+        for (let i = source.length - 1; i >= 0; i--) {
+            if (isUserMessage(source[i])) return i;
+        }
+        return -1;
+    })();
+    if (latestUserIndex <= 0) return '';
+
+    for (let i = latestUserIndex - 1; i >= 0; i--) {
+        const message = source[i];
+        if (isUserMessage(message)) break;
+        if (!isAssistantMessage(message)) continue;
+        const speaker = currentSpeakerLabel(message);
+        if (speaker) return speaker;
+    }
+    return '';
+}
+
+function currentSpeakerLabel(message) {
+    const text = messageText(message).trim();
+    const firstLine = text.split(/\r?\n/).map(x => x.trim()).find(Boolean) || '';
+    if (/^[-–—]*\s*[A-Z][A-Za-z0-9_'\- ]{1,50}\s*:?$/.test(firstLine)) {
+        return cleanSceneNpcName(firstLine.replace(/^[-–—]+\s*/, '').replace(/:$/, '').trim());
+    }
+    const rolePrefix = text.match(/^\s*([A-Z][A-Za-z0-9_'\- ]{1,50})\s*:\s*["“]/);
+    if (rolePrefix) return cleanSceneNpcName(rolePrefix[1]);
+    const roleLine = text.match(/^\s*[-–—]\s*([A-Z][A-Za-z0-9_'\- ]{1,50})\s*\n/);
+    if (roleLine) return cleanSceneNpcName(roleLine[1]);
+    return '';
+}
+
 function getLatestUserMessage(chat) {
     for (let i = chat.length - 1; i >= 0; i--) {
         const message = chat[i];
@@ -1045,9 +1082,9 @@ async function runResolver(chat) {
     const latestUserMessage = getLatestUserMessage(sourceChat)
         || getLatestUserMessage(liveChat)
         || getLatestUserMessage(chat);
-    seedSceneNpcsFromRecentAssistantMessages(sourceChat);
     await rehydrateArchivedNpcsForText(`${latestUserMessage}\n${makeChatExcerpt(sourceChat)}`);
     current = tracker();
+    current.currentInteractionTarget = inferCurrentInteractionTargetFromChat(sourceChat);
     let fallback = inferFallbackExtraction(latestUserMessage, name2, current);
     fallback = await guardDeadArchiveReentry(fallback, latestUserMessage);
     console.debug('[RP Engine Tracker] Resolver start', { latestUserMessage, hasFallback: Object.keys(fallback).length > 0 });
@@ -1115,6 +1152,21 @@ function mergeMechanicsPassWithFallback(parsed, fallback) {
             merged.oppTargetsEnv = [];
             merged.hostilePhysicalHarm = 'N';
             merged.actionCount = 1;
+            if (fallback.actionTargets?.length && !parsed.actionTargets?.length) {
+                merged.actionTargets = fallback.actionTargets;
+            }
+            if (fallback.npcInScene?.length && !parsed.npcInScene?.length) {
+                merged.npcInScene = fallback.npcInScene;
+            }
+            if (fallback.npcFacts?.length && !parsed.npcFacts?.length) {
+                merged.npcFacts = fallback.npcFacts;
+            }
+            if (fallback.goal && (!parsed.goal || isRawUserMessageLike(parsed.goal, fallback.goalEvidence || ''))) {
+                merged.goal = fallback.goal;
+            }
+            if (fallback.decisiveAction && (!parsed.decisiveAction || isRawUserMessageLike(parsed.decisiveAction, fallback.decisiveActionEvidence || ''))) {
+                merged.decisiveAction = fallback.decisiveAction;
+            }
             merged.outcomeOnSuccess = parsed.outcomeOnSuccess || '';
             merged.outcomeOnFailure = parsed.outcomeOnFailure || '';
             merged.userStat = parsed.userStat || 'MND';
@@ -1745,7 +1797,7 @@ function queueNpcArchiveSync(result) {
                 current.presentNpcIds = current.presentNpcIds.filter(id => current.npcs[id]);
                 chat_metadata[METADATA_KEY] = current;
                 saveTracker();
-                renderPanel();
+                pendingPanelRefreshAfterGeneration = true;
             }
         } catch (error) {
             console.warn('[RP Engine Tracker] Deferred NPC archive sync failed.', error);
@@ -1939,9 +1991,12 @@ function preserveSameTurnHandoffForRegeneration() {
         display.narrationHandoff = handoff;
         display.triggerUserMessageId = findLatestUserMessageIdByText(display.triggerUserMessage);
         bindMechanicsDisplayToTrigger(display);
+        pendingAuditDisplayAfterGeneration = structuredClone(display);
+        saveTracker();
+        pendingPanelRefreshAfterGeneration = true;
     } else {
         saveTracker();
-        renderPanel();
+        pendingPanelRefreshAfterGeneration = true;
     }
 }
 
@@ -1959,12 +2014,12 @@ function buildMechanicsDisplayPayload(result, handoff, latestUserMessage, source
 }
 
 function latestAuditDisplayPayload() {
-    if (lastMechanicsHandoff?.display) {
-        return lastMechanicsHandoff.display;
-    }
     const current = tracker();
     if (current?.lastAuditDisplay?.resolverSchema) {
         return current.lastAuditDisplay;
+    }
+    if (pendingAuditDisplayAfterGeneration || pendingPanelRefreshAfterGeneration) {
+        return null;
     }
     const audit = current?.lastAudit ? cloneAuditForDisplay(current.lastAudit) : null;
     if (!audit) return null;
@@ -2002,27 +2057,33 @@ function cloneAuditForDisplay(audit) {
 
 function bindMechanicsDisplayToTrigger(payload) {
     if (!payload) return false;
-    const current = tracker();
-    current.lastAuditDisplay = structuredClone(payload);
-    chat_metadata[METADATA_KEY] = current;
     const id = Number(payload.triggerUserMessageId);
     if (!Number.isFinite(id)) {
-        saveTracker();
-        renderPanel();
         return false;
     }
     const message = getMessageById(id);
     if (!isUserMessage(message)) {
-        saveTracker();
-        renderPanel();
         return false;
     }
 
     message[MESSAGE_MECHANICS_KEY] = structuredClone(payload);
     saveChatDebounced();
-    saveTracker();
-    renderPanel();
     return true;
+}
+
+function revealPendingAuditDisplay() {
+    const payload = pendingAuditDisplayAfterGeneration || lastMechanicsHandoff?.display || null;
+    if (!payload) return false;
+    const current = tracker();
+    current.lastAuditDisplay = structuredClone(payload);
+    chat_metadata[METADATA_KEY] = current;
+    pendingAuditDisplayAfterGeneration = null;
+    saveTracker();
+    return true;
+}
+
+function updateVisibleTrackerSnapshot() {
+    visibleTrackerSnapshot = structuredClone(tracker());
 }
 
 function findLatestUserMessageIdByText(text, preferredChat = null) {
@@ -2104,6 +2165,7 @@ function renderMechanicsSummary(audit, payload = null) {
             ${renderKv('Harmed', listText(packet.HarmedObservers || extraction.harmedObservers))}
             ${renderKv('Roll', rollLine)}
             ${renderKv('Outcome', `${packet.OutcomeTier || 'NONE'} / ${packet.Outcome || 'no_roll'}`)}
+            ${renderKv('IntimacyGate', packet.IntimacyConsent || firstNpcGate(npcs) || 'N')}
             ${renderKv('Landed', packet.LandedActions)}
             ${renderKv('Counter', packet.CounterPotential)}
             ${npcs.length ? `<div class="rp-engine-audit-title">Relationships</div>${npcs.map(renderNpcAudit).join('')}` : ''}
@@ -2113,6 +2175,11 @@ function renderMechanicsSummary(audit, payload = null) {
             ${renderKv('Aggression', aggressionLines.length ? aggressionLines.join(' | ') : 'none')}
         </div>
     `;
+}
+
+function firstNpcGate(npcs) {
+    const item = (Array.isArray(npcs) ? npcs : []).find(npc => npc?.IntimacyGate);
+    return item?.IntimacyGate || '';
 }
 
 function resolverModeLabel(extraction) {
@@ -2214,7 +2281,11 @@ function renderPanel() {
         .attr('title', cfg.panelCollapsed ? 'Expand tracker' : 'Collapse tracker')
         .html('<i class="fa-solid fa-book-open"></i>');
 
-    const data = summarizeTracker(tracker());
+    const currentTracker = tracker();
+    const panelTracker = pendingPanelRefreshAfterGeneration && visibleTrackerSnapshot
+        ? visibleTrackerSnapshot
+        : currentTracker;
+    const data = summarizeTracker(panelTracker);
     const userLabel = data.user?.name || name1 || 'User';
     const presentHtml = data.present.length
         ? data.present.map(renderNpc).join('')
@@ -2263,13 +2334,13 @@ function renderPanel() {
         <section>
             <h4>${escapeHtml(userLabel)}</h4>
             <div class="rp-engine-statline">PHY ${data.user.stats.PHY} | MND ${data.user.stats.MND} | CHA ${data.user.stats.CHA}</div>
-            <div class="rp-engine-muted">${escapeHtml(data.user.condition || 'unknown condition')}</div>
+            ${data.user.condition && data.user.condition !== 'unknown' ? `<div class="rp-engine-muted">${escapeHtml(data.user.condition)}</div>` : ''}
         </section>
         <details>
             <summary>Inventory for ${escapeHtml(userLabel)}</summary>
             ${inventoryHtml}
         </details>
-        <details open>
+        <details>
             <summary>Pending Tasks for ${escapeHtml(userLabel)}</summary>
             ${pendingHtml}
         </details>
@@ -2369,6 +2440,9 @@ function renderNpc(npc) {
     const d = npc.disposition || { B: 2, F: 2, H: 2 };
     const s = npc.coreStats || { PHY: 2, MND: 2, CHA: 2 };
     const descriptor = npc.descriptor ? `<div class="rp-engine-muted">${escapeHtml(npc.descriptor)}</div>` : '';
+    const condition = npc.condition && npc.condition !== 'unknown'
+        ? `<div class="rp-engine-muted">${escapeHtml(npc.condition)}${npc.position ? ` | ${escapeHtml(npc.position)}` : ''}</div>`
+        : (npc.position ? `<div class="rp-engine-muted">${escapeHtml(npc.position)}</div>` : '');
     return `
         <div class="rp-engine-npc">
             <div class="rp-engine-npc-title">${escapeHtml(npc.name || npc.id)}</div>
@@ -2376,7 +2450,7 @@ function renderNpc(npc) {
             <div>B${d.B}/F${d.F}/H${d.H} | Rapport ${npc.rapport ?? 0} | Gate ${escapeHtml(npc.intimacyGate || 'SKIP')}</div>
             <div class="rp-engine-muted">Feels: ${escapeHtml(npc.feelsTowardUser || describeNpcFeeling(npc))}</div>
             <div class="rp-engine-statline">PHY ${s.PHY} | MND ${s.MND} | CHA ${s.CHA}</div>
-            <div class="rp-engine-muted">${escapeHtml(npc.condition || 'unknown')} ${npc.position ? `| ${escapeHtml(npc.position)}` : ''}</div>
+            ${condition}
         </div>
     `;
 }
@@ -3288,90 +3362,6 @@ function uniqueLocal(list) {
         .map(x => [normalizeNameLocal(x), x])).values()];
 }
 
-const SCENE_NPC_ROLE_PATTERN = [
-    'guard',
-    'watchman',
-    'sentry',
-    'gatekeeper',
-    'soldier',
-    'knight',
-    'captain',
-    'lady',
-    'woman',
-    'man',
-    'girl',
-    'boy',
-    'stranger',
-    'merchant',
-    'innkeeper',
-    'barmaid',
-    'bartender',
-    'waitress',
-    'patron',
-    'villager',
-    'noble',
-    'servant',
-    'priest',
-    'priestess',
-    'mage',
-    'witch',
-    'healer',
-    'hunter',
-    'messenger',
-    'bandit',
-    'thief',
-    'assassin',
-    'prisoner',
-    'captive',
-].join('|');
-
-function sceneNpcCandidatesFromText(text) {
-    const source = String(text || '');
-    const candidates = [];
-    const add = (name, role = '', evidence = '') => {
-        const cleanName = cleanSceneNpcName(name);
-        if (!cleanName) return;
-        candidates.push({
-            name: cleanName,
-            role: String(role || '').toLowerCase(),
-            descriptor: descriptorFromSceneNpcEvidence(evidence || name, role || cleanName),
-            evidence: String(evidence || '').trim().slice(0, 180),
-        });
-    };
-
-    const namedPatterns = [
-        new RegExp(`\\b(?:a|an|the|young|old|elderly|armored|hooded|female|male|neutral|ordinary|new)?\\s*(?:${SCENE_NPC_ROLE_PATTERN})\\s+named\\s+([A-Z][A-Za-z0-9_'-]{1,40})\\b`, 'gi'),
-        /\b([A-Z][A-Za-z0-9_'-]{1,40})\s*,\s+(?:a|an|the)\s+([a-z][a-z -]{2,40})\s*,\s+(?:stands?|sits?|walks?|steps?|arrives?|enters?|approaches?|blocks?|speaks?|says?|asks?)\b/gi,
-        /\b([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:stands?|sits?|walks?|steps?|arrives?|enters?|approaches?|blocks?|speaks?|says?|asks?|draws?|raises?|turns?|looks?)\b/gi,
-    ];
-    for (const pattern of namedPatterns) {
-        for (const match of source.matchAll(pattern)) {
-            const name = match[1];
-            if (isLikelyNonNpcName(name)) continue;
-            add(name, match[2] || '', match[0]);
-        }
-    }
-
-    const pluralCountPattern = new RegExp(`\\b(two|three|four|five|six|2|3|4|5|6)\\s+((?:(?:young|old|elderly|armored|hooded|female|male|tall|short|broad|thin|scarred|white-haired|dark-haired)\\s+){0,3}(?:${SCENE_NPC_ROLE_PATTERN})s?)\\b[\\s\\S]{0,120}?\\b(block|approach|arrive|enter|walk|step|stand|sit|speak|say|ask|call|shout|draw|raise|turn|look|fan out|surround|rush)\\w*\\b`, 'gi');
-    for (const match of source.matchAll(pluralCountPattern)) {
-        const count = countWordToNumber(match[1]);
-        const roleText = singularSceneRole(match[2].replace(/\s+/g, ' ').trim());
-        const role = roleText.split(/\s+/).at(-1);
-        for (let i = 1; i <= Math.min(count, 6); i++) {
-            add(sceneNpcNameForRole(roleText, source, candidates), role, match[0]);
-        }
-    }
-
-    const rolePattern = new RegExp(`\\b(?:a|an|the)\\s+((?:(?:young|old|elderly|armored|hooded|female|male|tall|short|broad|thin|scarred|white-haired|dark-haired)\\s+){0,3}(?:${SCENE_NPC_ROLE_PATTERN}))\\b[\\s\\S]{0,90}?\\b(blocks?|approaches?|arrives?|enters?|walks? up|steps? up|steps? forward|stands?|sits?|speaks?|says?|asks?|calls?|shouts?|draws?|raises?|turns?|looks?)\\b`, 'gi');
-    for (const match of source.matchAll(rolePattern)) {
-        const roleText = match[1].replace(/\s+/g, ' ').trim();
-        const role = roleText.split(/\s+/).at(-1);
-        add(sceneNpcNameForRole(roleText, source, candidates), role, match[0]);
-    }
-
-    return uniqueSceneNpcCandidates(candidates);
-}
-
 function cleanSceneNpcName(value) {
     const text = String(value || '')
         .trim()
@@ -3381,180 +3371,6 @@ function cleanSceneNpcName(value) {
         return '';
     }
     return text;
-}
-
-function isLikelyNonNpcName(value) {
-    return /^(?:I|Me|My|You|Your|The|A|An|As|Just|Halt|State|Gate|Door|Room|Road|Path|Street|Forest|Town|City|North|South|East|West)$/i.test(String(value || '').trim());
-}
-
-function sceneNpcNameForRole(roleText, source, existing = []) {
-    const base = titleCase(roleText.replace(/^(?:young|old|elderly|armored|hooded|female|male|tall|short|broad|thin|scarred|white-haired|dark-haired)\s+/i, ''));
-    const sameRoleCount = existing.filter(x => normalizeNameLocal(x.role || x.name) === normalizeNameLocal(base)).length;
-    return sameRoleCount ? `${base} ${sameRoleCount + 1}` : base;
-}
-
-function countWordToNumber(value) {
-    const text = String(value || '').toLowerCase();
-    const words = { two: 2, three: 3, four: 4, five: 5, six: 6 };
-    const number = Number(text);
-    return Number.isFinite(number) ? number : (words[text] || 1);
-}
-
-function singularSceneRole(value) {
-    return String(value || '').replace(/\b(men)\b/i, 'man').replace(/\b(women)\b/i, 'woman').replace(/s\b/i, '').trim();
-}
-
-function descriptorFromSceneNpcEvidence(evidence, role) {
-    const source = String(evidence || '').replace(/\s+/g, ' ').trim();
-    const roleText = String(role || '').replace(/\s+/g, ' ').trim();
-    const descriptorBits = [];
-    const adjectiveMatch = source.match(new RegExp(`\\b((?:(?:young|old|elderly|armored|hooded|female|male|tall|short|broad|thin|scarred|white-haired|dark-haired)\\s+){1,3}${escapeRegExpLocal(roleText)})\\b`, 'i'));
-    if (adjectiveMatch) descriptorBits.push(adjectiveMatch[1]);
-    const withMatch = source.match(/\bwith\s+([^.!?;,]{3,60})/i);
-    if (withMatch) descriptorBits.push(`with ${withMatch[1].trim()}`);
-    const wearingMatch = source.match(/\b(?:wearing|in)\s+([^.!?;,]{3,60})/i);
-    if (wearingMatch) descriptorBits.push(`in ${wearingMatch[1].trim()}`);
-    return descriptorBits.length ? descriptorBits.join(', ').slice(0, 120) : '';
-}
-
-function titleCase(value) {
-    return String(value || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .replace(/\b\w/g, char => char.toUpperCase());
-}
-
-function uniqueSceneNpcCandidates(candidates) {
-    const seen = new Set();
-    const result = [];
-    for (const candidate of candidates) {
-        const key = normalizeNameLocal(candidate.name);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        result.push(candidate);
-    }
-    return result;
-}
-
-function seedSceneNpcsFromMessage(messageOrId = null) {
-    const cfg = settings();
-    if (!cfg.enabled) return;
-    const message = typeof messageOrId === 'number' || typeof messageOrId === 'string'
-        ? getMessageById(messageOrId)
-        : messageOrId && typeof messageOrId === 'object'
-            ? messageOrId
-            : getContext().chat?.at(-1);
-    if (!isAssistantMessage(message)) return;
-
-    const text = messageText(message);
-    const candidates = sceneNpcCandidatesFromText(text);
-    if (!candidates.length) return;
-
-    let current = tracker();
-    let changed = false;
-    for (const candidate of candidates) {
-        if (current.npcs && Object.values(current.npcs).some(npc => normalizeNameLocal(npc?.name) === normalizeNameLocal(candidate.name))) {
-            if (!/\b(another|second|third|new|additional)\b/i.test(candidate.evidence)) {
-                continue;
-            }
-            candidate.name = nextAvailableSceneNpcName(current, candidate.name);
-        }
-        if (current.npcs && Object.values(current.npcs).some(npc => normalizeNameLocal(npc?.name) === normalizeNameLocal(candidate.name))) {
-            continue;
-        }
-        const before = JSON.stringify(current.npcs || {});
-        current = initializeSceneNpc(current, candidate.name, {
-            condition: candidate.role ? `present ${candidate.role}` : '',
-            descriptor: candidate.descriptor || '',
-            aliases: uniqueLocal([candidate.descriptor].filter(Boolean)),
-            explicitPreset: explicitPresetForSceneNpc(candidate, text, activePersonaText()),
-            rank: rankForSceneRole(candidate.role),
-            mainStat: mainStatForSceneRole(candidate.role),
-        });
-        changed = changed || JSON.stringify(current.npcs || {}) !== before;
-    }
-    if (changed) {
-        chat_metadata[METADATA_KEY] = current;
-        saveTracker();
-        renderPanel();
-        console.debug('[RP Engine Tracker] Seeded scene NPCs from GM reply', candidates);
-    }
-}
-
-function seedSceneNpcsFromRecentAssistantMessages(chat = null) {
-    const sourceChat = Array.isArray(chat) && chat.length
-        ? chat
-        : Array.isArray(getContext().chat) && getContext().chat.length
-            ? getContext().chat
-            : liveChat;
-    if (!Array.isArray(sourceChat) || !sourceChat.length) return;
-
-    let latestUserIndex = -1;
-    for (let i = sourceChat.length - 1; i >= 0; i--) {
-        if (isUserMessage(sourceChat[i])) {
-            latestUserIndex = i;
-            break;
-        }
-    }
-    if (latestUserIndex <= 0) return;
-
-    for (let i = latestUserIndex - 1; i >= 0; i--) {
-        const message = sourceChat[i];
-        if (isUserMessage(message)) break;
-        if (isAssistantMessage(message)) seedSceneNpcsFromMessage(message);
-    }
-}
-
-function nextAvailableSceneNpcName(current, baseName) {
-    const base = String(baseName || '').replace(/\s+\d+$/g, '').trim() || 'NPC';
-    const existing = new Set(Object.values(current?.npcs || {}).map(npc => normalizeNameLocal(npc?.name)));
-    for (let i = 2; i < 100; i++) {
-        const candidate = `${base} ${i}`;
-        if (!existing.has(normalizeNameLocal(candidate))) return candidate;
-    }
-    return `${base} ${Date.now()}`;
-}
-
-function rankForSceneRole(role) {
-    if (/\b(captain|knight|soldier|guard|watchman|sentry|assassin|bandit|mage|witch|hunter)\b/i.test(role)) return 'Trained';
-    return 'unknown';
-}
-
-function mainStatForSceneRole(role) {
-    if (/\b(captain|knight|soldier|guard|watchman|sentry|assassin|bandit|hunter)\b/i.test(role)) return 'PHY';
-    if (/\b(mage|witch|healer|priest|priestess)\b/i.test(role)) return 'MND';
-    if (/\b(merchant|innkeeper|noble|messenger)\b/i.test(role)) return 'CHA';
-    return 'unknown';
-}
-
-function explicitPresetForSceneNpc(candidate, sceneText, personaText) {
-    const evidence = `${candidate?.evidence || ''}\n${sceneText || ''}`;
-    if (/\b(?:lover|spouse|wife|husband|partner|girlfriend|boyfriend|beloved|in love|already intimate|romantically involved|willing toward|receptive toward)\b/i.test(evidence)) {
-        return 'romanticOpen';
-    }
-    if (/\b(?:hates?|hated|distrusts?|distrusted|wanted|bad reputation|infamous|enemy of|hostile to|resentful toward|suspicious of)\b[\s\S]{0,80}\b(?:you|user|Aelemar|traveler|demon|outsider)\b/i.test(evidence)
-        || /\b(?:you|user|Aelemar|traveler|demon|outsider)\b[\s\S]{0,80}\b(?:hated|distrusted|wanted|bad reputation|infamous|enemy)\b/i.test(evidence)) {
-        return 'userBadRep';
-    }
-    if (/\b(?:trusts?|trusted|admires?|admired|praised|good reputation|known favorably|friend of|friendly to|welcomes?)\b[\s\S]{0,80}\b(?:you|user|Aelemar|traveler|demon|outsider)\b/i.test(evidence)
-        || /\b(?:you|user|Aelemar|traveler|demon|outsider)\b[\s\S]{0,80}\b(?:trusted|admired|praised|good reputation|known favorably|welcomed)\b/i.test(evidence)) {
-        return 'userGoodRep';
-    }
-    if (userIsExplicitlyVisiblyNonHuman(personaText) && !npcHasExplicitFearImmunity(evidence)) {
-        return 'userNonHuman';
-    }
-    return 'neutralDefault';
-}
-
-function userIsExplicitlyVisiblyNonHuman(personaText) {
-    const source = String(personaText || '');
-    return /\b(?:visibly|obvious|noticeable|appears?|looks?)\b[\s\S]{0,160}\b(?:inhuman|demonic|demon|monstrous|undead|bestial|eldritch|construct|horns?|tail|claws?|slit pupils?)\b/i.test(source)
-        || /\b(?:race|species)\s*[:=]\s*(?:demon|undead|construct|beast|monster|eldritch)\b/i.test(source)
-        || /\b(?:horns?|tail|claws?|slit pupils?)\b[\s\S]{0,220}\b(?:visually obvious|obvious|noticeable|full-blooded demon|inhuman|demonic)\b/i.test(source);
-}
-
-function npcHasExplicitFearImmunity(evidence) {
-    return /\b(?:fear immunity|immune to fear|cannot be frightened|unaffected by fear|mental immunity|immune to mental|same kind|same nature|demon lord|god|deity|superior being|ancient dragon|archdemon)\b/i.test(String(evidence || ''));
 }
 
 function preferKnownValue(primary, fallback, emptyValue = 'unknown') {
@@ -3623,8 +3439,9 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
                 display: buildMechanicsDisplayPayload(cached, handoff, latestUserMessage, chat),
             };
             bindMechanicsDisplayToTrigger(lastMechanicsHandoff.display);
+            pendingAuditDisplayAfterGeneration = structuredClone(lastMechanicsHandoff.display);
             saveTracker();
-            renderPanel();
+            pendingPanelRefreshAfterGeneration = true;
             console.debug('[RP Engine Tracker] Reused bound mechanics artifact for regeneration/swipe.');
             return;
         }
@@ -3667,9 +3484,10 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
             display: buildMechanicsDisplayPayload(result, handoff, latestUserMessage, chat),
         };
         bindMechanicsDisplayToTrigger(lastMechanicsHandoff.display);
+        pendingAuditDisplayAfterGeneration = structuredClone(lastMechanicsHandoff.display);
 
         saveTracker();
-        renderPanel();
+        pendingPanelRefreshAfterGeneration = true;
         queueNpcArchiveSync(result);
         console.debug('[RP Engine Tracker] Interceptor complete', {
             injected: Boolean(handoff),
@@ -3686,8 +3504,17 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
             latestUserMessage,
         };
         chat_metadata[METADATA_KEY] = current;
+        pendingAuditDisplayAfterGeneration = {
+            version: 1,
+            at: current.lastAudit.at,
+            triggerUserMessage: latestUserMessage,
+            triggerUserMessageId: findLatestUserMessageIdByText(latestUserMessage, chat),
+            resolverSchema: cloneAuditForDisplay(current.lastAudit),
+            narrationHandoff: '',
+            mechanicsArtifact: null,
+        };
         saveTracker();
-        renderPanel();
+        pendingPanelRefreshAfterGeneration = true;
         clearMechanicsHandoff();
         console.error('[RP Engine Tracker] Mechanics interceptor failed.', error);
     } finally {
@@ -3700,32 +3527,46 @@ globalThis.rpEngineTrackerInterceptor = rpEngineTrackerInterceptor;
 jQuery(() => {
     settings();
     tracker();
+    updateVisibleTrackerSnapshot();
     setupUi();
     eventSource.on(event_types.CHAT_CHANGED, () => {
         tracker();
+        updateVisibleTrackerSnapshot();
         renderPanel();
         renderMechanicsBlocks();
         maybeOfferCharacterCreator();
     });
     eventSource.on(event_types.MESSAGE_UPDATED, (messageId) => {
+        if (!pendingPanelRefreshAfterGeneration) updateVisibleTrackerSnapshot();
         renderPanel();
         renderMechanicsBlocks();
     });
     eventSource.on(event_types.MESSAGE_SWIPED, () => {
+        if (!pendingPanelRefreshAfterGeneration) updateVisibleTrackerSnapshot();
         renderPanel();
         renderMechanicsBlocks();
     });
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, () => {
+        if (pendingPanelRefreshAfterGeneration) {
+            pendingPanelRefreshAfterGeneration = false;
+            revealPendingAuditDisplay();
+            updateVisibleTrackerSnapshot();
+            renderPanel();
+        }
         renderMechanicsBlocks();
     });
     eventSource.on(event_types.MESSAGE_DELETED, () => {
         rollbackLastTurnIfTriggerDeleted();
+        updateVisibleTrackerSnapshot();
         renderPanel();
         renderMechanicsBlocks();
     });
     eventSource.on(event_types.CHAT_DELETED, deleteNpcArchiveEntriesForChat);
     eventSource.on(event_types.GROUP_CHAT_DELETED, deleteNpcArchiveEntriesForChat);
 });
+
+
+
 
 
 
