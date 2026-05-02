@@ -54,11 +54,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.207';
+} from './engine.js?v=0.1.209';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.207';
-const MECHANICS_ARTIFACT_VERSION = 5;
+const EXT_VERSION = '0.1.209';
+const MECHANICS_ARTIFACT_VERSION = 7;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -354,6 +354,57 @@ function syncUserIdentityFromPersona(current) {
     if (userStats) {
         current.user.stats = userStats;
     }
+    current.user.profile = buildUserProfileFromPersona(personaText);
+    seedInventoryFromPersona(current, personaText);
+}
+
+function buildUserProfileFromPersona(personaText) {
+    const text = String(personaText || '');
+    return {
+        race: extractPersonaField(text, 'Race'),
+        appearance: compactPersonaAppearance(text),
+        visiblyNonHuman: /\b(demon|demonic|monster|monstrous|undead|bestial|eldritch|construct|inhuman|horns?|tail|claws?|slit pupils?|visually obvious|looks like a full-blooded demon)\b/i.test(text) ? 'Y' : 'N',
+        fullPersona: text,
+    };
+}
+
+function seedInventoryFromPersona(current, personaText) {
+    if (!current || Array.isArray(current.inventory) && current.inventory.length) return;
+    const inventory = parsePersonaInventory(personaText);
+    if (inventory.length) {
+        current.inventory = inventory;
+    }
+}
+
+function parsePersonaInventory(personaText) {
+    const text = String(personaText || '');
+    const section = text.match(/(?:^|\n)\s*(?:[#*= -]*)\s*(?:🎒\s*)?INVENTORY\b[^\n\r]*\n([\s\S]*?)(?=\n\s*(?:[#*= -]*)\s*(?:[A-Z][A-Z /]+|[📜👤🌙📊✨📓][^\n\r]*)\b|$)/i)?.[1] || '';
+    if (!section) return [];
+    return section
+        .split(/\r?\n/)
+        .map(line => line.replace(/^\s*[-*•]\s*/, '').trim())
+        .filter(Boolean)
+        .filter(line => !/^=+$/.test(line))
+        .map(line => line.replace(/\s+/g, ' ').slice(0, 160))
+        .slice(0, 30);
+}
+
+function extractPersonaField(text, label) {
+    const match = String(text || '').match(new RegExp(`\\b${label}\\s*:\\s*([^\\n\\r|]+)`, 'i'));
+    return cleanUiText(match?.[1] || '').slice(0, 120);
+}
+
+function compactPersonaAppearance(text) {
+    const source = String(text || '');
+    const labels = ['Race', 'Appearance', 'Eyes', 'Horns', 'Tail', 'Claws', 'Skin', 'Hands', 'Feet'];
+    return labels
+        .map(label => {
+            const value = extractPersonaField(source, label);
+            return value ? `${label}: ${value}` : '';
+        })
+        .filter(Boolean)
+        .join(' | ')
+        .slice(0, 500);
 }
 
 function parsePersonaName(text) {
@@ -678,12 +729,13 @@ function buildResolverContext(currentTracker, latestUserMessage = '', chatExcerp
         scene: current.scene,
         worldClock: compactClockForResolver(current.worldClock),
         user: current.user,
+        userProfile: current.user?.profile || {},
         presentNpcNames: (current.presentNpcIds || [])
             .map(id => current.npcs?.[id]?.name)
             .filter(Boolean),
         currentInteractionTarget: current.currentInteractionTarget || '',
         relevantNpcs,
-        inventory: relevantListForResolver(current.inventory, text, 16),
+        inventory: current.inventory.slice(0, 30),
         pendingTasks: relevantTasksForResolver(current.pendingTasks, text, 8),
         recentAudit: compactAuditForResolver(current.lastAudit),
     };

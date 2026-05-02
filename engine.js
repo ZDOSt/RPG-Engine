@@ -2334,7 +2334,7 @@ function describeProactivityNarration(name, action) {
 }
 
 function describeProactivityNarrationCompact(name, action) {
-    const target = action.TargetsUser === 'Y' ? 'targets user' : 'does not target user';
+    const target = action.TargetsUser === 'Y' ? 'targets user with aggression/boundary pressure' : 'non-hostile initiative';
     const counter = action.CounterBonus ? `counterBonus=${action.CounterBonus}` : '';
     return `${name}: intent=${action.Intent}; impulse=${action.Impulse}; ${target}${counter ? `; ${counter}` : ''}`;
 }
