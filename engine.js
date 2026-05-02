@@ -2147,7 +2147,7 @@ function describeResolutionNarration(packet) {
 function describeResolutionNarrationCompact(packet) {
     const goal = packet.GOAL || 'user action';
     const decisive = packet.DecisiveAction || goal;
-    const targets = joinList([...(packet.ActionTargets || []), ...(packet.OppTargets?.NPC || []), ...(packet.OppTargets?.ENV || [])]);
+    const targets = joinList(unique([...(packet.ActionTargets || []), ...(packet.OppTargets?.NPC || []), ...(packet.OppTargets?.ENV || [])]));
     const targetText = targets ? ` target=${targets};` : '';
     const successText = packet.OutcomeOnSuccess ? ` successMeans=${packet.OutcomeOnSuccess};` : '';
     const failureText = packet.OutcomeOnFailure ? ` failureMeans=${packet.OutcomeOnFailure};` : '';
@@ -3501,6 +3501,10 @@ function sanitizeExtraction(value) {
         npcStakes: Array.isArray(input.npcStakes) ? input.npcStakes.map(sanitizeNpcStake).filter(x => x.NPC) : [],
         inventoryDeltas: Array.isArray(input.inventoryDeltas) ? input.inventoryDeltas.map(sanitizeInventoryDelta).filter(x => x.item) : [],
         taskDeltas: Array.isArray(input.taskDeltas) ? input.taskDeltas.map(sanitizeTaskDelta).filter(x => x.task) : [],
+        modelSchema: input.modelSchema && typeof input.modelSchema === 'object' ? structuredClone(input.modelSchema) : null,
+        originalModelSchema: input.originalModelSchema && typeof input.originalModelSchema === 'object' ? structuredClone(input.originalModelSchema) : null,
+        schemaRepaired: yn(input.schemaRepaired),
+        schemaValidationIssues: Array.isArray(input.schemaValidationIssues) ? cleanList(input.schemaValidationIssues).slice(0, 12) : [],
     };
     return normalizeExtractionMechanics(clean);
 }
@@ -3508,6 +3512,9 @@ function sanitizeExtraction(value) {
 function normalizeExtractionMechanics(clean) {
     const hasLivingOpposition = clean.oppTargetsNpc.length > 0;
     const hasEnvironmentOpposition = clean.oppTargetsEnv.length > 0;
+    const directOrOpposed = new Set([...clean.actionTargets, ...clean.oppTargetsNpc].map(normalizeName));
+    clean.benefitedObservers = clean.benefitedObservers.filter(name => !directOrOpposed.has(normalizeName(name)));
+    clean.harmedObservers = clean.harmedObservers.filter(name => !directOrOpposed.has(normalizeName(name)));
 
     if (hasLivingOpposition && clean.oppStat === 'ENV') {
         clean.oppStat = clean.goalKind === 'IntimacyAdvanceVerbal' ? 'MND' : 'PHY';
