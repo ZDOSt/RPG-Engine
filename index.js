@@ -54,11 +54,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.206';
+} from './engine.js?v=0.1.207';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.206';
-const MECHANICS_ARTIFACT_VERSION = 4;
+const EXT_VERSION = '0.1.207';
+const MECHANICS_ARTIFACT_VERSION = 5;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -838,6 +838,9 @@ function expandMechanicsPass(pass, latestUserMessage) {
 }
 
 function latestUserMessageHasExplicitTimeChange(text) {
+    if (/\b(go to sleep|fall asleep|sleep for the night|turn in for the night|rest for the night)\b/i.test(String(text || ''))) {
+        return true;
+    }
     const source = String(text || '').toLowerCase();
     const outsideQuotes = source.replace(/["“”][\s\S]*?["“”]/g, ' ');
     if (/\b(skip|timeskip|time skip|wait|sleep|go to sleep|fall asleep|rest until|after|later|pass(?:es|ed)?|until|overnight)\b/.test(outsideQuotes)
@@ -858,6 +861,34 @@ function validateTimeExtractionForLatestUserMessage(extraction, latestUserMessag
     extraction.timeDeltaMinutes = 0;
     extraction.timeSkipReason = '';
     return extraction;
+}
+
+function scrubUnauthorizedTimeAdvance(result, latestUserMessage) {
+    if (!result || latestUserMessageHasExplicitTimeChange(latestUserMessage)) return result;
+    const extraction = result.audit?.extraction || {};
+    const clock = result.tracker?.worldClock || {};
+    const packet = result.packet || {};
+    const unauthorizedExplicit = Number(extraction.timeDeltaMinutes || 0) !== 0
+        || /^Explicit skip\b/i.test(String(clock.lastAdvance || ''))
+        || /^explicit-skip/i.test(String(clock.source || ''))
+        || /^Explicit skip\b/i.test(String(packet.TimeAdvance || ''));
+    if (!unauthorizedExplicit) return result;
+
+    extraction.timeDeltaMinutes = 0;
+    extraction.timeSkipReason = '';
+    if (result.tracker?.worldClock) {
+        result.tracker.worldClock.lastAdvance = 'No world-time advance this turn.';
+        result.tracker.worldClock.source = 'no-user-time-change';
+    }
+    if (result.packet) {
+        result.packet.TimeAdvance = 'No world-time advance this turn.';
+        result.packet.SceneTime = result.tracker?.scene?.time || result.packet.SceneTime || '';
+    }
+    if (result.audit?.resolutionPacket) {
+        result.audit.resolutionPacket.TimeAdvance = result.packet?.TimeAdvance || '';
+        result.audit.resolutionPacket.SceneTime = result.packet?.SceneTime || '';
+    }
+    return result;
 }
 
 function arrayFromCompact(value) {
@@ -1117,10 +1148,12 @@ async function runResolver(chat) {
     console.debug('[RP Engine Tracker] Resolver start', { latestUserMessage, hasFallback: Object.keys(fallback).length > 0 });
 
     if (fallback.resolverBypass) {
+        fallback = validateTimeExtractionForLatestUserMessage(fallback, latestUserMessage);
         const resolved = resolveTurn(fallback, current, { userStats });
         applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
         resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
         resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
+        scrubUnauthorizedTimeAdvance(resolved, latestUserMessage);
         console.debug('[RP Engine Tracker] Resolver bypassed for deterministic fallback', resolved.packet);
         return resolved;
     }
@@ -1157,6 +1190,7 @@ async function runResolver(chat) {
     applyTimeTracking(resolved.tracker, current, resolved.audit?.extraction);
     resolved.packet.SceneTime = resolved.tracker.scene?.time || '';
     resolved.packet.TimeAdvance = resolved.tracker.worldClock?.lastAdvance || '';
+    scrubUnauthorizedTimeAdvance(resolved, latestUserMessage);
     console.debug('[RP Engine Tracker] Resolver complete', {
         packet: resolved.packet,
         elapsedMs: Date.now() - resolverStartedAt,
