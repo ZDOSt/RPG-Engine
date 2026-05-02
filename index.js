@@ -54,11 +54,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.209';
+} from './engine.js?v=0.1.210';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.209';
-const MECHANICS_ARTIFACT_VERSION = 7;
+const EXT_VERSION = '0.1.210';
+const MECHANICS_ARTIFACT_VERSION = 8;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -475,7 +475,7 @@ function expandMechanicsMode(value) {
     return ['NO_STAKES', 'STAKES', 'SYSTEM_UPDATE', 'OOC_STOP'].includes(mode) ? mode : 'NO_STAKES';
 }
 
-function shouldUseDeterministicFallback(latestUserMessage, fallback = {}) {
+function shouldUseDeterministicFallback(latestUserMessage, fallback = {}, currentTracker = null) {
     const text = String(latestUserMessage || '').trim();
     if (!text) return false;
     if (fallback?.resolverBypass) return true;
@@ -484,6 +484,7 @@ function shouldUseDeterministicFallback(latestUserMessage, fallback = {}) {
     if (Array.isArray(fallback?.oppTargetsNpc) && fallback.oppTargetsNpc.length) return false;
     if (Array.isArray(fallback?.oppTargetsEnv) && fallback.oppTargetsEnv.length) return false;
     if (fallback?.hasStakes === 'Y') return false;
+    if (hasUntrackedDirectNpcTarget(fallback, currentTracker)) return false;
 
     if (/^\s*\(\((?!\()[\s\S]*?(?<!\))\)\)\s*$/.test(text)) return true;
     if (/^\s*\(\(\(/.test(text)) return false;
@@ -495,6 +496,12 @@ function shouldUseDeterministicFallback(latestUserMessage, fallback = {}) {
     const systemIntent = /\b(no longer present|enters?|arrives?|leaves?|exits?|dead|forgotten|retired|inactive|wait(?:ing)?|sleep|rest|travel|later|after \d+|time skip|timeskip|minutes?|hours?|days?|accept(?:ed)? (?:the )?(?:task|quest|job)|complete(?:d)? (?:the )?(?:task|quest|job)|cancel(?:ed|led)? (?:the )?(?:task|quest|job))\b/i;
 
     return fallback?.hasStakes === 'N' && (simpleIntent.test(text) || systemIntent.test(text));
+}
+
+function hasUntrackedDirectNpcTarget(fallback = {}, currentTracker = null) {
+    const targets = Array.isArray(fallback.actionTargets) ? fallback.actionTargets : [];
+    if (!targets.length) return false;
+    return targets.some(name => !findNpcIdLocal(currentTracker || {}, name));
 }
 
 const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
@@ -1211,7 +1218,7 @@ async function runResolver(chat) {
     }
 
     let parsed = null;
-    const useFallbackOnly = shouldUseDeterministicFallback(latestUserMessage, fallback);
+    const useFallbackOnly = shouldUseDeterministicFallback(latestUserMessage, fallback, current);
     const mechanicsResult = useFallbackOnly
         ? null
         : await runMechanicsPass({
