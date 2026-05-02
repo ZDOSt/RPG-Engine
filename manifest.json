@@ -3,10 +3,10 @@
     "loading_order": 100,
     "requires": [],
     "optional": [],
-    "js": "index.js?v=0.1.204",
-    "css": "style.css?v=0.1.204",
+    "js": "index.js?v=0.1.206",
+    "css": "style.css?v=0.1.206",
     "author": "Codex",
-    "version": "0.1.204",
+    "version": "0.1.206",
     "homePage": "https://github.com/SillyTavern/SillyTavern",
     "generate_interceptor": "rpEngineTrackerInterceptor"
 }

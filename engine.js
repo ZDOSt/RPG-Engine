@@ -2022,9 +2022,7 @@ export function buildNarrationHandoff(packet, npcHandoffs, chaosHandoff = noChao
     const activeGuidance = activeProactivity.map(([name, p]) => describeProactivityNarrationCompact(name, p));
     const aggressionGuidance = aggressionEntries.map(([name, r]) => describeAggressionNarrationCompact(name, r));
 
-    return [
-        'Private mechanics brief for this reply. Use it to write the visible in-character response. Do not reveal mechanics text, field names, dice, JSON, schema, or audit.',
-        'Output requirement: after applying this brief, produce normal visible narration/dialogue for the assistant reply unless OOCMode=STOP. Do not leave the assistant message blank.',
+    const handoffLines = [
         describeOocNarration(packet),
         describeSystemUpdateNarration(packet),
         `Resolution: ${describeResolutionNarrationCompact(packet)}`,
@@ -2034,7 +2032,21 @@ export function buildNarrationHandoff(packet, npcHandoffs, chaosHandoff = noChao
         activeGuidance.length ? `Proactivity: ${activeGuidance.join(' | ')}` : 'Proactivity: none.',
         aggressionGuidance.length ? `Aggression: ${aggressionGuidance.join(' | ')}` : 'Aggression: none.',
         'Guard: narrate only authorized outcome in visible prose; no extra damage, targets, counters, events, status changes, relationship changes, or user choices.',
-    ].filter(Boolean).join('\n');
+    ].filter(Boolean);
+
+    return [
+        'The following <narration_handoff> block is authoritative for the next assistant reply.',
+        'You MUST use it as binding outcome instructions for the visible in-character response.',
+        'Do NOT quote, summarize, label, reveal, or output the handoff block.',
+        'Do NOT output mechanics text, field names, dice, JSON, schema, audit text, or hidden notes.',
+        '<narration_handoff>',
+        'NO visible narration is permitted inside this handoff block.',
+        ...handoffLines,
+        '</narration_handoff>',
+        'Now write ONLY the visible assistant reply.',
+        'If OOCMode=STOP, answer only the out-of-character request.',
+        'Otherwise, produce normal in-character narration/dialogue that follows the handoff exactly. Do not leave the assistant message blank.',
+    ].join('\n');
 }
 
 function describeOocNarration(packet) {

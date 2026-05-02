@@ -54,11 +54,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.204';
+} from './engine.js?v=0.1.206';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.204';
-const MECHANICS_ARTIFACT_VERSION = 2;
+const EXT_VERSION = '0.1.206';
+const MECHANICS_ARTIFACT_VERSION = 4;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -1230,6 +1230,7 @@ function attachTurnRollback(result, triggerUserMessage, snapshot) {
 function hydrateResultFromMechanicsArtifact(payload, latestUserMessage = '') {
     const artifact = payload?.mechanicsArtifact;
     if (!artifact?.trackerSnapshot || !artifact?.packet) return null;
+    if (Number(artifact.version || 0) < MECHANICS_ARTIFACT_VERSION) return null;
     const trackerSnapshot = createTracker(artifact.trackerSnapshot);
     const audit = artifact.audit ? structuredClone(artifact.audit) : trackerSnapshot.lastAudit;
     const result = {
@@ -1323,7 +1324,9 @@ function latestSurvivingMechanicsArtifact(sourceChat) {
         const message = chat[i];
         if (!isUserMessage(message)) continue;
         const payload = message?.[MESSAGE_MECHANICS_KEY];
-        if (payload?.mechanicsArtifact?.trackerSnapshot && payload?.mechanicsArtifact?.packet) {
+        if (payload?.mechanicsArtifact?.trackerSnapshot
+            && payload?.mechanicsArtifact?.packet
+            && Number(payload.mechanicsArtifact.version || 0) >= MECHANICS_ARTIFACT_VERSION) {
             return { index: i, payload };
         }
     }
@@ -1366,7 +1369,7 @@ function applyTimeTracking(current, previous, extraction = {}) {
 
     if (!clock.enabled || extraction?.oocMode === 'STOP') {
         clock.lastRealTimestamp = Date.now();
-        clock.lastAdvance = clock.enabled ? clock.lastAdvance : 'World time tracking off.';
+        clock.lastAdvance = clock.enabled ? 'No world-time advance this turn.' : 'World time tracking off.';
         clock.source = clock.enabled ? clock.source : 'disabled';
         return;
     }
@@ -1438,6 +1441,9 @@ function applyTimeTracking(current, previous, extraction = {}) {
     } else if (!current.scene.time) {
         clock.lastAdvance = 'Clock waiting for a parseable scene time or explicit time skip.';
         clock.source = 'unset';
+    } else {
+        clock.lastAdvance = 'No world-time advance this turn.';
+        clock.source = 'no-change';
     }
 
     clock.lastRealTimestamp = now;
@@ -1995,6 +2001,8 @@ function isSameTurnRegeneration(type, chat) {
     const normalizedType = String(type || '').toLowerCase();
     if (!['regenerate', 'swipe'].includes(normalizedType)) return false;
     if (!lastMechanicsHandoff.handoff || !lastMechanicsHandoff.trackerSnapshot) return false;
+    const artifactVersion = Number(lastMechanicsHandoff.display?.mechanicsArtifact?.version || 0);
+    if (artifactVersion < MECHANICS_ARTIFACT_VERSION) return false;
     const latestUserMessage = latestUserMessageFromAvailableChats(chat);
     const triggerUserMessage = lastMechanicsHandoff.trackerSnapshot?.lastAudit?.triggerUserMessage
         || tracker()?.lastAudit?.triggerUserMessage
@@ -2044,7 +2052,7 @@ function buildMechanicsDisplayPayload(result, handoff, latestUserMessage, source
 
 function latestAuditDisplayPayload() {
     const current = tracker();
-    if (current?.lastAuditDisplay?.resolverSchema) {
+    if (isCurrentMechanicsDisplayPayload(current?.lastAuditDisplay)) {
         return current.lastAuditDisplay;
     }
     if (pendingAuditDisplayAfterGeneration || pendingPanelRefreshAfterGeneration) {
@@ -2061,6 +2069,12 @@ function latestAuditDisplayPayload() {
         narrationHandoff: '',
         mechanicsArtifact: null,
     };
+}
+
+function isCurrentMechanicsDisplayPayload(payload) {
+    if (!payload?.resolverSchema) return false;
+    if (!payload.mechanicsArtifact) return true;
+    return Number(payload.mechanicsArtifact.version || 0) >= MECHANICS_ARTIFACT_VERSION;
 }
 
 function buildMechanicsArtifact(result) {
@@ -2623,10 +2637,10 @@ function setupUi() {
         $('body').append(`
             <div id="rp_engine_tracker_panel">
                 <div class="rp-engine-header">
-                    <strong class="rp-engine-title">RP Engine</strong>
                     <div class="rp-engine-actions">
                         <button id="rp_engine_tracker_collapse" title="Collapse tracker"><i class="fa-solid fa-book-open"></i></button>
                     </div>
+                    <strong class="rp-engine-title">RP Engine</strong>
                 </div>
                 <div class="rp-engine-body"></div>
             </div>

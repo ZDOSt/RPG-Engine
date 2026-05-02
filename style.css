@@ -23,7 +23,7 @@
 .rp-engine-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 8px;
     padding: 8px 10px;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
@@ -70,6 +70,14 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex: 0 0 auto;
+    order: 0;
+}
+
+.rp-engine-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    order: 1;
 }
 
 .rp-engine-actions button {
