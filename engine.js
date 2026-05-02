@@ -2015,7 +2015,8 @@ export function buildNarrationHandoff(packet, npcHandoffs, chaosHandoff = noChao
     const aggressionGuidance = aggressionEntries.map(([name, r]) => describeAggressionNarrationCompact(name, r));
 
     return [
-        'Private mechanics brief for this reply. Do not reveal.',
+        'Private mechanics brief for this reply. Use it to write the visible in-character response. Do not reveal mechanics text, field names, dice, JSON, schema, or audit.',
+        'Output requirement: after applying this brief, produce normal visible narration/dialogue for the assistant reply unless OOCMode=STOP. Do not leave the assistant message blank.',
         describeOocNarration(packet),
         describeSystemUpdateNarration(packet),
         `Resolution: ${describeResolutionNarrationCompact(packet)}`,
@@ -2024,7 +2025,7 @@ export function buildNarrationHandoff(packet, npcHandoffs, chaosHandoff = noChao
         `Chaos: ${describeChaosNarrationCompact(chaos)}`,
         activeGuidance.length ? `Proactivity: ${activeGuidance.join(' | ')}` : 'Proactivity: none.',
         aggressionGuidance.length ? `Aggression: ${aggressionGuidance.join(' | ')}` : 'Aggression: none.',
-        'Guard: narrate only authorized outcome; no extra damage, targets, counters, events, status changes, relationship changes, or user choices.',
+        'Guard: narrate only authorized outcome in visible prose; no extra damage, targets, counters, events, status changes, relationship changes, or user choices.',
     ].filter(Boolean).join('\n');
 }
 
