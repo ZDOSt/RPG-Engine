@@ -65,6 +65,7 @@ export const DEFAULT_TRACKER = Object.freeze({
         },
     },
     lastAudit: null,
+    lastAuditDisplay: null,
     characterCreator: {
         offered: false,
         completed: false,
@@ -122,6 +123,9 @@ export const RESOLVER_SCHEMA = Object.freeze({
                     additionalProperties: false,
                     properties: {
                         name: { type: 'string' },
+                        aliases: { type: 'array', items: { type: 'string' } },
+                        descriptor: { type: 'string' },
+                        revealedFrom: { type: 'string' },
                         present: { type: 'boolean' },
                         position: { type: 'string' },
                         condition: { type: 'string' },
@@ -231,6 +235,12 @@ export function createTracker(existing = null) {
     delete tracker.scene.clock;
     tracker.presentNpcIds = Array.isArray(tracker.presentNpcIds) ? tracker.presentNpcIds : [];
     tracker.npcs = tracker.npcs && typeof tracker.npcs === 'object' ? tracker.npcs : {};
+    for (const npc of Object.values(tracker.npcs)) {
+        if (!npc || typeof npc !== 'object') continue;
+        npc.aliases = cleanList(Array.isArray(npc.aliases) ? npc.aliases : []);
+        npc.descriptor = cleanText(npc.descriptor);
+        npc.revealedFrom = cleanText(npc.revealedFrom);
+    }
     tracker.inventory = Array.isArray(tracker.inventory) ? tracker.inventory : [];
     tracker.quests = Array.isArray(tracker.quests) ? tracker.quests : [];
     tracker.pendingTasks = Array.isArray(tracker.pendingTasks) ? tracker.pendingTasks : [];
@@ -513,10 +523,12 @@ export function buildResolverPrompt({ chatExcerpt, latestUserMessage, tracker, u
         '- Use benefitedObservers/harmedObservers only when their stakes materially change: safety, resources, status, autonomy, or explicit goal progress. Do not use them for mere emotional tone or witnessing unless stakes change.',
         '- If the user helps an NPC by removing danger/obstacle, that NPC may be benefitedObserver even if not directly targeted.',
         '- If the user harms an NPC, steals from them, endangers them, violates their autonomy, or worsens their situation, they may be actionTarget/opposition or harmedObserver depending on directness.',
-        '- If the user acts toward the active character by direct address, pronoun, or one-NPC scene context, include that character by name.',
-        '- If a list has no explicit entries, return an empty list.',
-        '- npcInScene: all living NPCs the user directly interacted with, plus benefited/harmed observers. Include the active character if the user acts toward them by name or direct second-person context.',
-        '',
+    '- If the user acts toward the active character by direct address, pronoun, or one-NPC scene context, include that character by name.',
+    '- If a list has no explicit entries, return an empty list.',
+    '- npcInScene: all living NPCs the user directly interacted with, plus benefited/harmed observers. Include the active character if the user acts toward them by name or direct second-person context.',
+    '- If multiple same-role unnamed NPCs are present, use the exact tracker label, alias, or descriptor that identifies the intended one: Goblin 1, Goblin 2, Guard 1, the wounded goblin, the younger guard.',
+    '- If "the goblin", "the guard", or a similar role phrase is ambiguous among multiple present NPCs and context does not identify one, do not invent certainty. Use the explicit group phrase only if the user acts on the group; otherwise keep target lists conservative and state ambiguity in evidence.',
+    '',
         'STEP D: STAKES',
         '- Stakes are meaningful possible consequences tied to success or failure.',
         '- Stakes include physical risk, harm, danger, detection, material gain/loss, social status shift, loss of autonomy, meaningful obstacle resolution/failure, or explicit goal advancement/failure for the user or a specific living entity.',
@@ -587,9 +599,12 @@ export function buildResolverPrompt({ chatExcerpt, latestUserMessage, tracker, u
         '- Direct attacks, injury attempts, hostile physical contact, theft from an NPC, autonomy violations, or denied intimacy should be clear in targets/evidence so the relationship route can become Hostility or FearHostility.',
         '- If an NPC is present but the user did not interact with them and their stakes do not change, exclude them unless needed as benefited/harmed observer.',
         '',
-        'NPC INITIALIZATION GUIDANCE:',
-        '- Use npcFacts only for NPCs present/relevant this turn.',
-        '- explicitPreset=romanticOpen if NPC is explicitly already romantically/intimately involved with the user, willing toward the user, or in love.',
+    'NPC INITIALIZATION GUIDANCE:',
+    '- Use npcFacts only for NPCs present/relevant this turn.',
+    '- For multiple same-role NPCs, preserve distinct labels and descriptors from tracker context. Do not merge Goblin 1/Goblin 2/Goblin 3 unless the text explicitly treats them as one group.',
+    '- npcFacts.aliases may include old generic labels or observed descriptions. npcFacts.descriptor is a short identifying phrase from explicit observable context only.',
+    '- If an unnamed tracked NPC has their personal name revealed, return npcFacts with name as the revealed name and revealedFrom set to the old tracker label/alias. Preserve the old label as an alias; do not create a fresh unrelated NPC.',
+    '- explicitPreset=romanticOpen if NPC is explicitly already romantically/intimately involved with the user, willing toward the user, or in love.',
         '- explicitPreset=userBadRep if the user is explicitly hated, distrusted, wanted, or has bad reputation with this NPC/group.',
         '- explicitPreset=userGoodRep if the user is explicitly admired, trusted, praised, or known favorably.',
         '- explicitPreset=userNonHuman if user is explicitly visibly inhuman, demonic, monstrous, undead, bestial, eldritch, or construct-like AND NPC lacks explicit fear immunity.',
@@ -1826,10 +1841,15 @@ export function resolveTurn(extraction, tracker, options = {}) {
         ...clean.npcFacts.filter(x => x.present !== false).map(x => x.name),
     ].filter(Boolean));
     const absentNpcNames = new Set(clean.npcFacts.filter(x => x.present === false).map(x => normalizeName(x.name)));
-    const presentNpcNames = unique([...priorPresentNames, ...npcNames])
+    let presentNpcNames = unique([...priorPresentNames, ...npcNames])
         .filter(name => !absentNpcNames.has(normalizeName(name)));
 
-    nextTracker.presentNpcIds = presentNpcNames.map(name => ensureNpc(nextTracker, name, clean).id);
+    applyRevealedNpcNames(nextTracker, clean);
+    presentNpcNames = unique(presentNpcNames.map(name => {
+        const renamed = clean.npcFacts.find(fact => fact.revealedFrom && eqName(fact.revealedFrom, name));
+        return renamed?.name || name;
+    }));
+    nextTracker.presentNpcIds = unique(presentNpcNames.map(name => ensureNpc(nextTracker, name, clean).id));
 
     for (const fact of clean.npcFacts) {
         const npc = ensureNpc(nextTracker, fact.name, clean).npc;
@@ -1842,6 +1862,9 @@ export function resolveTurn(extraction, tracker, options = {}) {
         if (fact.position) npc.position = fact.position;
         if (fact.condition) npc.condition = fact.condition;
         if (fact.knowsUser) npc.knowsUser = fact.knowsUser;
+        if (fact.descriptor) npc.descriptor = fact.descriptor;
+        if (fact.revealedFrom) npc.revealedFrom = fact.revealedFrom;
+        if (fact.aliases?.length) npc.aliases = cleanList([...(npc.aliases || []), ...fact.aliases]);
         if (fact.override && fact.override !== 'unknown') npc.override = fact.override;
         if (fact.archiveStatus && fact.archiveStatus !== 'unknown') npc.archiveStatus = fact.archiveStatus;
         const explicitDisposition = sanitizeDisposition(fact.disposition);
@@ -2038,14 +2061,16 @@ function describeResolutionNarrationCompact(packet) {
 }
 
 function combatOutcomeInstruction(packet) {
+    const landed = Math.max(0, Number(packet.LandedActions) || 0);
+    const landedText = landed === 1 ? 'one declared attack' : `${landed} declared attacks`;
     switch (packet.Outcome) {
-        case 'dominant_impact': return 'critical success; up to 3 declared hostile actions may land strongly; no extra attacks.';
-        case 'solid_impact': return 'moderate success; up to 2 declared hostile actions may land meaningfully; no extra attacks.';
-        case 'light_impact': return 'minor success; one hostile action may land lightly/partially; no decisive advantage.';
+        case 'dominant_impact': return `critical success; the opponent is badly exposed, overwhelmed, or unable to stop the sequence; ${landedText} may land decisively; no extra attacks.`;
+        case 'solid_impact': return `moderate success; the attack lands solidly and produces clear impact or control; ${landedText} may land meaningfully; no extra attacks.`;
+        case 'light_impact': return 'minor success; one hostile action connects lightly, glances, clips, or only partially controls the target; no decisive advantage.';
         case 'stalemate': return 'stalemate; no landed hostile action, no counter opening, no winner.';
-        case 'checked': return 'minor failure; no hit lands; light counter opening only if proactivity/aggression uses it.';
-        case 'deflected': return 'moderate failure; no hit lands; medium counter opening only if proactivity/aggression uses it.';
-        case 'avoided': return 'critical failure; no hit lands; severe counter opening only if proactivity/aggression uses it.';
+        case 'checked': return 'minor failure; the attack is checked at contact or just before contact; no hit lands; light counter opening only if proactivity/aggression uses it.';
+        case 'deflected': return 'moderate failure; the opponent turns the attack aside, displaces it, or forces it off-line; no hit lands; medium counter opening only if proactivity/aggression uses it.';
+        case 'avoided': return 'critical failure; the opponent avoids it cleanly while the user overextends, misses badly, or ends out of position; no hit lands; severe counter opening only if proactivity/aggression uses it.';
         default: return 'resolve hostile action conservatively.';
     }
 }
@@ -2343,6 +2368,8 @@ export function serializeNpcArchiveEntry(npc, options = {}) {
         `ChatId: ${chatId || 'global'}`,
         `Name: ${cleanText(npc?.name) || 'Unknown NPC'}`,
         `Aliases: ${aliases.length ? aliases.join(', ') : cleanText(npc?.name) || 'Unknown NPC'}`,
+        `Descriptor: ${cleanText(npc?.descriptor) || 'unknown'}`,
+        `RevealedFrom: ${cleanText(npc?.revealedFrom) || 'unknown'}`,
         `Present: ${npc?.present ? 'Y' : 'N'}`,
         `ArchiveStatus: ${sanitizeArchiveStatus(npc?.archiveStatus)}`,
         `LastKnownLocation: ${cleanText(npc?.lastKnownLocation || options.location) || 'unknown'}`,
@@ -2393,6 +2420,8 @@ export function parseNpcArchiveContent(content) {
         chatId: field('ArchiveChatKey') || field('ChatId') || 'global',
         name,
         aliases,
+        descriptor: field('Descriptor') || '',
+        revealedFrom: field('RevealedFrom') || '',
         present: /^Y$/i.test(field('Present')),
         archiveStatus: sanitizeArchiveStatus(field('ArchiveStatus')),
         lastKnownLocation: field('LastKnownLocation'),
@@ -2422,11 +2451,14 @@ export function upsertArchivedNpc(tracker, archived, present = true) {
     const prior = existing?.npc || {};
     const disposition = normalizeLockedDisposition(sanitizeDisposition(archived.disposition) || prior.disposition || { B: 2, F: 2, H: 2 });
     const stats = sanitizeStats(archived.coreStats, prior.coreStats || { PHY: 2, MND: 2, CHA: 2 }, 1, 10);
+    const oldId = existing?.id;
     safeTracker.npcs[id] = {
         ...prior,
         id,
         name: archived.name,
         aliases: cleanList([...(Array.isArray(prior.aliases) ? prior.aliases : []), ...(archived.aliases || [])]),
+        descriptor: archived.descriptor || prior.descriptor || '',
+        revealedFrom: archived.revealedFrom || prior.revealedFrom || '',
         present,
         position: prior.position || '',
         condition: archived.condition || prior.condition || 'unknown',
@@ -2447,6 +2479,10 @@ export function upsertArchivedNpc(tracker, archived, present = true) {
         archiveStatus: sanitizeArchiveStatus(archived.archiveStatus || prior.archiveStatus),
         override: prior.override || 'NONE',
     };
+    if (oldId && oldId !== id) {
+        delete safeTracker.npcs[oldId];
+        safeTracker.presentNpcIds = (safeTracker.presentNpcIds || []).map(npcId => npcId === oldId ? id : npcId);
+    }
     if (present && !safeTracker.presentNpcIds.includes(id)) {
         safeTracker.presentNpcIds.push(id);
     }
@@ -2461,6 +2497,9 @@ export function initializeSceneNpc(tracker, name, fact = {}) {
         npcInScene: [npcName],
         npcFacts: [{
             name: npcName,
+            aliases: Array.isArray(fact.aliases) ? fact.aliases : [],
+            descriptor: fact.descriptor || '',
+            revealedFrom: fact.revealedFrom || '',
             present: true,
             position: fact.position || '',
             condition: fact.condition || '',
@@ -3131,6 +3170,41 @@ function initPresetForNpc(name, clean) {
     }
 }
 
+function applyRevealedNpcNames(tracker, clean) {
+    for (const fact of clean?.npcFacts || []) {
+        const newName = cleanNpcName(fact?.name);
+        const oldName = cleanNpcName(fact?.revealedFrom);
+        if (!newName || !oldName || eqName(newName, oldName)) continue;
+        const oldEntry = findNpc(tracker, oldName);
+        if (!oldEntry) continue;
+        const newId = makeNpcId(newName);
+        const oldNpc = oldEntry.npc;
+        const existingNew = tracker.npcs?.[newId];
+        const aliases = cleanList([
+            oldNpc.name,
+            oldName,
+            ...(Array.isArray(oldNpc.aliases) ? oldNpc.aliases : []),
+            ...(Array.isArray(fact.aliases) ? fact.aliases : []),
+        ]);
+        const renamed = {
+            ...oldNpc,
+            ...(existingNew || {}),
+            id: newId,
+            name: newName,
+            aliases,
+            descriptor: fact.descriptor || oldNpc.descriptor || existingNew?.descriptor || '',
+            revealedFrom: oldNpc.name || oldName,
+            present: oldNpc.present !== false || existingNew?.present === true,
+        };
+        tracker.npcs[newId] = renamed;
+        if (oldEntry.id !== newId) {
+            delete tracker.npcs[oldEntry.id];
+            tracker.presentNpcIds = (tracker.presentNpcIds || []).map(id => id === oldEntry.id ? newId : id);
+        }
+    }
+    tracker.presentNpcIds = unique(tracker.presentNpcIds || []);
+}
+
 function ensureNpc(tracker, name, clean) {
     const existing = findNpc(tracker, name);
     if (existing) return existing;
@@ -3140,6 +3214,9 @@ function ensureNpc(tracker, name, clean) {
     tracker.npcs[id] = {
         id,
         name,
+        aliases: cleanList([...(Array.isArray(fact?.aliases) ? fact.aliases : []), fact?.descriptor].filter(Boolean)),
+        descriptor: fact?.descriptor || '',
+        revealedFrom: fact?.revealedFrom || '',
         present: true,
         position: fact?.position || '',
         condition: fact?.condition || 'unknown',
@@ -3160,7 +3237,7 @@ function ensureNpc(tracker, name, clean) {
 function findNpc(tracker, name) {
     const wanted = normalizeName(name);
     for (const [id, npc] of Object.entries(tracker.npcs || {})) {
-        if (id === makeNpcId(name) || normalizeName(npc.name) === wanted) {
+        if (id === makeNpcId(name) || normalizeName(npc.name) === wanted || (npc.aliases || []).some(alias => normalizeName(alias) === wanted)) {
             return { id, npc };
         }
     }
@@ -3404,6 +3481,9 @@ function normalizeExtractionMechanics(clean) {
 function sanitizeNpcFact(x) {
     return {
         name: cleanText(x?.name),
+        aliases: cleanList(x?.aliases),
+        descriptor: cleanText(x?.descriptor),
+        revealedFrom: cleanText(x?.revealedFrom),
         present: x?.present === false ? false : (x?.present === true ? true : undefined),
         position: cleanText(x?.position),
         condition: cleanText(x?.condition),
