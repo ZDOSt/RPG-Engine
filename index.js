@@ -54,10 +54,10 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.220';
+} from './engine.js?v=0.1.222';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.220';
+const EXT_VERSION = '0.1.222';
 const MECHANICS_ARTIFACT_VERSION = 12;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
@@ -572,7 +572,7 @@ function applyEngineContextPrompt() {
     setExtensionPrompt(
         GROUNDING_PROMPT_KEY,
         RP_ENGINE_CONTEXT_PROMPT,
-        extension_prompt_types.IN_PROMPT,
+        extension_prompt_types.BEFORE_PROMPT,
         0,
         false,
         extension_prompt_roles.SYSTEM,
@@ -583,7 +583,7 @@ function clearEngineContextPrompt() {
     setExtensionPrompt(
         GROUNDING_PROMPT_KEY,
         '',
-        extension_prompt_types.IN_PROMPT,
+        extension_prompt_types.BEFORE_PROMPT,
         0,
         false,
         extension_prompt_roles.SYSTEM,
@@ -771,6 +771,188 @@ function parseJsonResponse(text) {
     return null;
 }
 
+function normalizeMechanicsPassShape(pass) {
+    if (!pass || typeof pass !== 'object') return pass;
+    const resolution = findPassSection(pass, [
+        'STEP_2_EXECUTE_ResolutionEngine',
+        'STEP 2: EXECUTE ResolutionEngine(input)',
+        'STEP_2',
+        'ResolutionEngine',
+        'resolutionEngine',
+        'resolution',
+    ]);
+    const relationship = findPassSection(pass, [
+        'STEP_3_EXECUTE_RelationshipEngine',
+        'STEP 3: EXECUTE RelationshipEngine(npc, step2)',
+        'STEP_3',
+        'RelationshipEngine',
+        'relationshipEngine',
+        'relationship',
+    ]);
+    const trackerUpdates = findPassSection(pass, [
+        'STEP_0_TRACKER_UPDATES',
+        'TRACKER_UPDATES',
+        'trackerUpdates',
+        'updates',
+    ]);
+    if (!resolution && !relationship && !trackerUpdates) return pass;
+
+    const normalized = { ...pass };
+    if (resolution) {
+        const identifyGoal = stepValue(resolution, ['2.1 identifyGoal', 'identifyGoal']);
+        const identifyTargets = stepValue(resolution, ['2.2 identifyTargets', 'identifyTargets']) || {};
+        const npcInScene = stepValue(resolution, ['2.5 NPCInScene', 'NPCInScene']);
+        const checkIntimacyGate = stepValue(resolution, ['2.3 checkIntimacyGate', 'checkIntimacyGate']);
+        const hasStakes = stepValue(resolution, ['2.4 hasStakes', 'hasStakes']);
+        const mapStats = stepValue(resolution, ['2.8 mapStats', '2.5 mapStats', 'mapStats']);
+        const genStats = stepValue(resolution, ['2.9 genStats', '2.7j genStats', 'genStats']);
+        const decisiveAction = stepValue(resolution, ['2.6 decisiveAction', 'decisiveAction']);
+
+        normalized.identifyGoal = normalizeGoalResult(identifyGoal);
+        normalized.identifyTargets = {
+            ...identifyTargets,
+            NPCInScene: arrayFromCompact(identifyTargets?.NPCInScene ?? npcInScene),
+        };
+        normalized.checkIntimacyGate = normalizeYnResult(checkIntimacyGate, 'IntimacyConsent');
+        normalized.hasStakes = normalizeYnResult(hasStakes, 'STAKES');
+        normalized.mapStats = mapStats || normalized.mapStats || { USER: 'MND', OPP: 'ENV' };
+        normalized.genStats = Array.isArray(genStats) ? genStats : (Array.isArray(normalized.genStats) ? normalized.genStats : []);
+        normalized.decisiveAction = normalizeValueResult(decisiveAction) || normalized.decisiveAction || normalized.identifyGoal?.goal || '';
+        normalized.decisiveActionEvidence = normalizeEvidenceResult(decisiveAction) || normalized.decisiveActionEvidence || '';
+        normalized.actionCount = Number(stepValue(resolution, ['2.7 actionCount', 'actionCount']) ?? normalized.actionCount) || 1;
+        normalized.hostilePhysicalHarm = normalizeYnScalar(stepValue(resolution, ['2.10 hostilePhysicalHarm', 'hostilePhysicalHarm']) ?? normalized.hostilePhysicalHarm);
+        normalized.outcomeOnSuccess = normalizeValueResult(stepValue(resolution, ['outcomeOnSuccess'])) || normalized.outcomeOnSuccess || '';
+        normalized.outcomeOnFailure = normalizeValueResult(stepValue(resolution, ['outcomeOnFailure'])) || normalized.outcomeOnFailure || '';
+    }
+
+    if (relationship) {
+        const npcRows = arrayFromCompact(stepValue(relationship, ['3.3 FOR_EACH_NPC', 'FOR_EACH_NPC', 'npcs']));
+        normalized.initPreset = Array.isArray(normalized.initPreset) ? normalized.initPreset : [];
+        normalized.NPC_STAKES = Array.isArray(normalized.NPC_STAKES) ? normalized.NPC_STAKES : [];
+        normalized.checkThreshold = Array.isArray(normalized.checkThreshold) ? normalized.checkThreshold : [];
+        for (const row of npcRows) {
+            if (!row || typeof row !== 'object') continue;
+            const npc = row.NPC || row.npc || row.name;
+            if (!npc) continue;
+            const preset = stepValue(row, ['3.3e initPreset', 'initPreset']);
+            const stakes = stepValue(row, ['3.4b NPC_STAKES', 'NPC_STAKES', 'auditInteraction']);
+            const threshold = stepValue(row, ['3.6a checkThreshold', 'checkThreshold']);
+            if (preset) normalized.initPreset.push({ NPC: npc, ...normalizePresetResult(preset) });
+            if (stakes) normalized.NPC_STAKES.push({ NPC: npc, ...normalizeNpcStakesResult(stakes) });
+            if (threshold) normalized.checkThreshold.push({ NPC: npc, ...normalizeThresholdResult(threshold) });
+            if (normalizeYnScalar(stepValue(row, ['3.3a newEncounterExplicit', 'newEncounterExplicit'])) === 'Y') {
+                normalized.newEncounterExplicit = 'Y';
+            }
+        }
+        normalized.initPreset = uniqueObjectList(normalized.initPreset, entry => `${normalizeNameLocal(entry?.NPC)}:${entry?.Label || ''}`);
+        normalized.NPC_STAKES = uniqueObjectList(normalized.NPC_STAKES, entry => normalizeNameLocal(entry?.NPC));
+        normalized.checkThreshold = uniqueObjectList(normalized.checkThreshold, entry => normalizeNameLocal(entry?.NPC));
+        normalized.newEncounterExplicit = normalizeYnScalar(stepValue(relationship, ['3.3a newEncounterExplicit', 'newEncounterExplicit']) ?? normalized.newEncounterExplicit);
+    }
+
+    if (trackerUpdates) {
+        normalized.timeDeltaMinutes = trackerUpdates.timeDeltaMinutes ?? normalized.timeDeltaMinutes ?? 0;
+        normalized.timeSkipReason = trackerUpdates.timeSkipReason ?? normalized.timeSkipReason ?? '';
+        normalized.scene = trackerUpdates.scene || normalized.scene || { location: '', time: '', weather: '' };
+        normalized.npcFacts = trackerUpdates.npcFacts || normalized.npcFacts || [];
+        normalized.inventoryDeltas = trackerUpdates.inventoryDeltas || normalized.inventoryDeltas || [];
+        normalized.taskDeltas = trackerUpdates.taskDeltas || normalized.taskDeltas || [];
+    }
+
+    normalized.mode = normalized.mode || (normalized.hasStakes?.STAKES === 'Y' ? 'STAKES' : 'NO_STAKES');
+    normalized.why = normalized.why || normalizeEvidenceResult(resolution?.why) || '';
+    normalized.initPreset = Array.isArray(normalized.initPreset) ? normalized.initPreset : [];
+    normalized.NPC_STAKES = Array.isArray(normalized.NPC_STAKES) ? normalized.NPC_STAKES : [];
+    normalized.checkThreshold = Array.isArray(normalized.checkThreshold) ? normalized.checkThreshold : [];
+    return normalized;
+}
+
+function findPassSection(pass, names) {
+    for (const name of names) {
+        if (pass?.[name] && typeof pass[name] === 'object') return pass[name];
+    }
+    const wanted = names.map(normalizeStepKey);
+    return Object.entries(pass || {}).find(([key, value]) => (
+        value && typeof value === 'object' && wanted.includes(normalizeStepKey(key))
+    ))?.[1] || null;
+}
+
+function stepValue(section, names) {
+    if (!section || typeof section !== 'object') return undefined;
+    for (const name of names) {
+        if (section[name] !== undefined) return section[name];
+    }
+    const wanted = names.map(normalizeStepKey);
+    for (const [key, value] of Object.entries(section)) {
+        const normalized = normalizeStepKey(key);
+        if (wanted.some(name => normalized === name || normalized.endsWith(name))) return value;
+    }
+    return undefined;
+}
+
+function normalizeStepKey(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function normalizeGoalResult(value) {
+    if (value && typeof value === 'object') return value;
+    return { goal: compactString(value, 140), goalKind: 'Normal', evidence: '' };
+}
+
+function normalizeYnResult(value, key) {
+    if (value && typeof value === 'object') return value;
+    return { [key]: normalizeYnScalar(value), evidence: '' };
+}
+
+function normalizeYnScalar(value) {
+    const text = String(value || '').trim().toUpperCase();
+    return text === 'Y' || text === 'YES' || text === 'TRUE' ? 'Y' : 'N';
+}
+
+function normalizeValueResult(value) {
+    if (value && typeof value === 'object') return compactString(value.value ?? value.result ?? value.action ?? value.text, 160);
+    return compactString(value, 160);
+}
+
+function normalizeEvidenceResult(value) {
+    if (value && typeof value === 'object') return compactString(value.evidence ?? value.why ?? value.reason, 300);
+    return '';
+}
+
+function normalizePresetResult(value) {
+    if (value && typeof value === 'object') return {
+        Label: value.Label || value.label || value.result || 'unknown',
+        evidence: compactString(value.evidence ?? value.why ?? value.reason, 180),
+    };
+    return { Label: compactString(value, 60) || 'unknown', evidence: '' };
+}
+
+function normalizeNpcStakesResult(value) {
+    if (value && typeof value === 'object') return {
+        NPC_STAKES: normalizeYnScalar(value.NPC_STAKES ?? value.stakes ?? value.result),
+        evidence: compactString(value.evidence ?? value.why ?? value.reason, 180),
+    };
+    return { NPC_STAKES: normalizeYnScalar(value), evidence: '' };
+}
+
+function normalizeThresholdResult(value) {
+    if (value && typeof value === 'object') return {
+        Override: value.Override || value.override || value.result || 'NONE',
+        evidence: compactString(value.evidence ?? value.why ?? value.reason, 180),
+    };
+    return { Override: compactString(value, 60) || 'NONE', evidence: '' };
+}
+
+function uniqueObjectList(list, keyFn) {
+    const map = new Map();
+    for (const item of Array.isArray(list) ? list : []) {
+        const key = keyFn(item);
+        if (!key) continue;
+        map.set(key, item);
+    }
+    return [...map.values()];
+}
+
 function canonicalMechanicsMode(value) {
     const mode = String(value || '').trim();
     if (mode === 'N') return 'NO_STAKES';
@@ -924,36 +1106,43 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- decisiveAction, actionCount, hostilePhysicalHarm, newEncounterExplicit are compact answers.',
     '- outcomeOnSuccess/outcomeOnFailure are optional short consequence meanings. scene/npcFacts/inventoryDeltas/taskDeltas are optional and only for explicit updates.',
     '',
-    'MINIMUM REQUIRED JSON SKELETON:',
+    'PREFLIGHT-SHAPED REQUIRED JSON SKELETON:',
     '<rp_engine_schema>',
     '{',
     '  "mode": "NO_STAKES",',
-    '  "identifyGoal": {"goal": "", "goalKind": "Normal", "evidence": ""},',
-    '  "identifyTargets": {"ActionTargets": [], "OppTargets": {"NPC": [], "ENV": []}, "BenefitedObservers": [], "HarmedObservers": [], "NPCInScene": [], "evidence": ""},',
-    '  "hasStakes": {"STAKES": "N", "evidence": ""},',
-    '  "checkIntimacyGate": {"IntimacyConsent": "N", "evidence": ""},',
-    '  "mapStats": {"USER": "MND", "OPP": "ENV", "userEvidence": "", "oppEvidence": ""},',
-    '  "genStats": [],',
-    '  "initPreset": [],',
-    '  "NPC_STAKES": [],',
-    '  "checkThreshold": [],',
-    '  "decisiveAction": "",',
-    '  "why": "",',
-    '  "outcomeOnSuccess": "",',
-    '  "outcomeOnFailure": "",',
-    '  "actionCount": 1,',
-    '  "hostilePhysicalHarm": "N",',
-    '  "newEncounterExplicit": "N",',
-    '  "timeDeltaMinutes": 0,',
-    '  "timeSkipReason": "",',
-    '  "scene": {"location": "", "time": "", "weather": ""},',
-    '  "npcFacts": [],',
-    '  "inventoryDeltas": [],',
-    '  "taskDeltas": []',
+    '  "STEP_2_EXECUTE_ResolutionEngine": {',
+    '    "2.1 identifyGoal": {"goal": "", "goalKind": "Normal", "evidence": ""},',
+    '    "2.2 identifyTargets": {"ActionTargets": [], "OppTargets": {"NPC": [], "ENV": []}, "BenefitedObservers": [], "HarmedObservers": [], "evidence": ""},',
+    '    "2.3 checkIntimacyGate": {"IntimacyConsent": "N", "evidence": ""},',
+    '    "2.4 hasStakes": {"STAKES": "N", "evidence": ""},',
+    '    "2.5 NPCInScene": [],',
+    '    "2.6 decisiveAction": {"value": "", "evidence": ""},',
+    '    "2.7 actionCount": 1,',
+    '    "2.8 mapStats": {"USER": "MND", "OPP": "ENV", "userEvidence": "", "oppEvidence": ""},',
+    '    "2.9 genStats": [],',
+    '    "2.10 hostilePhysicalHarm": "N",',
+    '    "2.11 outcomeOnSuccess": "",',
+    '    "2.12 outcomeOnFailure": ""',
+    '  },',
+    '  "STEP_3_EXECUTE_RelationshipEngine": {',
+    '    "3.1 step2_relational": {"GOAL": "", "IntimacyConsent": "N", "ActionTargets": [], "OppTargets": {"NPC": [], "ENV": []}, "BenefitedObservers": [], "HarmedObservers": [], "NPCInScene": []},',
+    '    "3.2 NPC_LIST": [],',
+    '    "3.3 FOR_EACH_NPC": [',
+    '      {"NPC": "", "3.3a newEncounterExplicit": "N", "3.3e initPreset": {"Label": "unknown", "evidence": ""}, "3.4b NPC_STAKES": {"NPC_STAKES": "N", "evidence": ""}, "3.6a checkThreshold": {"Override": "NONE", "evidence": ""}}',
+    '    ]',
+    '  },',
+    '  "STEP_0_TRACKER_UPDATES": {',
+    '    "timeDeltaMinutes": 0,',
+    '    "timeSkipReason": "",',
+    '    "scene": {"location": "", "time": "", "weather": ""},',
+    '    "npcFacts": [],',
+    '    "inventoryDeltas": [],',
+    '    "taskDeltas": []',
+    '  }',
     '}',
     '</rp_engine_schema>',
     '',
-    'Copy this skeleton shape exactly, but replace the values with the correct contextual results.',
+    'Copy this skeleton shape exactly, but replace the values with the correct contextual results. The extension will normalize this preflight-shaped artifact into deterministic mechanics input.',
     '',
     'ENGINE FIELD MAP:',
     '- identifyGoal(input) -> identifyGoal.',
@@ -1099,7 +1288,7 @@ async function runMechanicsPass({
             responseLength: mechanicsPassResponseLength(),
             removeReasoning: false,
         }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
-        pass = parseJsonResponse(response);
+        pass = normalizeMechanicsPassShape(parseJsonResponse(response));
         if (pass && typeof pass === 'object') {
             extraction = expandMechanicsPass(pass, latestUserMessage);
             issues = mechanicsPassInvalidReasons(pass, extraction, validateExpandedMechanicsSchema(extraction, pass));
@@ -1118,7 +1307,7 @@ async function runMechanicsPass({
                 responseLength: mechanicsPassResponseLength(),
                 removeReasoning: false,
             }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
-            repairPass = parseJsonResponse(repairResponse);
+            repairPass = normalizeMechanicsPassShape(parseJsonResponse(repairResponse));
             if (repairPass && typeof repairPass === 'object') {
                 const repairExtraction = expandMechanicsPass(repairPass, latestUserMessage);
                 const repairIssues = mechanicsPassInvalidReasons(repairPass, repairExtraction, validateExpandedMechanicsSchema(repairExtraction, repairPass));
