@@ -13,6 +13,11 @@ import { buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from
 const EXTENSION_NAME = 'Structured Preflight Engines';
 const ENGINE_PROMPT_KEY = 'structured_preflight_engines';
 const NARRATOR_PROMPT_KEY = 'structured_preflight_narrator_context';
+const ENGINE_RUNTIME_SENTINEL = [
+    '[STRUCTURED_PREFLIGHT_ENGINE_EXTENSION v0.5 - SEMANTIC PASS ACTIVE]',
+    'The full engine source is used by the extension during the silent semantic/deterministic pass.',
+    'For this narration pass, use the structured narrator handoff as authoritative mechanics context.',
+].join('\n');
 
 const EXTENSION_PROMPT_TYPES = Object.freeze({
     IN_PROMPT: 0,
@@ -23,10 +28,12 @@ const EXTENSION_PROMPT_ROLES = Object.freeze({
     SYSTEM: 0,
 });
 
+console.info(`[${EXTENSION_NAME}] module import started`);
+
 const state = {
     runningSemanticPass: false,
     lastDebugPrefix: '',
-    lastMessageId: null,
+    lastDebugKey: null,
     subscribed: false,
 };
 
@@ -43,7 +50,7 @@ function injectEngines() {
 
     context.setExtensionPrompt(
         ENGINE_PROMPT_KEY,
-        ENGINE_PROMPT_TEXT,
+        ENGINE_RUNTIME_SENTINEL,
         EXTENSION_PROMPT_TYPES.IN_PROMPT,
         0,
         false,
@@ -75,28 +82,30 @@ function injectNarratorContext(value) {
 }
 
 async function prependComputedDebug(messageId, type) {
-    if (!state.lastDebugPrefix || state.lastMessageId === messageId) return;
+    const context = getContext();
+    const chatId = typeof context?.getCurrentChatId === 'function' ? context.getCurrentChatId() : '';
+    const messageKey = `${chatId}:${messageId}`;
+
+    if (!state.lastDebugPrefix || state.lastDebugKey === messageKey) return;
     if (type === 'impersonate') return;
 
-    const context = getContext();
     const message = context?.chat?.[messageId];
     if (!message || message.is_user) return;
 
+    message.extra = message.extra || {};
+
     const currentText = String(message.mes ?? '');
-    const displayText = message.extra?.display_text == null ? null : String(message.extra.display_text);
+    const displayText = message.extra.display_text == null ? null : String(message.extra.display_text);
     const visibleText = displayText ?? currentText;
 
-    if (visibleText.startsWith('<pre_flight>')) {
-        state.lastMessageId = messageId;
+    if (visibleText.startsWith('````text\n&lt;pre_flight&gt;') || visibleText.startsWith('<pre_flight>')) {
+        state.lastDebugKey = messageKey;
         state.lastDebugPrefix = '';
         return;
     }
 
-    message.mes = `${state.lastDebugPrefix}\n\n${currentText}`;
-    if (displayText != null) {
-        message.extra.display_text = `${state.lastDebugPrefix}\n\n${displayText}`;
-    }
-    state.lastMessageId = messageId;
+    message.extra.display_text = `${state.lastDebugPrefix}\n\n${visibleText}`;
+    state.lastDebugKey = messageKey;
     state.lastDebugPrefix = '';
 
     if (typeof context.updateMessageBlock === 'function') {
@@ -115,6 +124,11 @@ function subscribeMessageHandler() {
     if (!context?.eventSource?.on || !context?.eventTypes?.MESSAGE_RECEIVED) return;
 
     context.eventSource.on(context.eventTypes.MESSAGE_RECEIVED, prependComputedDebug);
+    if (context.eventTypes.CHAT_CHANGED) {
+        context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
+            state.lastDebugKey = null;
+        });
+    }
     state.subscribed = true;
 }
 
@@ -177,3 +191,4 @@ export function onDisable() {
 
 injectEngines();
 subscribeMessageHandler();
+console.info(`[${EXTENSION_NAME}] loaded`);

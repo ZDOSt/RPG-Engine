@@ -146,11 +146,15 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
                 audit.push(`2.7h getCurrentCoreStats(${primaryOppTarget})=${compact(targetCore)}`);
                 audit.push(`2.7n targetCore=${compact(targetCore)}`);
             } else {
-                targetCore = normalizeCore(semantic.genStatsIfNeeded, { PHY: 1, MND: 1, CHA: 1 });
+                const generatedCoreSource = chooseGeneratedCore(ledger, semantic, primaryOppTarget);
+                targetCore = normalizeCore(generatedCoreSource.core, { PHY: 1, MND: 1, CHA: 1 });
                 audit.push(`2.7h getCurrentCoreStats(${primaryOppTarget || NONE})=missing`);
                 audit.push('2.7i missing -> genStats');
-                audit.push(`2.7j genStats.Rank=${semantic.genStatsIfNeeded?.Rank || 'none'}`);
-                audit.push(`2.7k genStats.MainStat=${semantic.genStatsIfNeeded?.MainStat || 'none'}`);
+                if (generatedCoreSource.source !== 'resolutionSemantic.genStatsIfNeeded') {
+                    audit.push(`2.7i.1 genStats source=${generatedCoreSource.source}`);
+                }
+                audit.push(`2.7j genStats.Rank=${generatedCoreSource.core?.Rank || 'none'}`);
+                audit.push(`2.7k genStats.MainStat=${generatedCoreSource.core?.MainStat || 'none'}`);
                 audit.push(`2.7l genStats=${compact(targetCore)}`);
                 audit.push(`2.7m targetCore=${compact(targetCore)}`);
             }
@@ -525,6 +529,34 @@ function hostilePhysicalOutcome(margin, actionLength) {
     return outcome;
 }
 
+function chooseGeneratedCore(ledger, resolutionSemantic, primaryOppTarget) {
+    const resolutionCore = resolutionSemantic?.genStatsIfNeeded;
+    if (!isDefaultGeneratedCore(resolutionCore)) {
+        return { core: resolutionCore, source: 'resolutionSemantic.genStatsIfNeeded' };
+    }
+
+    const relationshipCore = (ledger.relationshipSemantic || [])
+        .find(item => sameName(item?.NPC, primaryOppTarget))
+        ?.coreStatsIfNeeded;
+
+    if (!isDefaultGeneratedCore(relationshipCore)) {
+        return { core: relationshipCore, source: `relationshipSemantic[${primaryOppTarget}].coreStatsIfNeeded` };
+    }
+
+    return { core: resolutionCore, source: 'resolutionSemantic.genStatsIfNeeded' };
+}
+
+function isDefaultGeneratedCore(core) {
+    if (!core) return true;
+    const rank = String(core.Rank || 'none');
+    const mainStat = String(core.MainStat || 'none');
+    return rank === 'none'
+        && mainStat === 'none'
+        && Number(core.PHY ?? 1) === 1
+        && Number(core.MND ?? 1) === 1
+        && Number(core.CHA ?? 1) === 1;
+}
+
 function initPreset(flags) {
     if (bool(flags.romanticOpen)) return { label: 'romanticOpen', disposition: { B: 4, F: 1, H: 1 } };
     if (bool(flags.userBadRep)) return { label: 'userBadRep', disposition: { B: 1, F: 2, H: 3 } };
@@ -801,6 +833,10 @@ function landedBool(value) {
 
 function includesName(list, name) {
     return toRealArray(list).some(x => String(x).toLowerCase() === String(name).toLowerCase());
+}
+
+function sameName(a, b) {
+    return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 }
 
 function toRealArray(value) {
