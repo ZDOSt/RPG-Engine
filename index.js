@@ -3,7 +3,6 @@ import {
     formatDebugMessagePrefix,
     formatNarratorPromptContext,
     formatNarratorPromptError,
-    formatNarratorPromptPending,
     formatPreFlightDebug,
     formatPreFlightError,
 } from './pre-flight.js';
@@ -32,6 +31,7 @@ console.info(`[${EXTENSION_NAME}] module import started`);
 
 const state = {
     runningSemanticPass: false,
+    activeRunId: null,
     lastDebugPrefix: '',
     lastDebugKey: null,
     pendingRun: null,
@@ -43,7 +43,7 @@ function getContext() {
     return globalThis.SillyTavern?.getContext?.();
 }
 
-function injectEngines() {
+function injectRuntimeSentinel() {
     const context = getContext();
     if (!context?.setExtensionPrompt) {
         console.warn(`[${EXTENSION_NAME}] SillyTavern context is not ready; engine prompt was not injected.`);
@@ -54,15 +54,6 @@ function injectEngines() {
         ENGINE_PROMPT_KEY,
         ENGINE_RUNTIME_SENTINEL,
         EXTENSION_PROMPT_TYPES.IN_PROMPT,
-        0,
-        false,
-        EXTENSION_PROMPT_ROLES.SYSTEM,
-    );
-
-    context.setExtensionPrompt(
-        NARRATOR_PROMPT_KEY,
-        formatNarratorPromptPending(),
-        EXTENSION_PROMPT_TYPES.IN_CHAT,
         0,
         false,
         EXTENSION_PROMPT_ROLES.SYSTEM,
@@ -81,6 +72,35 @@ function injectNarratorContext(value) {
         false,
         EXTENSION_PROMPT_ROLES.SYSTEM,
     );
+}
+
+function clearRuntimePrompts() {
+    const context = getContext();
+    if (!context?.extensionPrompts) return;
+
+    delete context.extensionPrompts[ENGINE_PROMPT_KEY];
+    delete context.extensionPrompts[NARRATOR_PROMPT_KEY];
+}
+
+function showProgress(message) {
+    try {
+        if (globalThis.toastr?.info) {
+            return globalThis.toastr.info(message, EXTENSION_NAME, { timeOut: 0, extendedTimeOut: 0 });
+        }
+    } catch {
+        // Progress UI is optional; generation must not depend on it.
+    }
+    return null;
+}
+
+function clearProgress(toast) {
+    try {
+        if (toast && globalThis.toastr?.clear) {
+            globalThis.toastr.clear(toast);
+        }
+    } catch {
+        // Non-fatal.
+    }
 }
 
 function getChatId(context = getContext()) {
@@ -160,11 +180,16 @@ async function prependComputedDebug(messageId, type) {
     const context = getContext();
     const messageKey = getMessageKey(messageId, context);
 
-    if (!state.lastDebugPrefix || state.lastDebugKey === messageKey) return;
-    if (type === 'impersonate') return;
+    if (!state.lastDebugPrefix || state.lastDebugKey === messageKey || type === 'impersonate') {
+        clearRuntimePrompts();
+        return;
+    }
 
     const message = context?.chat?.[messageId];
-    if (!message || message.is_user) return;
+    if (!message || message.is_user) {
+        clearRuntimePrompts();
+        return;
+    }
 
     message.extra = message.extra || {};
 
@@ -195,6 +220,7 @@ async function prependComputedDebug(messageId, type) {
         await context.saveChat();
     }
 
+    clearRuntimePrompts();
     state.chatSignature = captureChatSignature(context);
 }
 
@@ -226,6 +252,7 @@ async function handleMessageDeleted(newLength) {
     state.lastDebugPrefix = '';
     state.lastDebugKey = null;
     state.chatSignature = currentSignature;
+    clearRuntimePrompts();
 
     if (restoreCandidate) {
         root.npcs = clone(restoreCandidate.before) || {};
@@ -237,6 +264,7 @@ async function handleMessageDeleted(newLength) {
 function handleMessageSwiped() {
     state.lastDebugKey = null;
     state.chatSignature = captureChatSignature();
+    clearRuntimePrompts();
 }
 
 function handleChatChanged() {
@@ -244,6 +272,11 @@ function handleChatChanged() {
     state.lastDebugPrefix = '';
     state.pendingRun = null;
     state.chatSignature = captureChatSignature();
+    clearRuntimePrompts();
+}
+
+function handleGenerationLifecycleEnd() {
+    clearRuntimePrompts();
 }
 
 function subscribeMessageHandler() {
@@ -256,14 +289,16 @@ function subscribeMessageHandler() {
     if (context.eventTypes.MESSAGE_DELETED) context.eventSource.on(context.eventTypes.MESSAGE_DELETED, handleMessageDeleted);
     if (context.eventTypes.MESSAGE_SWIPED) context.eventSource.on(context.eventTypes.MESSAGE_SWIPED, handleMessageSwiped);
     if (context.eventTypes.CHAT_CHANGED) context.eventSource.on(context.eventTypes.CHAT_CHANGED, handleChatChanged);
+    if (context.eventTypes.GENERATION_ENDED) context.eventSource.on(context.eventTypes.GENERATION_ENDED, handleGenerationLifecycleEnd);
+    if (context.eventTypes.GENERATION_STOPPED) context.eventSource.on(context.eventTypes.GENERATION_STOPPED, handleGenerationLifecycleEnd);
     state.subscribed = true;
 }
 
 globalThis.StructuredPreflightEngines_generationInterceptor = async function (coreChat, contextSize, abort, type) {
-    injectEngines();
     subscribeMessageHandler();
 
     if (state.runningSemanticPass) {
+        console.warn(`[${EXTENSION_NAME}] semantic pass skipped because another run is active`);
         return false;
     }
 
@@ -279,8 +314,11 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
     state.chatSignature = captureChatSignature(context);
     restoreTrackerForRegeneration(type);
 
+    let progressToast = null;
     try {
         state.runningSemanticPass = true;
+        state.activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        progressToast = showProgress('Computing structured pre-flight...');
         const trackerSnapshot = buildTrackerSnapshot(context);
         const semanticLedger = await extractSemanticLedger(context, coreChat, type, trackerSnapshot);
         const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, type);
@@ -293,15 +331,19 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
             trackerAfter: report.trackerUpdate?.npcs || {},
         };
         state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
+        injectRuntimeSentinel();
         injectNarratorContext(narratorContext);
     } catch (error) {
         console.error(`[${EXTENSION_NAME}] deterministic pre-flight failed`, error);
         const audit = formatPreFlightError(error);
         const narratorContext = formatNarratorPromptError(error);
         state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
+        injectRuntimeSentinel();
         injectNarratorContext(narratorContext);
     } finally {
+        clearProgress(progressToast);
         state.runningSemanticPass = false;
+        state.activeRunId = null;
     }
 
     return false;
@@ -318,6 +360,8 @@ export function onDisable() {
         if (context.eventTypes.MESSAGE_DELETED) removeEventHandler(context, context.eventTypes.MESSAGE_DELETED, handleMessageDeleted);
         if (context.eventTypes.MESSAGE_SWIPED) removeEventHandler(context, context.eventTypes.MESSAGE_SWIPED, handleMessageSwiped);
         if (context.eventTypes.CHAT_CHANGED) removeEventHandler(context, context.eventTypes.CHAT_CHANGED, handleChatChanged);
+        if (context.eventTypes.GENERATION_ENDED) removeEventHandler(context, context.eventTypes.GENERATION_ENDED, handleGenerationLifecycleEnd);
+        if (context.eventTypes.GENERATION_STOPPED) removeEventHandler(context, context.eventTypes.GENERATION_STOPPED, handleGenerationLifecycleEnd);
         state.subscribed = false;
     }
 }
@@ -330,6 +374,6 @@ function removeEventHandler(context, eventName, handler) {
     }
 }
 
-injectEngines();
 subscribeMessageHandler();
+clearRuntimePrompts();
 console.info(`[${EXTENSION_NAME}] loaded`);

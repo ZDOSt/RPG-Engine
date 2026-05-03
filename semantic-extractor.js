@@ -1,25 +1,41 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
 
 export async function extractSemanticLedger(context, coreChat, type, trackerSnapshot) {
-    if (!context?.generateRaw) {
-        throw new Error('SillyTavern generateRaw API is unavailable.');
+    if (!context?.generateRawData) {
+        throw new Error('SillyTavern generateRawData API is unavailable.');
     }
 
     const prompt = buildSemanticPrompt(context, coreChat, type, trackerSnapshot);
-    const raw = await context.generateRaw({
-        prompt,
-        responseLength: 2600,
-        trimNames: false,
-        prefill: '<semantic_ledger>\n{',
-    });
+    const raw = await generateSemanticRaw(context, prompt);
 
-    const ledger = parseJson(raw);
+    let ledger;
+    try {
+        ledger = parseJson(raw);
+        validateRawLedgerContract(ledger, raw);
+    } catch (error) {
+        const repairPrompt = buildSemanticRepairPrompt(raw, error);
+        const repairRaw = await generateSemanticRaw(context, repairPrompt, 1600);
+        try {
+            ledger = parseJson(repairRaw);
+            validateRawLedgerContract(ledger, repairRaw);
+            ledger.deterministicOverrides = {
+                ...(ledger.deterministicOverrides || {}),
+                semanticLedgerRepair: {
+                    source: 'generateRawData repair pass',
+                    reason: error instanceof Error ? error.message : String(error),
+                },
+            };
+        } catch (repairError) {
+            throw new Error(`Semantic pass returned no valid ledger after repair. First error: ${error.message}. Repair error: ${repairError.message}`);
+        }
+    }
+
     if (!ledger || typeof ledger !== 'object') {
         throw new Error(`Semantic pass returned an invalid ledger object: ${String(raw).slice(0, 200)}`);
     }
 
     const normalized = normalizeLedger(ledger);
-    validateLedger(normalized, raw);
+    validateNormalizedLedger(normalized, raw);
     const personaCoreStats = extractPersonaCoreStats(context);
     if (personaCoreStats) {
         normalized.userCoreStats = {
@@ -36,6 +52,37 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
     }
 
     return normalized;
+}
+
+async function generateSemanticRaw(context, prompt, responseLength = 2600) {
+    return await context.generateRawData({
+        prompt,
+        responseLength,
+        prefill: '<semantic_ledger>\n{',
+    });
+}
+
+function buildSemanticRepairPrompt(raw, error) {
+    const candidates = extractTextCandidates(raw).join('\n\n---\n\n');
+
+    return [
+        {
+            role: 'system',
+            content:
+                'You repair a failed semantic ledger response for a SillyTavern rules extension. ' +
+                'The output contract is mandatory and non-negotiable. Any response that omits, renames, paraphrases, fences, or corrupts the required ledger is invalid. ' +
+                'Return exactly one complete valid JSON object wrapped in <semantic_ledger>...</semantic_ledger>. ' +
+                'No markdown, no prose, no narration, no dice, no calculations.',
+        },
+        {
+            role: 'user',
+            content:
+                `The previous response could not be parsed.\nERROR=${error instanceof Error ? error.message : String(error)}\n\n` +
+                `Previous raw text candidates:\n${clip(candidates, 6000)}\n\n` +
+                'Repair it into this exact object shape and field names. The assistant prefill is "<semantic_ledger>\\n{", so continue the object from its first property, close it with "}", then close </semantic_ledger>.\n' +
+                SEMANTIC_LEDGER_TEMPLATE,
+        },
+    ];
 }
 
 const SEMANTIC_LEDGER_TEMPLATE = `{
@@ -97,7 +144,8 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             role: 'system',
             content:
                 'You are the semantic extraction pass for a SillyTavern roleplay rules extension. ' +
-                'Return exactly one complete, valid JSON object wrapped in <semantic_ledger>...</semantic_ledger>. Do not wrap it in markdown. Do not return an empty object. ' +
+                'The output contract is mandatory and non-negotiable: return exactly one complete, valid JSON object wrapped in <semantic_ledger>...</semantic_ledger>. ' +
+                'Any response that omits the tags, renames fields, returns prose, returns markdown fences, returns an empty object, or leaves required fields missing is completely invalid and will be discarded. ' +
                 'Do not narrate. Do not roll dice. Do not calculate outcomes. ' +
                 'Classify only contextual/semantic predicates needed by the engines. Use EXPLICIT-ONLY and FIRST-YES-WINS from the engine reference. ' +
                 'The semantic/contextual fields you return are authoritative; the deterministic runner should not reinterpret them. ' +
@@ -139,7 +187,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             content:
                 `Recent chat context, newest last:\n${chatContext}\n\n` +
                 'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. For hasStakesCandidate, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
-                'Return one complete JSON object with this exact shape and field names. The assistant prefill is "<semantic_ledger>\\n{", so continue the object from its first property, close it with "}", then close </semantic_ledger>.\n' +
+                'MANDATORY OUTPUT CONTRACT: Return one complete JSON object with this exact shape and field names. The assistant prefill is "<semantic_ledger>\\n{", so continue the object from its first property, close it with "}", then close </semantic_ledger>. Do not output anything before or after the closing tag.\n' +
                 SEMANTIC_LEDGER_TEMPLATE,
         },
     ];
@@ -216,13 +264,107 @@ function stripStructuredDebug(text) {
 }
 
 function parseJson(raw) {
-    if (raw && typeof raw === 'object') return raw;
-    const text = String(raw ?? '').trim();
-    const tagged = text.match(/<semantic_ledger>\s*([\s\S]*?)\s*<\/semantic_ledger>/i);
-    const source = tagged ? tagged[1].trim() : text;
-    const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    const candidate = fenced ? fenced[1].trim() : extractJsonObject(restoreOpeningBrace(source));
+    if (raw && typeof raw === 'object' && hasLedgerShape(raw)) return raw;
+    const candidates = extractTextCandidates(raw);
+    const errors = [];
+
+    for (const text of candidates) {
+        try {
+            return parseLedgerText(text);
+        } catch (error) {
+            errors.push(error instanceof Error ? error.message : String(error));
+        }
+    }
+
+    throw new Error(`Semantic pass did not return a valid mandatory <semantic_ledger> JSON block. Candidates=${candidates.length}. Errors=${errors.slice(0, 4).join(' | ')}`);
+}
+
+function parseLedgerText(text) {
+    const sourceText = String(text ?? '').trim();
+    if (!sourceText) throw new Error('empty response text');
+
+    const tagged = sourceText.match(/<semantic_ledger>\s*([\s\S]*?)\s*<\/semantic_ledger>/i);
+    const prefilled = !tagged && sourceText.endsWith('</semantic_ledger>') && sourceText.startsWith('"');
+    if (!tagged && !prefilled) throw new Error('missing mandatory <semantic_ledger> contract or exact prefill continuation');
+
+    const inside = tagged
+        ? tagged[1].trim()
+        : `{${sourceText.slice(0, -'</semantic_ledger>'.length).trim()}`;
+    if (/```/.test(inside)) {
+        throw new Error('markdown fences inside semantic_ledger are invalid');
+    }
+
+    const candidate = extractJsonObject(restoreOpeningBrace(inside));
     return JSON.parse(candidate);
+}
+
+function extractTextCandidates(raw) {
+    const values = [];
+    const seen = new Set();
+    const add = value => {
+        if (value == null) return;
+        if (typeof value === 'string') {
+            const text = value.trim();
+            if (text && !seen.has(text)) {
+                seen.add(text);
+                values.push(text);
+            }
+            return;
+        }
+        if (Array.isArray(value)) {
+            value.forEach(add);
+            return;
+        }
+        if (typeof value === 'object') {
+            if (typeof value.text === 'string') add(value.text);
+            if (typeof value.content === 'string') add(value.content);
+            if (typeof value.reasoning === 'string') add(value.reasoning);
+            if (typeof value.reasoning_content === 'string') add(value.reasoning_content);
+            if (typeof value.reasoning_details === 'string') add(value.reasoning_details);
+            if (typeof value.message === 'string') add(value.message);
+            if (value.message && typeof value.message === 'object') add(value.message);
+            if (value.delta && typeof value.delta === 'object') add(value.delta);
+            if (value.output_text) add(value.output_text);
+            if (value.response) add(value.response);
+            if (value.choices) add(value.choices);
+            if (value.content) add(value.content);
+            if (value.output) add(value.output);
+            if (value.data) add(value.data);
+        }
+    };
+
+    add(raw);
+    return values;
+}
+
+function hasLedgerShape(value) {
+    return Boolean(value?.resolutionSemantic && value?.relationshipSemantic && value?.chaosSemantic && value?.nameSemantic && value?.proactivitySemantic);
+}
+
+function validateRawLedgerContract(ledger, raw) {
+    const missing = [];
+    if (!ledger?.engineContext) missing.push('engineContext');
+    if (!ledger?.engineContext?.userCoreStats) missing.push('engineContext.userCoreStats');
+    if (!ledger?.resolutionSemantic) missing.push('resolutionSemantic');
+    if (!ledger?.resolutionSemantic?.identifyGoal) missing.push('resolutionSemantic.identifyGoal');
+    if (!ledger?.resolutionSemantic?.identifyTargets) missing.push('resolutionSemantic.identifyTargets');
+    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.ActionTargets)) missing.push('resolutionSemantic.identifyTargets.ActionTargets');
+    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.OppTargets?.NPC)) missing.push('resolutionSemantic.identifyTargets.OppTargets.NPC');
+    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.OppTargets?.ENV)) missing.push('resolutionSemantic.identifyTargets.OppTargets.ENV');
+    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.BenefitedObservers)) missing.push('resolutionSemantic.identifyTargets.BenefitedObservers');
+    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.HarmedObservers)) missing.push('resolutionSemantic.identifyTargets.HarmedObservers');
+    if (typeof ledger?.resolutionSemantic?.hasStakesCandidate !== 'boolean') missing.push('resolutionSemantic.hasStakesCandidate:boolean');
+    if (!Array.isArray(ledger?.resolutionSemantic?.actionCount)) missing.push('resolutionSemantic.actionCount');
+    if (!ledger?.resolutionSemantic?.mapStats?.USER) missing.push('resolutionSemantic.mapStats.USER');
+    if (!ledger?.resolutionSemantic?.mapStats?.OPP) missing.push('resolutionSemantic.mapStats.OPP');
+    if (!Array.isArray(ledger?.relationshipSemantic)) missing.push('relationshipSemantic');
+    if (!ledger?.chaosSemantic) missing.push('chaosSemantic');
+    if (!ledger?.nameSemantic) missing.push('nameSemantic');
+    if (!ledger?.proactivitySemantic) missing.push('proactivitySemantic');
+
+    if (missing.length) {
+        throw new Error(`Mandatory semantic ledger contract failed; response invalid. Missing/invalid fields (${missing.join(', ')}): ${extractTextCandidates(raw).join('\n').slice(0, 240)}`);
+    }
 }
 
 function restoreOpeningBrace(text) {
@@ -286,18 +428,25 @@ function normalizeActionMarkers(markers) {
     return markers.slice(0, 3).map((_, index) => `a${index + 1}`);
 }
 
-function validateLedger(ledger, raw) {
+function validateNormalizedLedger(ledger, raw) {
     const missing = [];
     if (!ledger.resolutionSemantic) missing.push('resolutionSemantic');
     if (!ledger.resolutionSemantic?.goal) missing.push('resolutionSemantic.identifyGoal');
     if (!ledger.resolutionSemantic?.targets) missing.push('resolutionSemantic.identifyTargets');
+    if (!Array.isArray(ledger.resolutionSemantic?.targets?.ActionTargets)) missing.push('resolutionSemantic.identifyTargets.ActionTargets');
+    if (!Array.isArray(ledger.resolutionSemantic?.targets?.OppTargets?.NPC)) missing.push('resolutionSemantic.identifyTargets.OppTargets.NPC');
+    if (!Array.isArray(ledger.resolutionSemantic?.targets?.OppTargets?.ENV)) missing.push('resolutionSemantic.identifyTargets.OppTargets.ENV');
+    if (!Array.isArray(ledger.resolutionSemantic?.targets?.BenefitedObservers)) missing.push('resolutionSemantic.identifyTargets.BenefitedObservers');
+    if (!Array.isArray(ledger.resolutionSemantic?.targets?.HarmedObservers)) missing.push('resolutionSemantic.identifyTargets.HarmedObservers');
+    if (typeof ledger.resolutionSemantic?.hasStakesCandidate !== 'boolean') missing.push('resolutionSemantic.hasStakesCandidate:boolean');
+    if (!Array.isArray(ledger.resolutionSemantic?.actionMarkers)) missing.push('resolutionSemantic.actionCount');
     if (!Array.isArray(ledger.relationshipSemantic)) missing.push('relationshipSemantic');
     if (!ledger.chaosSemantic) missing.push('chaosSemantic');
     if (!ledger.nameSemantic) missing.push('nameSemantic');
     if (!ledger.proactivitySemantic) missing.push('proactivitySemantic');
 
     if (missing.length) {
-        throw new Error(`Semantic pass missing required fields (${missing.join(', ')}): ${String(raw).slice(0, 240)}`);
+        throw new Error(`Mandatory semantic ledger contract failed; response invalid. Missing/invalid fields (${missing.join(', ')}): ${extractTextCandidates(raw).join('\n').slice(0, 240)}`);
     }
 }
 

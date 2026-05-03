@@ -181,6 +181,9 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
                 audit.push(`2.7k genStats.MainStat=${generatedCoreSource.core?.MainStat || 'none'}`);
                 audit.push(`2.7l genStats=${compact(targetCore)}`);
                 audit.push(`2.7m targetCore=${compact(targetCore)}`);
+                if (generatedCoreSource.defaultFallback) {
+                    audit.push('2.7m.1 genStatsDefaultFallback=not persisted as explicit NPC stats');
+                }
             }
         }
 
@@ -365,10 +368,15 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
             HostileLandedPressure: hostileLandedPressure,
             DominantLock: dominantLock,
             PressureMode: pressureMode,
+            RelationToUserAction: relationToUserAction(npc, resolutionPacket),
         };
         handoffs.push(handoff);
 
-        const coreStats = state.currentCoreStats || normalizeCore(sem.coreStatsIfNeeded, { PHY: 1, MND: 1, CHA: 1 });
+        const generatedCore = normalizeCore(sem.coreStatsIfNeeded, { PHY: 1, MND: 1, CHA: 1 });
+        const coreStats = state.currentCoreStats || (isDefaultGeneratedCore(generatedCore) ? null : generatedCore);
+        if (!state.currentCoreStats && !coreStats) {
+            audit.push(`3.7a currentCoreStats not persisted for ${npc}: semantic coreStatsIfNeeded was default 1/1/1`);
+        }
         trackerUpdate[npc] = {
             currentDisposition,
             currentRapport,
@@ -466,7 +474,10 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         const fin = parseFinalState(handoff.FinalState);
         const lock = handoff.Lock && handoff.Lock !== 'None' ? handoff.Lock : deriveLock(fin);
         const impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode);
-        const tier = classifyProactivityTier(handoff, chaosBand, counterPotential, lock, fin);
+        const proactivityGuard = proactivityRefereeGuard(handoff, resolutionPacket);
+        const tier = proactivityGuard
+            ? 'DORMANT'
+            : classifyProactivityTier(handoff, chaosBand, counterPotential, lock, fin);
 
         results[handoff.NPC] = {
             Proactive: 'N',
@@ -481,10 +492,13 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         audit.push(`6.4b lock=${lock}`);
         audit.push(`6.4f deriveImpulse=${impulse}`);
         audit.push(`6.4g classifyProactivityTier=${tier}`);
+        if (proactivityGuard) {
+            audit.push(`6.4g.1 proactivityRefereeGuard=${proactivityGuard}`);
+        }
 
         if (tier === 'FORCED') {
             const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
-            const targetsUser = targetsUserFromIntent(intent);
+            const targetsUser = proactivityGuard ? 'N' : targetsUserFromIntent(intent);
             candidates.push({ NPC: handoff.NPC, die: 20, tier, intent, impulse, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' });
             audit.push('6.4i FORCED candidate');
             continue;
@@ -502,7 +516,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
 
         if (passes === 'Y') {
             const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
-            const targetsUser = targetsUserFromIntent(intent);
+            const targetsUser = proactivityGuard ? 'N' : targetsUserFromIntent(intent);
             candidates.push({ NPC: handoff.NPC, die, tier, intent, impulse, TargetsUser: targetsUser, Threshold: threshold, passes });
             audit.push(`6.5c selectIntent=${intent}`);
             audit.push(`6.5e targetsUserFromIntent=${targetsUser}`);
@@ -653,7 +667,7 @@ function chooseGeneratedCore(ledger, resolutionSemantic, primaryOppTarget) {
         return { core: relationshipCore, source: `relationshipSemantic[${primaryOppTarget}].coreStatsIfNeeded` };
     }
 
-    return { core: resolutionCore, source: 'resolutionSemantic.genStatsIfNeeded' };
+    return { core: { Rank: 'none', MainStat: 'none', PHY: 1, MND: 1, CHA: 1 }, source: 'engine default core fallback', defaultFallback: true };
 }
 
 function isDefaultGeneratedCore(core) {
@@ -702,6 +716,34 @@ function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem) {
     if (landed && (isDirect || isOpp || isHarmed)) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (auditInteraction === 'Y') return 'Bond';
     return 'No Change';
+}
+
+function relationToUserAction(npc, packet) {
+    return {
+        isDirect: includesName(packet.ActionTargets, npc),
+        isOpp: includesName(packet.OppTargets?.NPC, npc),
+        isBenefited: includesName(packet.BenefitedObservers, npc),
+        isHarmed: includesName(packet.HarmedObservers, npc),
+    };
+}
+
+function proactivityRefereeGuard(handoff, packet) {
+    const relation = handoff.RelationToUserAction || relationToUserAction(handoff.NPC, packet);
+    if (relation.isDirect || relation.isOpp || relation.isHarmed) return null;
+    if (relation.isBenefited && handoff.Target === 'Bond') {
+        return 'benefited observer cannot target user with aggression unless also direct/opposing/harmed';
+    }
+    if (handoff.NPC_STAKES === 'Y' && handoff.Target === 'Bond' && handoff.Landed === 'Y') {
+        return 'positive-stakes observer cannot convert benefit into user-targeting aggression';
+    }
+    if (handoff.Target === 'Bond'
+        && handoff.PressureMode === 'none'
+        && !['FREEZE', 'TERROR', 'HATRED'].includes(handoff.Lock)
+        && packet.HostilePhysicalIntent !== 'Y'
+        && !['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)) {
+        return 'Bond-routed non-hostile interaction cannot become hostile proactivity without harm, opposition, lock, or pressure evidence';
+    }
+    return null;
 }
 
 function updateRapport(currentRapport, target, rapportEncounterLock, mode = 'normal') {
