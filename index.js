@@ -52,11 +52,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.218';
+} from './engine.js?v=0.1.219';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.218';
-const MECHANICS_ARTIFACT_VERSION = 11;
+const EXT_VERSION = '0.1.219';
+const MECHANICS_ARTIFACT_VERSION = 12;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -748,8 +748,10 @@ function parseJsonResponse(text) {
     try {
         return JSON.parse(raw);
     } catch {
+        const tagged = raw.match(/<rp_engine_schema>\s*([\s\S]*?)\s*<\/rp_engine_schema>/i);
         const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
         const candidates = [
+            tagged?.[1],
             fenced?.[1],
             ...extractBalancedJsonObjects(raw),
         ].filter(Boolean);
@@ -778,9 +780,10 @@ function expandMechanicsMode(value) {
 }
 
 const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
-    'You are the hidden @Depth 0 RP Engine schema pass. Return JSON only.',
+    'You are the hidden @Depth 0 RP Engine schema pass. Return the schema artifact only.',
     'This schema pass is mandatory and authoritative. A visible roleplay reply is forbidden until this exact schema is complete.',
-    'Your entire output MUST be one valid JSON object matching the requested schema. No prose. No markdown. No narration. No commentary.',
+    'Your entire output MUST be one <rp_engine_schema> block containing one valid JSON object. No prose. No narration. No commentary.',
+    'Open with <rp_engine_schema>, print the JSON object, then close with </rp_engine_schema>.',
     '',
     'PURPOSE:',
     '- Execute the ResolutionEngine(input) and RelationshipEngine(npc,resolutionPacket) contextual procedures already present in the prompt.',
@@ -902,6 +905,7 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '',
     'COMPACT OUTPUT FORMAT:',
     '- Use the exact engine function/schema names below. Keep values short. Do not write paragraphs.',
+    '- Wrap the JSON in <rp_engine_schema>...</rp_engine_schema>. The tags are required for reliable extension parsing.',
     '- mode: NO_STAKES/STAKES/SYSTEM_UPDATE/OOC_STOP.',
     '- identifyGoal={goal, goalKind, evidence}. goalKind is Normal/IntimacyAdvancePhysical/IntimacyAdvanceVerbal.',
     '- identifyTargets={ActionTargets, OppTargets:{NPC,ENV}, BenefitedObservers, HarmedObservers, NPCInScene, evidence}. Every list contains short names/descriptors only.',
@@ -915,6 +919,37 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- decisiveAction, actionCount, hostilePhysicalHarm, newEncounterExplicit are compact answers.',
     '- outcomeOnSuccess/outcomeOnFailure are optional short consequence meanings. scene/npcFacts/inventoryDeltas/taskDeltas are optional and only for explicit updates.',
     '',
+    'MINIMUM REQUIRED JSON SKELETON:',
+    '<rp_engine_schema>',
+    '{',
+    '  "mode": "NO_STAKES",',
+    '  "identifyGoal": {"goal": "", "goalKind": "Normal", "evidence": ""},',
+    '  "identifyTargets": {"ActionTargets": [], "OppTargets": {"NPC": [], "ENV": []}, "BenefitedObservers": [], "HarmedObservers": [], "NPCInScene": [], "evidence": ""},',
+    '  "hasStakes": {"STAKES": "N", "evidence": ""},',
+    '  "checkIntimacyGate": {"IntimacyConsent": "N", "evidence": ""},',
+    '  "mapStats": {"USER": "MND", "OPP": "ENV", "userEvidence": "", "oppEvidence": ""},',
+    '  "genStats": [],',
+    '  "initPreset": [],',
+    '  "NPC_STAKES": [],',
+    '  "checkThreshold": [],',
+    '  "decisiveAction": "",',
+    '  "why": "",',
+    '  "outcomeOnSuccess": "",',
+    '  "outcomeOnFailure": "",',
+    '  "actionCount": 1,',
+    '  "hostilePhysicalHarm": "N",',
+    '  "newEncounterExplicit": "N",',
+    '  "timeDeltaMinutes": 0,',
+    '  "timeSkipReason": "",',
+    '  "scene": {"location": "", "time": "", "weather": ""},',
+    '  "npcFacts": [],',
+    '  "inventoryDeltas": [],',
+    '  "taskDeltas": []',
+    '}',
+    '</rp_engine_schema>',
+    '',
+    'Copy this skeleton shape exactly, but replace the values with the correct contextual results.',
+    '',
     'ENGINE FIELD MAP:',
     '- identifyGoal(input) -> identifyGoal.',
     '- identifyTargets(input, goal, context) -> identifyTargets.ActionTargets / identifyTargets.OppTargets.NPC / identifyTargets.OppTargets.ENV / identifyTargets.BenefitedObservers / identifyTargets.HarmedObservers / identifyTargets.NPCInScene.',
@@ -926,7 +961,7 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- checkThreshold(currentDisposition, npc context) override facts -> checkThreshold[].',
     '- hostile/combat intent to hurt or injure -> hostilePhysicalHarm.',
     '- newEncounterExplicit -> newEncounterExplicit.',
-    '- Output compact JSON only. Prefer short names, enums, empty arrays, and omitted optional objects over prose.',
+    '- Output compact JSON only inside the required tag block. Prefer short names, enums, empty arrays, and omitted optional objects over prose.',
     '- Required function-name fields are non-optional: identifyGoal, identifyTargets, hasStakes, checkIntimacyGate, mapStats, genStats, initPreset, NPC_STAKES, checkThreshold, decisiveAction, actionCount, hostilePhysicalHarm, newEncounterExplicit.',
 ]).join('\n');
 
@@ -953,7 +988,8 @@ function buildMechanicsPassPrompt({ chatExcerpt, latestUserMessage, tracker, use
         'RECENT CHAT EXCERPT:',
         chatExcerpt,
         '',
-        'Return only compact valid JSON matching the schema. No markdown, no explanation.',
+        'Return exactly this shape: <rp_engine_schema>{...valid compact JSON...}</rp_engine_schema>',
+        'No markdown, no explanation, no visible narration.',
     ].join('\n');
 }
 
@@ -964,7 +1000,7 @@ function buildMechanicsRepairPrompt({ priorPrompt, rawSchema, expandedSchema, is
         'MANDATORY SCHEMA REPAIR REQUIRED:',
         'The prior output contradicted or omitted required RP Engine function outputs. Correct it now.',
         'This generation is still a hidden schema pass. Visible narration is forbidden.',
-        'Return exactly one corrected compact JSON object using the exact same schema. Do not explain.',
+        'Return exactly one corrected <rp_engine_schema> block using the exact same schema. Do not explain.',
         '',
         'Validation issues:',
         ...issues.map(issue => `- ${issue}`),
@@ -1056,8 +1092,7 @@ async function runMechanicsPass({
             quietPrompt: prompt,
             skipWIAN: false,
             responseLength: mechanicsPassResponseLength(),
-            jsonSchema: MECHANICS_PASS_SCHEMA,
-            removeReasoning: true,
+            removeReasoning: false,
         }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
         pass = parseJsonResponse(response);
         if (pass && typeof pass === 'object') {
@@ -1076,8 +1111,7 @@ async function runMechanicsPass({
                 }),
                 skipWIAN: false,
                 responseLength: mechanicsPassResponseLength(),
-                jsonSchema: MECHANICS_PASS_SCHEMA,
-                removeReasoning: true,
+                removeReasoning: false,
             }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
             repairPass = parseJsonResponse(repairResponse);
             if (repairPass && typeof repairPass === 'object') {
@@ -4285,6 +4319,7 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
         return;
     }
 
+    clearMechanicsHandoff();
     const preTurnSnapshot = trackerSnapshotForRollback(tracker());
     resolving = true;
     try {
