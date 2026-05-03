@@ -23,7 +23,7 @@
 .rp-engine-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 8px;
     padding: 8px 10px;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
@@ -70,6 +70,14 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    flex: 0 0 auto;
+    order: 0;
+}
+
+.rp-engine-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    order: 1;
 }
 
 .rp-engine-actions button {
@@ -224,63 +232,38 @@
     font-weight: 500;
 }
 
-.rp-engine-message-mechanics {
-    display: flex;
-    align-items: stretch;
-    width: 100%;
-    margin: 0;
-    padding: 6px 12px;
-    color: var(--SmartThemeBodyColor);
-}
-
-body.bubblechat .rp-engine-message-mechanics {
-    padding-inline: 10px;
-}
-
-.rp-engine-message-mechanics > details {
-    width: 100%;
-    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 28%);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--SmartThemeBlurTintColor), transparent 8%);
-}
-
-.rp-engine-message-mechanics > details > summary {
-    cursor: pointer;
-    padding: 7px 10px;
-    font-size: 0.88rem;
-    font-weight: 700;
-    user-select: none;
-}
-
-.rp-engine-message-mechanics-body {
-    padding: 0 10px 10px;
-}
-
-.rp-engine-message-mechanics-body > details {
-    margin: 7px 0 0;
-    padding: 7px;
-    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 42%);
+.rp-engine-audit-details {
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 30%);
     border-radius: 6px;
     background: rgba(0, 0, 0, 0.12);
 }
 
-.rp-engine-message-mechanics-body > details > summary {
+.rp-engine-audit-details > summary,
+.rp-engine-audit-body > details > summary {
     cursor: pointer;
-    margin: 0 0 6px;
-    font-size: 0.86rem;
     font-weight: 700;
+    user-select: none;
 }
 
-.rp-engine-message-mechanics pre {
-    max-height: 320px;
-    overflow: auto;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    margin: 0;
-    padding: 8px;
+.rp-engine-audit-details > summary {
+    padding: 7px 8px;
+}
+
+.rp-engine-audit-body {
+    padding: 0 8px 8px;
+}
+
+.rp-engine-audit-body > details {
+    margin: 7px 0 0;
+    padding: 7px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor), transparent 45%);
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.22);
-    font-size: 0.82rem;
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.rp-engine-audit-body > details > summary {
+    margin: 0 0 6px;
+    font-size: 0.86rem;
 }
 
 #rp_engine_extension_settings .inline-drawer-content {

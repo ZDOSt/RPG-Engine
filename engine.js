@@ -65,6 +65,7 @@ export const DEFAULT_TRACKER = Object.freeze({
         },
     },
     lastAudit: null,
+    lastAuditDisplay: null,
     characterCreator: {
         offered: false,
         completed: false,
@@ -122,6 +123,9 @@ export const RESOLVER_SCHEMA = Object.freeze({
                     additionalProperties: false,
                     properties: {
                         name: { type: 'string' },
+                        aliases: { type: 'array', items: { type: 'string' } },
+                        descriptor: { type: 'string' },
+                        revealedFrom: { type: 'string' },
                         present: { type: 'boolean' },
                         position: { type: 'string' },
                         condition: { type: 'string' },
@@ -231,6 +235,12 @@ export function createTracker(existing = null) {
     delete tracker.scene.clock;
     tracker.presentNpcIds = Array.isArray(tracker.presentNpcIds) ? tracker.presentNpcIds : [];
     tracker.npcs = tracker.npcs && typeof tracker.npcs === 'object' ? tracker.npcs : {};
+    for (const npc of Object.values(tracker.npcs)) {
+        if (!npc || typeof npc !== 'object') continue;
+        npc.aliases = cleanList(Array.isArray(npc.aliases) ? npc.aliases : []);
+        npc.descriptor = cleanText(npc.descriptor);
+        npc.revealedFrom = cleanText(npc.revealedFrom);
+    }
     tracker.inventory = Array.isArray(tracker.inventory) ? tracker.inventory : [];
     tracker.quests = Array.isArray(tracker.quests) ? tracker.quests : [];
     tracker.pendingTasks = Array.isArray(tracker.pendingTasks) ? tracker.pendingTasks : [];
@@ -513,10 +523,12 @@ export function buildResolverPrompt({ chatExcerpt, latestUserMessage, tracker, u
         '- Use benefitedObservers/harmedObservers only when their stakes materially change: safety, resources, status, autonomy, or explicit goal progress. Do not use them for mere emotional tone or witnessing unless stakes change.',
         '- If the user helps an NPC by removing danger/obstacle, that NPC may be benefitedObserver even if not directly targeted.',
         '- If the user harms an NPC, steals from them, endangers them, violates their autonomy, or worsens their situation, they may be actionTarget/opposition or harmedObserver depending on directness.',
-        '- If the user acts toward the active character by direct address, pronoun, or one-NPC scene context, include that character by name.',
-        '- If a list has no explicit entries, return an empty list.',
-        '- npcInScene: all living NPCs the user directly interacted with, plus benefited/harmed observers. Include the active character if the user acts toward them by name or direct second-person context.',
-        '',
+    '- If the user acts toward the active character by direct address, pronoun, or one-NPC scene context, include that character by name.',
+    '- If a list has no explicit entries, return an empty list.',
+    '- npcInScene: all living NPCs the user directly interacted with, plus benefited/harmed observers. Include the active character if the user acts toward them by name or direct second-person context.',
+    '- If multiple same-role unnamed NPCs are present, use the exact tracker label, alias, or descriptor that identifies the intended one: Goblin 1, Goblin 2, Guard 1, the wounded goblin, the younger guard.',
+    '- If "the goblin", "the guard", or a similar role phrase is ambiguous among multiple present NPCs and context does not identify one, do not invent certainty. Use the explicit group phrase only if the user acts on the group; otherwise keep target lists conservative and state ambiguity in evidence.',
+    '',
         'STEP D: STAKES',
         '- Stakes are meaningful possible consequences tied to success or failure.',
         '- Stakes include physical risk, harm, danger, detection, material gain/loss, social status shift, loss of autonomy, meaningful obstacle resolution/failure, or explicit goal advancement/failure for the user or a specific living entity.',
@@ -587,9 +599,12 @@ export function buildResolverPrompt({ chatExcerpt, latestUserMessage, tracker, u
         '- Direct attacks, injury attempts, hostile physical contact, theft from an NPC, autonomy violations, or denied intimacy should be clear in targets/evidence so the relationship route can become Hostility or FearHostility.',
         '- If an NPC is present but the user did not interact with them and their stakes do not change, exclude them unless needed as benefited/harmed observer.',
         '',
-        'NPC INITIALIZATION GUIDANCE:',
-        '- Use npcFacts only for NPCs present/relevant this turn.',
-        '- explicitPreset=romanticOpen if NPC is explicitly already romantically/intimately involved with the user, willing toward the user, or in love.',
+    'NPC INITIALIZATION GUIDANCE:',
+    '- Use npcFacts only for NPCs present/relevant this turn.',
+    '- For multiple same-role NPCs, preserve distinct labels and descriptors from tracker context. Do not merge Goblin 1/Goblin 2/Goblin 3 unless the text explicitly treats them as one group.',
+    '- npcFacts.aliases may include old generic labels or observed descriptions. npcFacts.descriptor is a short identifying phrase from explicit observable context only.',
+    '- If an unnamed tracked NPC has their personal name revealed, return npcFacts with name as the revealed name and revealedFrom set to the old tracker label/alias. Preserve the old label as an alias; do not create a fresh unrelated NPC.',
+    '- explicitPreset=romanticOpen if NPC is explicitly already romantically/intimately involved with the user, willing toward the user, or in love.',
         '- explicitPreset=userBadRep if the user is explicitly hated, distrusted, wanted, or has bad reputation with this NPC/group.',
         '- explicitPreset=userGoodRep if the user is explicitly admired, trusted, praised, or known favorably.',
         '- explicitPreset=userNonHuman if user is explicitly visibly inhuman, demonic, monstrous, undead, bestial, eldritch, or construct-like AND NPC lacks explicit fear immunity.',
@@ -616,8 +631,10 @@ export function buildResolverPrompt({ chatExcerpt, latestUserMessage, tracker, u
         '',
         'TIME TRACKING GUIDANCE:',
         '- scene.time is authoritative when an explicit current in-world time is stated or revealed.',
-        '- timeDeltaMinutes is only for explicit in-scene time passage or time skips: waiting, sleeping, travel time, "three hours later", "after 20 minutes", "at dawn after the night passes", or similar.',
-        '- If the user explicitly skips forward, waits, travels for a stated duration, sleeps for a stated duration, or the narration says a duration passes, return the signed minute delta in timeDeltaMinutes and explain in timeSkipReason.',
+        '- timeDeltaMinutes is only allowed from the latest user message, never from prior assistant narration or recent chat context.',
+        '- Return timeDeltaMinutes only when the user explicitly declares a time skip/time passage, goes to sleep in-character, or completes travel to another destination such as "I go to the next town".',
+        '- Do not return timeDeltaMinutes for ordinary movement, approach, walking in-scene, or travel being roleplayed along the way. Prior chat may describe elapsed time, but it is not a new time skip unless the latest user message says so.',
+        '- If the user explicitly skips forward, waits, travels for a stated duration, sleeps for a stated duration, or completes destination travel, return the signed minute delta in timeDeltaMinutes and explain in timeSkipReason.',
         '- If the user sets a specific clock time instead of a duration, put it in scene.time and set timeDeltaMinutes=0.',
         '- If no explicit time change is stated, timeDeltaMinutes=0 and scene.time empty.',
         '',
@@ -724,9 +741,14 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     const namedDeadNpc = text.match(/\b(?!I\b|Me\b|My\b)([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:is|was|lies|lay|has been)?\s*(?:dead|killed|slain|destroyed|deceased)\b|\b(?!I\b|Me\b|My\b)([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:dies|died)\b/i);
     const namedForgottenNpc = text.match(/\b(?:forget|prune|remove|delete)\s+([A-Z][A-Za-z0-9_'-]{1,40})\s+(?:from\s+)?(?:the\s+)?(?:archive|lorebook|tracker|continuity)\b/i);
     const sceneSingleTarget = singlePresentNpcName(contextTracker);
+    const contextTarget = String(contextTracker?.currentInteractionTarget || '').trim();
     const activeCharacterName = String(characterName || '').trim();
-    const pronounTarget = /\b(her|him|them|their)\b/i.test(text) ? sceneSingleTarget : '';
+    const explicitVerbalIntimacySpeech = isExplicitVerbalIntimacyRequest(text);
+    const pronounTarget = /\b(her|him|them|their)\b/i.test(text) ? (sceneSingleTarget || contextTarget) : '';
     const directSceneTarget = sceneSingleTarget && /\b(look over there|distract|point)\b/i.test(text) ? sceneSingleTarget : '';
+    const impliedIntimacyTarget = explicitVerbalIntimacySpeech
+        ? (contextTarget || sceneSingleTarget || (activeCharacterName && lower.includes(activeCharacterName.toLowerCase()) ? activeCharacterName : ''))
+        : '';
     const target = firstCleanNpcName([
         namedAtTarget?.[1],
         namedDirectMagicTarget?.[1],
@@ -747,6 +769,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         namedIntimacyTarget?.[1],
         namedPriorIntimacyTarget?.[1],
         namedClothingIntimacyTarget?.[1],
+        impliedIntimacyTarget,
         namedSceneEntry?.[1],
         namedSceneExit?.[1],
         namedDeadNpc?.[1] || namedDeadNpc?.[2],
@@ -755,6 +778,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         containsAttack && namedIntroducedTarget?.[1],
         activeCharacterName && lower.includes(activeCharacterName.toLowerCase()) ? activeCharacterName : '',
         pronounTarget,
+        contextTarget && (contextualInteractionUsesCurrentTarget(text) || explicitVerbalIntimacySpeech || containsAttack || physicalContextActionUsesCurrentTarget(text)) ? contextTarget : '',
         directSceneTarget,
     ]);
     const hasTarget = Boolean(target);
@@ -784,7 +808,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     const sleightVsAwareness = hasTarget
         && /\b(palm|conceal|pocket|snatch|slip|steal|pickpocket|hide)\b[\s\S]{0,80}\b(coin|bill|money|purse|wallet|key|gem|ring|item|knife|letter)\b/i.test(text)
         && /\b(watch|watches|watching|look|looks|looking|stare|stares|staring|observe|observes|observing|notice|notices|noticing|eyes|guard|sentry|observer|lookout)\b/i.test(text);
-    const intimateVerbalRequest = hasTarget && /\b(ask|tell|demand|request)\b[\s\S]{0,80}\b(show|expose|flash|strip|undress|take off|remove)\b[\s\S]{0,80}\b(panties|underwear|bra|breasts|boobs|chest|ass|butt|nude|naked|body)\b/i.test(text);
+    const intimateVerbalRequest = hasTarget && explicitVerbalIntimacySpeech;
     const chasmJump = /\b(jump|leap|vault)\b[\s\S]{0,80}\b(chasm|gap|ravine|pit|ledge|crevasse)\b/i.test(text)
         || /\b(chasm|gap|ravine|pit|ledge|crevasse)\b[\s\S]{0,80}\b(jump|leap|vault)\b/i.test(text);
     const technicalMentalEnvTask = /\b(study|inspect|analyze|solve|decode|investigate|trace|identify|figure out|carefully|careful)\b[\s\S]{0,120}\b(disarm|pick|unlock|bypass|disable|open)\b[\s\S]{0,120}\b(trap|mechanism|lock|wire|runes|device)\b/i.test(text)
@@ -811,6 +835,15 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     const taskDelta = inferTaskDelta(text, target || characterName || '');
     const targetedMagic = hasTarget && /\b(magic|spell|cast|channel|invoke|weave|curse|hex|charm|glamour|compel|bewitch|enchant|dominate|blast|burn|freeze|shock|smite|firebolt|ward|dispel|counterspell)\b/i.test(text);
     const socialMagic = targetedMagic && /\b(charm|glamour|compel|bewitch|enchant|dominate|aura|presence|fear)\b/i.test(text);
+    const simpleDirectInteraction = hasTarget
+        && !containsAttack
+        && !physicalCoercion
+        && !targetedMagic
+        && !sexualPhysicalIntimacy
+        && !distractionTheft
+        && !stealthLiving
+        && !sleightVsAwareness
+        && /\b(nod|wave|smile|look|glance|bow|greet|say|tell|ask|thank|apologize|compliment|praise)\b/i.test(text);
     const introducedPreset = /\b(girlfriend|boyfriend|lover|spouse|wife|husband|partner|romantic|in love|close and trusting|currentDisposition\s*B\s*4|B4\s*\/\s*F\s*1\s*\/\s*H\s*1)\b/i.test(text)
         ? 'romanticOpen'
         : /\b(currentDisposition\s*B\s*3|B3\s*\/\s*F\s*1\s*\/\s*H\s*2|trusted|admired|known favorably)\b/i.test(text)
@@ -963,7 +996,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         fallback.oppTargetsEnv = [];
         fallback.npcInScene = [target];
         fallback.hasStakes = 'Y';
-        fallback.stakesEvidence = 'Explicit verbal intimacy proposition toward a named NPC.';
+        fallback.stakesEvidence = 'Explicit verbal intimacy proposition, command, or request toward a specific NPC.';
         fallback.actionCount = 1;
         fallback.userStat = 'CHA';
         fallback.userStatEvidence = 'verbal intimacy proposition';
@@ -1122,8 +1155,11 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
 
     if (hasTarget && socialVerb && !distractionTheft && !distractionIntimacy && !Object.keys(fallback).length) {
         const harmlessSocial = ordinaryHarmlessRequest || harmlessSocialExpression;
-        fallback.decisiveAction = text.match(/\b(tell|say|ask|convince|persuade|lie|deceive|bluff|threaten|warn|promise|negotiate|intimidate|coerce|demand|order|thank|apologize|compliment|praise|greet|mock|insult|taunt|humiliate|ridicule)[^.?!]*/i)?.[0] || text.slice(0, 140);
-        fallback.goal = fallback.decisiveAction;
+        const transaction = contextTarget && /\b(coin|coins|silver|gold|copper|pay|pays|paid|place|places|set|sets|put|puts|take|buy|room|meal|nights?|pouch|table|counter)\b/i.test(text);
+        fallback.decisiveAction = transaction
+            ? directInteractionAction(text, target)
+            : text.match(/\b(tell|say|ask|convince|persuade|lie|deceive|bluff|threaten|warn|promise|negotiate|intimidate|coerce|demand|order|thank|apologize|compliment|praise|greet|mock|insult|taunt|humiliate|ridicule)[^.?!]*/i)?.[0] || text.slice(0, 140);
+        fallback.goal = transaction ? `complete transaction with ${target}` : fallback.decisiveAction;
         fallback.goalKind = 'Normal';
         fallback.goalEvidence = fallback.decisiveAction;
         fallback.decisiveActionEvidence = text;
@@ -1140,6 +1176,38 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
         fallback.userStatEvidence = text.match(/\b(convince|persuade|lie|deceive|bluff|threaten|promise|negotiate|intimidate|coerce|demand|order|tell|say|ask|thank|apologize|compliment|praise|greet|mock|insult|taunt|humiliate|ridicule)\b/i)?.[0] || 'social action';
         fallback.oppStat = harmlessSocial ? 'ENV' : (hostileSocial ? 'MND' : 'CHA');
         fallback.oppStatEvidence = harmlessSocial ? '' : (hostileSocial ? 'Target resists pressure, deception, fear, or coercion with will/awareness.' : 'Target resists or contests interpersonal influence.');
+        fallback.hostilePhysicalHarm = 'N';
+        fallback.npcFacts = [{
+            name: target,
+            position: '',
+            condition: '',
+            knowsUser: '',
+            explicitPreset: 'neutralDefault',
+            rank: 'unknown',
+            mainStat: 'unknown',
+            override: 'NONE',
+        }];
+    }
+
+    if (simpleDirectInteraction && !Object.keys(fallback).length) {
+        fallback.goal = `interact with ${target}`;
+        fallback.goalKind = 'Normal';
+        fallback.goalEvidence = text;
+        fallback.decisiveAction = directInteractionAction(text, target);
+        fallback.decisiveActionEvidence = text;
+        fallback.outcomeOnSuccess = '';
+        fallback.outcomeOnFailure = '';
+        fallback.actionTargets = [target];
+        fallback.oppTargetsNpc = [];
+        fallback.oppTargetsEnv = [];
+        fallback.npcInScene = [target];
+        fallback.hasStakes = 'N';
+        fallback.stakesEvidence = 'Direct harmless interaction with a named NPC; initialize/track the NPC but do not roll.';
+        fallback.actionCount = 1;
+        fallback.userStat = 'CHA';
+        fallback.userStatEvidence = 'direct harmless interaction';
+        fallback.oppStat = 'ENV';
+        fallback.oppStatEvidence = '';
         fallback.hostilePhysicalHarm = 'N';
         fallback.npcFacts = [{
             name: target,
@@ -1512,7 +1580,7 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     }
 
     const timeDelta = inferTimeDeltaMinutes(text);
-    if (timeDelta) {
+    if (timeDelta && (!Object.keys(fallback).length || fallback.systemOnlyUpdate === 'Y')) {
         if (!Object.keys(fallback).length) {
             fallback.goal = 'advance scene time';
             fallback.goalKind = 'Normal';
@@ -1550,13 +1618,57 @@ export function inferFallbackExtraction(latestUserMessage, characterName = '', c
     return fallback;
 }
 
+function contextualInteractionUsesCurrentTarget(text) {
+    const source = String(text || '');
+    if (!source.trim()) return false;
+    if (/\b(he|him|his|she|her|hers|they|them|their)\b/i.test(source)) return true;
+    if (/"[^"]+"/.test(source) && /\b(I|I'll|I will|thank|thanks|yes|no|take|buy|pay|give|hand|place|set|offer|accept|decline|agree|ask|tell|say)\b/i.test(source)) return true;
+    return /\b(look|glance|nod|smile|bow|gesture|hand|give|offer|place|set|pay|buy|take|accept|decline|thank|apologize|answer|reply)\b/i.test(source);
+}
+
+function isExplicitVerbalIntimacyRequest(text) {
+    const source = String(text || '');
+    if (!source.trim()) return false;
+    const requestVerb = /\b(ask|tell|demand|request|order|command|say|whisper)\b/i.test(source)
+        || /["“][^"”]{0,180}["”]/.test(source);
+    if (!requestVerb) return false;
+    return /\b(show|expose|flash|strip|undress|take off|remove|pull down|lift|open|spread)\b[\s\S]{0,100}\b(panties|underwear|bra|breasts?|boobs?|chest|ass|butt|nude|naked|body|genitals?|crotch)\b/i.test(source)
+        || /\b(let me|let us|allow me|allow us)\b[\s\S]{0,80}\b(see|touch|kiss|grope|fondle|caress)\b[\s\S]{0,80}\b(panties|underwear|bra|breasts?|boobs?|chest|ass|butt|nude|naked|body|genitals?|crotch|you|your)\b/i.test(source);
+}
+
+function physicalContextActionUsesCurrentTarget(text) {
+    const source = String(text || '');
+    return /\b(hit|punch|kick|slap|cut|slash|stab|shoot|strike|attack|slam|knee|swing|swipe|sweep|thrust|jab|grab|yank|drag|pin|restrain|tackle|trip|shove|push|barge|force)\b/i.test(source);
+}
+
+function directInteractionAction(text, target) {
+    const source = String(text || '');
+    const direct = source.match(new RegExp(`\\b(nod|wave|smile|look|glance|bow|greet|say|tell|ask|thank|apologize|compliment|praise)\\b[^.?!]{0,80}\\b${escapeRegExp(target)}\\b`, 'i'))?.[0];
+    if (direct) return cleanText(direct);
+    const pronoun = source.match(/\b(look|glance|nod|smile|bow|gesture|hand|give|offer|place|set|pay|buy|take|accept|decline|thank|apologize|answer|reply)\b[^.?!]{0,80}\b(?:him|her|them|his|hers|their)\b/i)?.[0];
+    if (pronoun) return cleanText(`${pronoun} (${target})`);
+    const quoted = source.match(/["“]([^"”]{1,120})["”]/)?.[1];
+    if (quoted) return cleanText(`speak to ${target}: "${quoted}"`);
+    return `interact with ${target}`;
+}
+
 function inferTimeDeltaMinutes(text) {
     const source = String(text || '').toLowerCase();
-    if (!/\b(wait|sleep|rest|travel|walk|ride|after|later|pass|skip|timeskip|time skip)\b/.test(source)) return null;
-    const match = source.match(/\b(?:(\d+(?:\.\d+)?)|(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter))\s*(minutes?|mins?|hours?|hrs?|days?)\b/);
+    const outsideQuotes = source.replace(/["“”][\s\S]*?["“”]/g, ' ');
+    if (/["“”][\s\S]*\b(?:minutes?|mins?|hours?|hrs?|days?|weeks?|month|year)s?\b[\s\S]*["“”]/.test(source)
+        && !/\b(wait|sleep|rest|travel|ride|skip|timeskip|time skip|after|later|pass(?:es|ed)?|until)\b/.test(source.replace(/["“”][\s\S]*?["“”]/g, ''))) {
+        return null;
+    }
+    const destinationTravel = /\b(?:go|head|travel|ride|set out|depart|leave)\s+(?:to|for|into)\s+(?:the\s+)?(?:next\s+)?(?:town|city|village|camp|castle|keep|forest|market|temple|destination)\b/.test(outsideQuotes)
+        && !/\b(along the way|on the way|as I go|while traveling|roleplay|scene by scene|slowly|carefully|continue walking|approach|walk up to)\b/.test(outsideQuotes);
+    if (!/\b(wait|sleep|go to sleep|fall asleep|rest until|after|later|pass|skip|timeskip|time skip|until|overnight)\b/.test(outsideQuotes) && !destinationTravel) return null;
+    const match = outsideQuotes.match(/\b(?:(\d+(?:\.\d+)?)|(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter))\s*(minutes?|mins?|hours?|hrs?|days?)\b/);
     if (!match) {
-        if (/\bovernight\b|\buntil\s+(?:morning|dawn|sunrise)\b/.test(source)) {
+        if (/\bovernight\b|\buntil\s+(?:morning|dawn|sunrise)\b|\b(go to sleep|fall asleep|sleep)\b/.test(outsideQuotes)) {
             return { minutes: 8 * 60, reason: 'overnight or until morning/dawn' };
+        }
+        if (destinationTravel) {
+            return { minutes: 60, reason: 'destination travel' };
         }
         return null;
     }
@@ -1826,10 +1938,15 @@ export function resolveTurn(extraction, tracker, options = {}) {
         ...clean.npcFacts.filter(x => x.present !== false).map(x => x.name),
     ].filter(Boolean));
     const absentNpcNames = new Set(clean.npcFacts.filter(x => x.present === false).map(x => normalizeName(x.name)));
-    const presentNpcNames = unique([...priorPresentNames, ...npcNames])
+    let presentNpcNames = unique([...priorPresentNames, ...npcNames])
         .filter(name => !absentNpcNames.has(normalizeName(name)));
 
-    nextTracker.presentNpcIds = presentNpcNames.map(name => ensureNpc(nextTracker, name, clean).id);
+    applyRevealedNpcNames(nextTracker, clean);
+    presentNpcNames = unique(presentNpcNames.map(name => {
+        const renamed = clean.npcFacts.find(fact => fact.revealedFrom && eqName(fact.revealedFrom, name));
+        return renamed?.name || name;
+    }));
+    nextTracker.presentNpcIds = unique(presentNpcNames.map(name => ensureNpc(nextTracker, name, clean).id));
 
     for (const fact of clean.npcFacts) {
         const npc = ensureNpc(nextTracker, fact.name, clean).npc;
@@ -1842,6 +1959,9 @@ export function resolveTurn(extraction, tracker, options = {}) {
         if (fact.position) npc.position = fact.position;
         if (fact.condition) npc.condition = fact.condition;
         if (fact.knowsUser) npc.knowsUser = fact.knowsUser;
+        if (fact.descriptor) npc.descriptor = fact.descriptor;
+        if (fact.revealedFrom) npc.revealedFrom = fact.revealedFrom;
+        if (fact.aliases?.length) npc.aliases = cleanList([...(npc.aliases || []), ...fact.aliases]);
         if (fact.override && fact.override !== 'unknown') npc.override = fact.override;
         if (fact.archiveStatus && fact.archiveStatus !== 'unknown') npc.archiveStatus = fact.archiveStatus;
         const explicitDisposition = sanitizeDisposition(fact.disposition);
@@ -1917,8 +2037,7 @@ export function buildNarrationHandoff(packet, npcHandoffs, chaosHandoff = noChao
     const activeGuidance = activeProactivity.map(([name, p]) => describeProactivityNarrationCompact(name, p));
     const aggressionGuidance = aggressionEntries.map(([name, r]) => describeAggressionNarrationCompact(name, r));
 
-    return [
-        'Private mechanics brief for this reply. Do not reveal.',
+    const handoffLines = [
         describeOocNarration(packet),
         describeSystemUpdateNarration(packet),
         `Resolution: ${describeResolutionNarrationCompact(packet)}`,
@@ -1927,8 +2046,22 @@ export function buildNarrationHandoff(packet, npcHandoffs, chaosHandoff = noChao
         `Chaos: ${describeChaosNarrationCompact(chaos)}`,
         activeGuidance.length ? `Proactivity: ${activeGuidance.join(' | ')}` : 'Proactivity: none.',
         aggressionGuidance.length ? `Aggression: ${aggressionGuidance.join(' | ')}` : 'Aggression: none.',
-        'Guard: narrate only authorized outcome; no extra damage, targets, counters, events, status changes, relationship changes, or user choices.',
-    ].filter(Boolean).join('\n');
+        'Guard: narrate only authorized outcome in visible prose; no extra damage, targets, counters, events, status changes, relationship changes, or user choices.',
+    ].filter(Boolean);
+
+    return [
+        'The following <narration_handoff> block is authoritative for the next assistant reply.',
+        'You MUST use it as binding outcome instructions for the visible in-character response.',
+        'Do NOT quote, summarize, label, reveal, or output the handoff block.',
+        'Do NOT output mechanics text, field names, dice, JSON, schema, audit text, or hidden notes.',
+        '<narration_handoff>',
+        'NO visible narration is permitted inside this handoff block.',
+        ...handoffLines,
+        '</narration_handoff>',
+        'Now write ONLY the visible assistant reply.',
+        'If OOCMode=STOP, answer only the out-of-character request.',
+        'Otherwise, produce normal in-character narration/dialogue that follows the handoff exactly. Do not leave the assistant message blank.',
+    ].join('\n');
 }
 
 function describeOocNarration(packet) {
@@ -2014,7 +2147,7 @@ function describeResolutionNarration(packet) {
 function describeResolutionNarrationCompact(packet) {
     const goal = packet.GOAL || 'user action';
     const decisive = packet.DecisiveAction || goal;
-    const targets = joinList([...(packet.ActionTargets || []), ...(packet.OppTargets?.NPC || []), ...(packet.OppTargets?.ENV || [])]);
+    const targets = joinList(unique([...(packet.ActionTargets || []), ...(packet.OppTargets?.NPC || []), ...(packet.OppTargets?.ENV || [])]));
     const targetText = targets ? ` target=${targets};` : '';
     const successText = packet.OutcomeOnSuccess ? ` successMeans=${packet.OutcomeOnSuccess};` : '';
     const failureText = packet.OutcomeOnFailure ? ` failureMeans=${packet.OutcomeOnFailure};` : '';
@@ -2038,14 +2171,16 @@ function describeResolutionNarrationCompact(packet) {
 }
 
 function combatOutcomeInstruction(packet) {
+    const landed = Math.max(0, Number(packet.LandedActions) || 0);
+    const landedText = landed === 1 ? 'one declared attack' : `${landed} declared attacks`;
     switch (packet.Outcome) {
-        case 'dominant_impact': return 'critical success; up to 3 declared hostile actions may land strongly; no extra attacks.';
-        case 'solid_impact': return 'moderate success; up to 2 declared hostile actions may land meaningfully; no extra attacks.';
-        case 'light_impact': return 'minor success; one hostile action may land lightly/partially; no decisive advantage.';
+        case 'dominant_impact': return `critical success; the opponent is badly exposed, overwhelmed, or unable to stop the sequence; ${landedText} may land decisively; no extra attacks.`;
+        case 'solid_impact': return `moderate success; the attack lands solidly and produces clear impact or control; ${landedText} may land meaningfully; no extra attacks.`;
+        case 'light_impact': return 'minor success; one hostile action connects lightly, glances, clips, or only partially controls the target; no decisive advantage.';
         case 'stalemate': return 'stalemate; no landed hostile action, no counter opening, no winner.';
-        case 'checked': return 'minor failure; no hit lands; light counter opening only if proactivity/aggression uses it.';
-        case 'deflected': return 'moderate failure; no hit lands; medium counter opening only if proactivity/aggression uses it.';
-        case 'avoided': return 'critical failure; no hit lands; severe counter opening only if proactivity/aggression uses it.';
+        case 'checked': return 'minor failure; the attack is checked at contact or just before contact; no hit lands; light counter opening only if proactivity/aggression uses it.';
+        case 'deflected': return 'moderate failure; the opponent turns the attack aside, displaces it, or forces it off-line; no hit lands; medium counter opening only if proactivity/aggression uses it.';
+        case 'avoided': return 'critical failure; the opponent avoids it cleanly while the user overextends, misses badly, or ends out of position; no hit lands; severe counter opening only if proactivity/aggression uses it.';
         default: return 'resolve hostile action conservatively.';
     }
 }
@@ -2214,7 +2349,7 @@ function describeProactivityNarration(name, action) {
 }
 
 function describeProactivityNarrationCompact(name, action) {
-    const target = action.TargetsUser === 'Y' ? 'targets user' : 'does not target user';
+    const target = action.TargetsUser === 'Y' ? 'targets user with aggression/boundary pressure' : 'non-hostile initiative';
     const counter = action.CounterBonus ? `counterBonus=${action.CounterBonus}` : '';
     return `${name}: intent=${action.Intent}; impulse=${action.Impulse}; ${target}${counter ? `; ${counter}` : ''}`;
 }
@@ -2343,6 +2478,8 @@ export function serializeNpcArchiveEntry(npc, options = {}) {
         `ChatId: ${chatId || 'global'}`,
         `Name: ${cleanText(npc?.name) || 'Unknown NPC'}`,
         `Aliases: ${aliases.length ? aliases.join(', ') : cleanText(npc?.name) || 'Unknown NPC'}`,
+        `Descriptor: ${cleanText(npc?.descriptor) || 'unknown'}`,
+        `RevealedFrom: ${cleanText(npc?.revealedFrom) || 'unknown'}`,
         `Present: ${npc?.present ? 'Y' : 'N'}`,
         `ArchiveStatus: ${sanitizeArchiveStatus(npc?.archiveStatus)}`,
         `LastKnownLocation: ${cleanText(npc?.lastKnownLocation || options.location) || 'unknown'}`,
@@ -2393,6 +2530,8 @@ export function parseNpcArchiveContent(content) {
         chatId: field('ArchiveChatKey') || field('ChatId') || 'global',
         name,
         aliases,
+        descriptor: field('Descriptor') || '',
+        revealedFrom: field('RevealedFrom') || '',
         present: /^Y$/i.test(field('Present')),
         archiveStatus: sanitizeArchiveStatus(field('ArchiveStatus')),
         lastKnownLocation: field('LastKnownLocation'),
@@ -2422,11 +2561,14 @@ export function upsertArchivedNpc(tracker, archived, present = true) {
     const prior = existing?.npc || {};
     const disposition = normalizeLockedDisposition(sanitizeDisposition(archived.disposition) || prior.disposition || { B: 2, F: 2, H: 2 });
     const stats = sanitizeStats(archived.coreStats, prior.coreStats || { PHY: 2, MND: 2, CHA: 2 }, 1, 10);
+    const oldId = existing?.id;
     safeTracker.npcs[id] = {
         ...prior,
         id,
         name: archived.name,
         aliases: cleanList([...(Array.isArray(prior.aliases) ? prior.aliases : []), ...(archived.aliases || [])]),
+        descriptor: archived.descriptor || prior.descriptor || '',
+        revealedFrom: archived.revealedFrom || prior.revealedFrom || '',
         present,
         position: prior.position || '',
         condition: archived.condition || prior.condition || 'unknown',
@@ -2447,6 +2589,10 @@ export function upsertArchivedNpc(tracker, archived, present = true) {
         archiveStatus: sanitizeArchiveStatus(archived.archiveStatus || prior.archiveStatus),
         override: prior.override || 'NONE',
     };
+    if (oldId && oldId !== id) {
+        delete safeTracker.npcs[oldId];
+        safeTracker.presentNpcIds = (safeTracker.presentNpcIds || []).map(npcId => npcId === oldId ? id : npcId);
+    }
     if (present && !safeTracker.presentNpcIds.includes(id)) {
         safeTracker.presentNpcIds.push(id);
     }
@@ -2461,6 +2607,9 @@ export function initializeSceneNpc(tracker, name, fact = {}) {
         npcInScene: [npcName],
         npcFacts: [{
             name: npcName,
+            aliases: Array.isArray(fact.aliases) ? fact.aliases : [],
+            descriptor: fact.descriptor || '',
+            revealedFrom: fact.revealedFrom || '',
             present: true,
             position: fact.position || '',
             condition: fact.condition || '',
@@ -2953,8 +3102,8 @@ function resolveNpcRelationship(name, packet, clean, tracker) {
     const currentRapport = clamp(Number(npc.rapport ?? 0), 0, 5);
     let rapportEncounterLock = clean.newEncounter === 'Y' ? 'N' : (npc.rapportEncounterLock === 'Y' ? 'Y' : 'N');
     const isAllowed = packet.IntimacyConsent;
-    const target = routeDispositionTarget(name, packet, isAllowed, currentDisposition);
-    const npcStakes = packet.BenefitedObservers.includes(name) && outcomeImprovesStakes(packet) ? 'Y' : 'N';
+    const npcStakes = modelNpcStakesFor(name, clean);
+    const target = routeDispositionTarget(name, packet, isAllowed, currentDisposition, npcStakes);
     const rapport = updateRapport(currentRapport, target, rapportEncounterLock);
     let nextRapport = rapport.currentRapport;
     rapportEncounterLock = rapport.rapportEncounterLock;
@@ -2994,7 +3143,12 @@ function resolveNpcRelationship(name, packet, clean, tracker) {
     };
 }
 
-function routeDispositionTarget(name, packet, isAllowed, currentDisposition = null) {
+function modelNpcStakesFor(name, clean) {
+    const found = (clean?.npcStakes || []).find(entry => eqName(entry.NPC, name));
+    return found?.NPC_STAKES === 'Y' ? 'Y' : 'N';
+}
+
+function routeDispositionTarget(name, packet, isAllowed, currentDisposition = null, npcStakes = 'N') {
     const isDirect = packet.ActionTargets.includes(name);
     const isOpp = packet.OppTargets.NPC.includes(name);
     const isBenefited = packet.BenefitedObservers.includes(name);
@@ -3005,7 +3159,7 @@ function routeDispositionTarget(name, packet, isAllowed, currentDisposition = nu
     const out = packet.Outcome;
 
     if (!isDirect && !isOpp && !isBenefited && !isHarmed) return 'No Change';
-    if (!isDirect && !isOpp && isBenefited) return outcomeImprovesStakes(packet) ? 'Bond' : 'No Change';
+    if (!isDirect && !isOpp && isBenefited) return npcStakes === 'Y' ? 'Bond' : 'No Change';
     if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g)) {
         if (isAllowed === 'Y') return 'Bond';
@@ -3016,14 +3170,14 @@ function routeDispositionTarget(name, packet, isAllowed, currentDisposition = nu
     if ((isDirect || isOpp) && /\b(insult|mock|belittle|humiliate|taunt|provoke|offend|slander|accuse)\b/i.test(challenge)) return 'Hostility';
     if (isDirect && (/\b(give|return|offer|help|heal|protect|shield|free|release|rescue|save)\b/i.test(challenge)
         || /\bhand\b[\s\S]{0,80}\b(potion|medicine|bandage|food|water|key|coin|money|dagger|knife|letter|item|object|supplies)\b/i.test(challenge))) {
-        return outcomeImprovesStakes(packet) ? 'Bond' : 'No Change';
+        return npcStakes === 'Y' ? 'Bond' : 'No Change';
     }
     if ((isDirect || isOpp || isHarmed) && packet.HostilePhysicalHarm === 'Y') {
         return landed && ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     }
     if (landed && (isDirect || isOpp || isHarmed)) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if ((isDirect || isOpp) && /\b(grab|yank|drag|pin|restrain|tackle|trip|shove|push|barge|force past|force through|throw|hurl|toss|fling|spit|steal|snatch|pickpocket|palm)\b/i.test(challenge)) return 'Hostility';
-    if (isBenefited && outcomeImprovesStakes(packet)) return 'Bond';
+    if (isBenefited && npcStakes === 'Y') return 'Bond';
     return 'No Change';
 }
 
@@ -3131,6 +3285,41 @@ function initPresetForNpc(name, clean) {
     }
 }
 
+function applyRevealedNpcNames(tracker, clean) {
+    for (const fact of clean?.npcFacts || []) {
+        const newName = cleanNpcName(fact?.name);
+        const oldName = cleanNpcName(fact?.revealedFrom);
+        if (!newName || !oldName || eqName(newName, oldName)) continue;
+        const oldEntry = findNpc(tracker, oldName);
+        if (!oldEntry) continue;
+        const newId = makeNpcId(newName);
+        const oldNpc = oldEntry.npc;
+        const existingNew = tracker.npcs?.[newId];
+        const aliases = cleanList([
+            oldNpc.name,
+            oldName,
+            ...(Array.isArray(oldNpc.aliases) ? oldNpc.aliases : []),
+            ...(Array.isArray(fact.aliases) ? fact.aliases : []),
+        ]);
+        const renamed = {
+            ...oldNpc,
+            ...(existingNew || {}),
+            id: newId,
+            name: newName,
+            aliases,
+            descriptor: fact.descriptor || oldNpc.descriptor || existingNew?.descriptor || '',
+            revealedFrom: oldNpc.name || oldName,
+            present: oldNpc.present !== false || existingNew?.present === true,
+        };
+        tracker.npcs[newId] = renamed;
+        if (oldEntry.id !== newId) {
+            delete tracker.npcs[oldEntry.id];
+            tracker.presentNpcIds = (tracker.presentNpcIds || []).map(id => id === oldEntry.id ? newId : id);
+        }
+    }
+    tracker.presentNpcIds = unique(tracker.presentNpcIds || []);
+}
+
 function ensureNpc(tracker, name, clean) {
     const existing = findNpc(tracker, name);
     if (existing) return existing;
@@ -3140,6 +3329,9 @@ function ensureNpc(tracker, name, clean) {
     tracker.npcs[id] = {
         id,
         name,
+        aliases: cleanList([...(Array.isArray(fact?.aliases) ? fact.aliases : []), fact?.descriptor].filter(Boolean)),
+        descriptor: fact?.descriptor || '',
+        revealedFrom: fact?.revealedFrom || '',
         present: true,
         position: fact?.position || '',
         condition: fact?.condition || 'unknown',
@@ -3160,7 +3352,7 @@ function ensureNpc(tracker, name, clean) {
 function findNpc(tracker, name) {
     const wanted = normalizeName(name);
     for (const [id, npc] of Object.entries(tracker.npcs || {})) {
-        if (id === makeNpcId(name) || normalizeName(npc.name) === wanted) {
+        if (id === makeNpcId(name) || normalizeName(npc.name) === wanted || (npc.aliases || []).some(alias => normalizeName(alias) === wanted)) {
             return { id, npc };
         }
     }
@@ -3196,16 +3388,23 @@ function combatTier(margin) {
 }
 
 function applyInventoryDeltas(tracker, deltas) {
+    let changed = false;
     for (const delta of deltas) {
         if (!delta.item || !delta.evidence) continue;
         const item = String(delta.item).trim();
         if (!item) continue;
         if (['gain', 'equip'].includes(delta.action) && !tracker.inventory.some(x => normalizeName(x) === normalizeName(item))) {
             tracker.inventory.push(item);
+            changed = true;
         }
         if (['lose', 'use'].includes(delta.action)) {
+            const before = tracker.inventory.length;
             tracker.inventory = tracker.inventory.filter(x => normalizeName(x) !== normalizeName(item));
+            changed = changed || tracker.inventory.length !== before;
         }
+    }
+    if (changed) {
+        tracker.inventorySource = 'runtime';
     }
 }
 
@@ -3299,46 +3498,30 @@ function sanitizeExtraction(value) {
             weather: cleanText(input.scene?.weather),
         },
         npcFacts: Array.isArray(input.npcFacts) ? input.npcFacts.map(sanitizeNpcFact).filter(x => x.name) : [],
+        npcStakes: Array.isArray(input.npcStakes) ? input.npcStakes.map(sanitizeNpcStake).filter(x => x.NPC) : [],
         inventoryDeltas: Array.isArray(input.inventoryDeltas) ? input.inventoryDeltas.map(sanitizeInventoryDelta).filter(x => x.item) : [],
         taskDeltas: Array.isArray(input.taskDeltas) ? input.taskDeltas.map(sanitizeTaskDelta).filter(x => x.task) : [],
+        modelSchema: input.modelSchema && typeof input.modelSchema === 'object' ? structuredClone(input.modelSchema) : null,
+        originalModelSchema: input.originalModelSchema && typeof input.originalModelSchema === 'object' ? structuredClone(input.originalModelSchema) : null,
+        schemaRepaired: yn(input.schemaRepaired),
+        schemaValidationIssues: Array.isArray(input.schemaValidationIssues) ? cleanList(input.schemaValidationIssues).slice(0, 12) : [],
+        schemaRawResponse: String(input.schemaRawResponse || '').trim().slice(0, 6000),
+        schemaRepairResponse: String(input.schemaRepairResponse || '').trim().slice(0, 6000),
+        expandedExtraction: input.expandedExtraction && typeof input.expandedExtraction === 'object' ? structuredClone(input.expandedExtraction) : null,
     };
     return normalizeExtractionMechanics(clean);
 }
 
 function normalizeExtractionMechanics(clean) {
-    const text = [
-        clean.goal,
-        clean.goalEvidence,
-        clean.decisiveAction,
-        clean.decisiveActionEvidence,
-    ].join(' ');
-    const lower = text.toLowerCase();
     const hasLivingOpposition = clean.oppTargetsNpc.length > 0;
     const hasEnvironmentOpposition = clean.oppTargetsEnv.length > 0;
-
-    const social = /\b(convince|persuade|negotiate|bargain|plead|ask|tell|say|promise|diplomac|talk|flatter|charm|deceive|lie|bluff|trick|fool|distract|misdirect|intimidat|coerc|blackmail|threat|pressure|demand|order|warn|conceal)\b/.test(lower);
-    const deceptiveOrHostileSocial = /\b(deceive|lie|bluff|trick|fool|distract|misdirect|intimidat|coerc|blackmail|threat|pressure|demand|order|warn|conceal|look over there|look there|look away|glance away|turn away|reveal|expose|unless|if\b.*\bnot)\b/.test(lower);
-    const magicSocial = /\b(charm|glamou?r|compel|compulsion|enthrall|enchant|seduc|fear aura|aura of fear|aura of command|magical deception|illusion.*(?:believe|emotion|trust|desire))\b/.test(lower);
-    const magicMental = /\b(magic|spell|cast|channel|ritual|ward|dispel|counterspell|curse|hex|blessing|heal|summon|teleport|divin|scry|illusion|glamou?r|enchant|charm|compel|possess|psychic|spirit|soul|mana|arcane|rune|sigil|portal|elemental|fireball|lightning|ice|shadow|holy|necrotic)\b/.test(lower);
-    const magicPhysicalDelivery = /\b(aim|throw|hurl|toss|touch|strike|slash|stab|shoot|swing|swipe|wand|staff|rod|weapon|blade|arrow|bolt|projectile|sigil while|draw.*sigil)\b/.test(lower) && magicMental;
-    const stealth = /\b(sneak|creep|hide|stealth|unnoticed|undetected|avoid notice|without being seen|without being noticed|pickpocket|sleight|slip past|slip by)\b/.test(lower);
-    const hostilePhysical = clean.hostilePhysicalHarm === 'Y' || /\b(hit|punch|kick|slap|cut|slash|stab|shoot|strike|attack|slam|kill|wound|injure|hurt)\b/.test(lower)
-        || /\b(swing|swipe|sweep|bring|drive|thrust|jab)\b[\s\S]{0,80}\b(sword|blade|axe|mace|club|knife|dagger|spear|staff|fist|elbow|knee|boot)\b[\s\S]{0,80}\b(at|into|toward|towards|for|against)\b/.test(lower);
-    const technicalMentalEnv = /\b(study|inspect|analyze|solve|decode|investigate|trace|identify|diagnose|figure out|careful|carefully)\b[\s\S]{0,120}\b(disarm|pick|unlock|bypass|disable|open)\b[\s\S]{0,120}\b(trap|mechanism|lock|wire|runes|device)\b/.test(lower)
-        || /\b(disarm|pick|unlock|bypass|disable|open)\b[\s\S]{0,120}\b(trap|mechanism|lock|wire|runes|device)\b[\s\S]{0,120}\b(study|inspect|analyze|solve|decode|investigate|trace|identify|diagnose|figure out|careful|carefully)\b/.test(lower);
-    const physicalContest = hostilePhysical || (!technicalMentalEnv && /\b(shove|push|barge|force|grapple|wrestle|tackle|restrain|break free|dodge|duck|run|sprint|chase|climb|jump|leap|vault|swim|lift|carry|break|smash|force open|disarm|pick lock)\b/.test(lower));
-    const mentalEnv = /\b(search|inspect|study|analyze|recall|remember|know|identify|track|survival|forage|navigate|diagnose|solve|decode|investigate|perceive|listen|spot|focus|ritual|spell|cast|channel|ward|dispel|counterspell|curse|hex|blessing|heal|summon|teleport|divin|scry|illusion|enchant|rune|sigil|portal|arcane|magic)\b/.test(lower);
+    const directOrOpposed = new Set([...clean.actionTargets, ...clean.oppTargetsNpc].map(normalizeName));
+    clean.benefitedObservers = clean.benefitedObservers.filter(name => !directOrOpposed.has(normalizeName(name)));
+    clean.harmedObservers = clean.harmedObservers.filter(name => !directOrOpposed.has(normalizeName(name)));
 
     if (hasLivingOpposition && clean.oppStat === 'ENV') {
-        clean.oppStat = social || stealth || magicMental ? 'MND' : 'PHY';
+        clean.oppStat = clean.goalKind === 'IntimacyAdvanceVerbal' ? 'MND' : 'PHY';
         clean.oppStatEvidence = clean.oppStatEvidence || 'Living opposition cannot resolve as ENV.';
-    }
-
-    if (hasLivingOpposition && magicSocial) {
-        clean.userStat = 'CHA';
-        clean.oppStat = 'MND';
-        clean.userStatEvidence = clean.userStatEvidence || 'Supernatural social influence uses CHA.';
-        clean.oppStatEvidence = clean.oppStatEvidence || 'Target resists magical social pressure with MND.';
     }
 
     if (hasLivingOpposition && clean.goalKind === 'IntimacyAdvanceVerbal') {
@@ -3348,54 +3531,12 @@ function normalizeExtractionMechanics(clean) {
         clean.oppStatEvidence = clean.oppStatEvidence || 'Target resists unwanted intimacy/boundary pressure with MND.';
     }
 
-    if (hasLivingOpposition && social && !magicSocial && clean.goalKind !== 'IntimacyAdvanceVerbal') {
-        clean.userStat = 'CHA';
-        clean.oppStat = deceptiveOrHostileSocial ? 'MND' : 'CHA';
-        clean.userStatEvidence = clean.userStatEvidence || 'Social influence uses CHA.';
-        clean.oppStatEvidence = clean.oppStatEvidence || (deceptiveOrHostileSocial ? 'Target resists deception, pressure, or concealed intent with MND.' : 'Target contests sincere social influence with CHA.');
-    }
-
-    if (hasLivingOpposition && magicMental && !magicSocial && !social && !physicalContest) {
-        clean.userStat = 'MND';
-        clean.oppStat = 'MND';
-        clean.userStatEvidence = clean.userStatEvidence || 'Deliberate supernatural exertion uses MND.';
-        clean.oppStatEvidence = clean.oppStatEvidence || 'Living magical, mental, spiritual, or perceptive resistance uses MND.';
-    }
-
-    if (hasLivingOpposition && magicMental && magicPhysicalDelivery && !magicSocial && !social && !stealth) {
-        clean.userStat = clean.userStat === 'PHY' ? 'PHY' : 'MND';
-        clean.oppStat = physicalContest ? 'PHY' : clean.oppStat;
-        clean.userStatEvidence = clean.userStatEvidence || 'Magic delivery is mapped by the decisive casting or bodily delivery method.';
-        clean.oppStatEvidence = clean.oppStatEvidence || 'Living target resists by the explicit defense mode.';
-    }
-
-    if (hasLivingOpposition && stealth) {
-        clean.userStat = 'PHY';
-        clean.oppStat = 'MND';
-        clean.userStatEvidence = clean.userStatEvidence || 'Stealth movement or sleight of hand uses PHY.';
-        clean.oppStatEvidence = clean.oppStatEvidence || 'Living observer passively opposes with awareness/perception.';
-    }
-
-    if (hasLivingOpposition && physicalContest && !stealth && !social) {
-        clean.userStat = 'PHY';
-        clean.oppStat = 'PHY';
-        clean.userStatEvidence = clean.userStatEvidence || 'Physical contest uses PHY.';
-        clean.oppStatEvidence = clean.oppStatEvidence || 'Living target physically resists or contests with PHY.';
-    }
-
     if (!hasLivingOpposition && hasEnvironmentOpposition) {
         clean.oppStat = 'ENV';
-        if (social) {
-            clean.userStat = 'CHA';
-        } else if (technicalMentalEnv || magicMental || (mentalEnv && !physicalContest)) {
-            clean.userStat = 'MND';
-        } else if (physicalContest) {
-            clean.userStat = 'PHY';
-        }
     }
 
     if (hasLivingOpposition && clean.oppTargetsEnv.length && clean.oppStat === 'ENV') {
-        clean.oppStat = social || stealth ? 'MND' : 'PHY';
+        clean.oppStat = clean.goalKind === 'IntimacyAdvanceVerbal' ? 'MND' : 'PHY';
     }
 
     return clean;
@@ -3404,6 +3545,9 @@ function normalizeExtractionMechanics(clean) {
 function sanitizeNpcFact(x) {
     return {
         name: cleanText(x?.name),
+        aliases: cleanList(x?.aliases),
+        descriptor: cleanText(x?.descriptor),
+        revealedFrom: cleanText(x?.revealedFrom),
         present: x?.present === false ? false : (x?.present === true ? true : undefined),
         position: cleanText(x?.position),
         condition: cleanText(x?.condition),
@@ -3436,6 +3580,14 @@ function sanitizeTaskDelta(x) {
         due: cleanText(x?.due),
         source: cleanText(x?.source),
         evidence: cleanText(x?.evidence),
+    };
+}
+
+function sanitizeNpcStake(x) {
+    return {
+        NPC: cleanNpcName(x?.NPC ?? x?.npc ?? x?.name),
+        NPC_STAKES: yn(x?.NPC_STAKES ?? x?.npcStakes ?? x?.stakes),
+        evidence: cleanText(x?.evidence ?? x?.why),
     };
 }
 
