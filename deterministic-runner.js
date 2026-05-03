@@ -49,14 +49,12 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
         nameGeneration: name,
         proactivityResults: proactivity.results,
         aggressionResults: aggression.results,
-        sceneTrackerUpdate: trackerUpdate,
         persistencePolicy: buildPersistencePolicy(),
         resultLine: resolution.resultLine,
         narrationGuidance: buildNarrationGuidance(resolution.packet, relationships.handoffs, chaos.handoff, proactivity.results, aggression.results),
     };
 
-    audit.push('SCENE_TRACKER_UPDATE=');
-    audit.push(stableStringify(trackerUpdate));
+    audit.push(`TRACKER_UPDATE_SAVED=${trackerSummary(trackerUpdate)}`);
     audit.push('RESULT_LINE=' + resolution.resultLine);
 
     return {
@@ -1102,6 +1100,26 @@ function buildPersistencePolicy() {
         persistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportEncounterLock', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode'],
         perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
+}
+
+function trackerSummary(trackerUpdate) {
+    const npcs = Object.entries(trackerUpdate?.npcs || {});
+    if (!npcs.length) return 'N';
+
+    return npcs.map(([name, value]) => {
+        const disposition = value?.currentDisposition ? formatDisposition(value.currentDisposition) : 'UNINITIALIZED';
+        const stats = value?.currentCoreStats
+            ? `stats:${value.currentCoreStats.PHY}/${value.currentCoreStats.MND}/${value.currentCoreStats.CHA}`
+            : 'stats:none';
+        return [
+            name,
+            disposition,
+            `rapport:${value?.currentRapport ?? 0}`,
+            `gate:${value?.intimacyGate ?? 'SKIP'}`,
+            stats,
+            `pressure:${value?.hostilePressure ?? 0}/${value?.hostileLandedPressure ?? 0}/${value?.dominantLock ?? 'None'}/${value?.pressureMode ?? 'none'}`,
+        ].join('/');
+    }).join(';');
 }
 
 function normalizeTrackerEntry(value) {
