@@ -52,11 +52,11 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.217';
+} from './engine.js?v=0.1.218';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.217';
-const MECHANICS_ARTIFACT_VERSION = 10;
+const EXT_VERSION = '0.1.218';
+const MECHANICS_ARTIFACT_VERSION = 11;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
 const MESSAGE_MECHANICS_KEY = 'rp_engine_mechanics';
@@ -64,7 +64,9 @@ const DEFAULT_ARCHIVE_WORLD = 'RP Engine NPC Archive';
 const ARCHIVE_COMMENT_PREFIX = '[RPE NPC]';
 const MECHANICS_PASS_SCHEMA = Object.freeze({
     name: 'rp_engine_mechanics_pass_v4_engine_functions',
-    schema: {
+    description: 'Mandatory RP Engine mechanics schema using engine function names.',
+    strict: false,
+    value: {
         type: 'object',
         additionalProperties: false,
         properties: {
@@ -293,6 +295,7 @@ const MECHANICS_PASS_SCHEMA = Object.freeze({
             'hasStakes',
             'checkIntimacyGate',
             'mapStats',
+            'genStats',
             'initPreset',
             'NPC_STAKES',
             'checkThreshold',
@@ -303,58 +306,63 @@ const MECHANICS_PASS_SCHEMA = Object.freeze({
         ],
     },
 });
-const CHARACTER_CREATOR_SCHEMA = {
-    type: 'object',
-    properties: {
-        basic: {
-            type: 'object',
-            properties: {
-                name: { type: 'string' },
-                race: { type: 'string' },
-                gender: { type: 'string' },
-                age: { type: 'string' },
-            },
-            required: ['name', 'race', 'gender', 'age'],
-        },
-        appearance: {
-            type: 'object',
-            properties: {
-                height: { type: 'string' },
-                build: { type: 'string' },
-                hair: { type: 'string' },
-                eyes: { type: 'string' },
-                skin: { type: 'string' },
-                distinctFeatures: { type: 'string' },
-            },
-            required: ['height', 'build', 'hair', 'eyes', 'skin', 'distinctFeatures'],
-        },
-        traits: {
-            type: 'array',
-            items: {
+const CHARACTER_CREATOR_SCHEMA = Object.freeze({
+    name: 'rp_engine_character_creator',
+    description: 'RP Engine character creator draft.',
+    strict: false,
+    value: {
+        type: 'object',
+        properties: {
+            basic: {
                 type: 'object',
                 properties: {
                     name: { type: 'string' },
-                    effect: { type: 'string' },
+                    race: { type: 'string' },
+                    gender: { type: 'string' },
+                    age: { type: 'string' },
                 },
-                required: ['name', 'effect'],
+                required: ['name', 'race', 'gender', 'age'],
             },
-        },
-        abilities: {
-            type: 'array',
-            items: {
+            appearance: {
                 type: 'object',
                 properties: {
-                    name: { type: 'string' },
-                    effect: { type: 'string' },
+                    height: { type: 'string' },
+                    build: { type: 'string' },
+                    hair: { type: 'string' },
+                    eyes: { type: 'string' },
+                    skin: { type: 'string' },
+                    distinctFeatures: { type: 'string' },
                 },
-                required: ['name', 'effect'],
+                required: ['height', 'build', 'hair', 'eyes', 'skin', 'distinctFeatures'],
             },
+            traits: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    properties: {
+                        name: { type: 'string' },
+                        effect: { type: 'string' },
+                    },
+                    required: ['name', 'effect'],
+                },
+            },
+            abilities: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    properties: {
+                        name: { type: 'string' },
+                        effect: { type: 'string' },
+                    },
+                    required: ['name', 'effect'],
+                },
+            },
+            inventory: { type: 'array', items: { type: 'string' } },
+            notes: { type: 'array', items: { type: 'string' } },
         },
-        inventory: { type: 'array', items: { type: 'string' } },
-        notes: { type: 'array', items: { type: 'string' } },
+        required: ['basic', 'appearance', 'traits', 'abilities', 'inventory', 'notes'],
     },
-    required: ['basic', 'appearance', 'traits', 'abilities', 'inventory', 'notes'],
-};
+});
 
 const RP_ENGINE_CONTEXT_PROMPT = Object.freeze([
     'AUTHORITATIVE RP MECHANICS ENGINES - CONTEXTUAL INTERPRETATION LAYER',
@@ -756,28 +764,23 @@ function parseJsonResponse(text) {
     return null;
 }
 
-function isUsefulMechanicsPass(value) {
-    if (!value || typeof value !== 'object') return false;
-    const mode = expandMechanicsMode(value.m || value.mode);
-    if (!['NO_STAKES', 'STAKES', 'SYSTEM_UPDATE', 'OOC_STOP'].includes(mode)) return false;
-    const goal = String(value.identifyGoal?.goal ?? value.identifyGoal ?? value.g ?? value.goal ?? '').trim();
-    const decisiveAction = String(value.a || value.decisiveAction || '').trim();
-    if (!goal || /^(unspecified|unknown|none|null|n\/a)/i.test(goal)) return false;
-    if (!decisiveAction || /^(unspecified|unknown|none|null|n\/a)/i.test(decisiveAction)) return false;
-    return true;
-}
-
-function expandMechanicsMode(value) {
+function canonicalMechanicsMode(value) {
     const mode = String(value || '').trim();
     if (mode === 'N') return 'NO_STAKES';
     if (mode === 'S') return 'STAKES';
     if (mode === 'U') return 'SYSTEM_UPDATE';
     if (mode === 'O') return 'OOC_STOP';
-    return ['NO_STAKES', 'STAKES', 'SYSTEM_UPDATE', 'OOC_STOP'].includes(mode) ? mode : 'NO_STAKES';
+    return ['NO_STAKES', 'STAKES', 'SYSTEM_UPDATE', 'OOC_STOP'].includes(mode) ? mode : '';
+}
+
+function expandMechanicsMode(value) {
+    return canonicalMechanicsMode(value) || 'NO_STAKES';
 }
 
 const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     'You are the hidden @Depth 0 RP Engine schema pass. Return JSON only.',
+    'This schema pass is mandatory and authoritative. A visible roleplay reply is forbidden until this exact schema is complete.',
+    'Your entire output MUST be one valid JSON object matching the requested schema. No prose. No markdown. No narration. No commentary.',
     '',
     'PURPOSE:',
     '- Execute the ResolutionEngine(input) and RelationshipEngine(npc,resolutionPacket) contextual procedures already present in the prompt.',
@@ -924,6 +927,7 @@ const MECHANICS_PASS_STATIC_PROMPT = Object.freeze([
     '- hostile/combat intent to hurt or injure -> hostilePhysicalHarm.',
     '- newEncounterExplicit -> newEncounterExplicit.',
     '- Output compact JSON only. Prefer short names, enums, empty arrays, and omitted optional objects over prose.',
+    '- Required function-name fields are non-optional: identifyGoal, identifyTargets, hasStakes, checkIntimacyGate, mapStats, genStats, initPreset, NPC_STAKES, checkThreshold, decisiveAction, actionCount, hostilePhysicalHarm, newEncounterExplicit.',
 ]).join('\n');
 
 function buildMechanicsPassPrompt({ chatExcerpt, latestUserMessage, tracker, userName, characterName }) {
@@ -957,9 +961,10 @@ function buildMechanicsRepairPrompt({ priorPrompt, rawSchema, expandedSchema, is
     return [
         priorPrompt,
         '',
-        'SCHEMA REPAIR REQUIRED:',
-        'The prior JSON schema contradicts or omits required RP Engine function outputs. Correct it now.',
-        'Do not explain. Return corrected compact JSON only, using the exact same schema.',
+        'MANDATORY SCHEMA REPAIR REQUIRED:',
+        'The prior output contradicted or omitted required RP Engine function outputs. Correct it now.',
+        'This generation is still a hidden schema pass. Visible narration is forbidden.',
+        'Return exactly one corrected compact JSON object using the exact same schema. Do not explain.',
         '',
         'Validation issues:',
         ...issues.map(issue => `- ${issue}`),
@@ -970,6 +975,58 @@ function buildMechanicsRepairPrompt({ priorPrompt, rawSchema, expandedSchema, is
         'Prior expanded schema JSON:',
         formatJsonForDisplay(expandedSchema).slice(0, 5000),
     ].join('\n');
+}
+
+function mechanicsPassFailure(message, details = {}) {
+    const error = new Error(message);
+    error.rpEngineSchemaFailure = true;
+    error.details = details;
+    return error;
+}
+
+function mechanicsPassInvalidReasons(pass, extraction, validationIssues = []) {
+    const issues = Array.isArray(validationIssues) ? [...validationIssues] : [];
+    if (!pass || typeof pass !== 'object') {
+        issues.push('mechanics pass did not return a JSON object');
+        return uniqueLocal(issues).slice(0, 12);
+    }
+    const mode = canonicalMechanicsMode(pass.m || pass.mode);
+    if (!mode) {
+        issues.push('mode must be NO_STAKES, STAKES, SYSTEM_UPDATE, or OOC_STOP');
+    }
+    const goal = String(pass.identifyGoal?.goal ?? pass.identifyGoal ?? pass.g ?? pass.goal ?? '').trim();
+    const decisiveAction = String(pass.a || pass.decisiveAction || '').trim();
+    if (!goal || /^(unspecified|unknown|none|null|n\/a)$/i.test(goal)) {
+        issues.push('identifyGoal.goal must be a concrete contextual result');
+    }
+    if (!decisiveAction || /^(unspecified|unknown|none|null|n\/a)$/i.test(decisiveAction)) {
+        issues.push('decisiveAction must be a concrete contextual result');
+    }
+    if (!pass.identifyTargets || typeof pass.identifyTargets !== 'object') {
+        issues.push('identifyTargets must be present as an object');
+    }
+    if (!pass.hasStakes || typeof pass.hasStakes !== 'object') {
+        issues.push('hasStakes must be present as an object');
+    }
+    if (!pass.mapStats || typeof pass.mapStats !== 'object') {
+        issues.push('mapStats must be present as an object');
+    }
+    if (!Array.isArray(pass.genStats)) {
+        issues.push('genStats must be present as an array');
+    }
+    if (!Array.isArray(pass.initPreset)) {
+        issues.push('initPreset must be present as an array');
+    }
+    if (!Array.isArray(pass.NPC_STAKES)) {
+        issues.push('NPC_STAKES must be present as an array');
+    }
+    if (!Array.isArray(pass.checkThreshold)) {
+        issues.push('checkThreshold must be present as an array');
+    }
+    if (!extraction || typeof extraction !== 'object') {
+        issues.push('schema could not be expanded into deterministic mechanics input');
+    }
+    return uniqueLocal(issues).slice(0, 12);
 }
 
 async function runMechanicsPass({
@@ -988,6 +1045,12 @@ async function runMechanicsPass({
     });
 
     let response = '';
+    let pass = null;
+    let extraction = null;
+    let issues = [];
+    let repaired = false;
+    let repairResponse = '';
+    let repairPass = null;
     try {
         response = await generateQuietPromptWithTimeout({
             quietPrompt: prompt,
@@ -996,13 +1059,13 @@ async function runMechanicsPass({
             jsonSchema: MECHANICS_PASS_SCHEMA,
             removeReasoning: true,
         }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
-        const pass = parseJsonResponse(response);
-        if (!isUsefulMechanicsPass(pass)) return null;
-        let extraction = expandMechanicsPass(pass, latestUserMessage);
-        let issues = validateExpandedMechanicsSchema(extraction, pass);
-        let repaired = false;
-        let repairResponse = '';
-        let repairPass = null;
+        pass = parseJsonResponse(response);
+        if (pass && typeof pass === 'object') {
+            extraction = expandMechanicsPass(pass, latestUserMessage);
+            issues = mechanicsPassInvalidReasons(pass, extraction, validateExpandedMechanicsSchema(extraction, pass));
+        } else {
+            issues = mechanicsPassInvalidReasons(pass, extraction, ['schema response could not be parsed as JSON']);
+        }
         if (issues.length) {
             repairResponse = await generateQuietPromptWithTimeout({
                 quietPrompt: buildMechanicsRepairPrompt({
@@ -1017,30 +1080,45 @@ async function runMechanicsPass({
                 removeReasoning: true,
             }, Math.min(Number(settings().resolverTimeoutMs) || DEFAULT_SETTINGS.resolverTimeoutMs, 45000));
             repairPass = parseJsonResponse(repairResponse);
-            if (isUsefulMechanicsPass(repairPass)) {
+            if (repairPass && typeof repairPass === 'object') {
                 const repairExtraction = expandMechanicsPass(repairPass, latestUserMessage);
-                const repairIssues = validateExpandedMechanicsSchema(repairExtraction, repairPass);
-                if (repairIssues.length < issues.length) {
+                const repairIssues = mechanicsPassInvalidReasons(repairPass, repairExtraction, validateExpandedMechanicsSchema(repairExtraction, repairPass));
+                if (repairIssues.length <= issues.length) {
                     repaired = true;
                     issues = repairIssues;
                     extraction = repairExtraction;
                 }
             }
         }
-        const mode = expandMechanicsMode(pass.m || pass.mode);
+        const finalPass = repaired ? repairPass : pass;
+        const ok = Boolean(finalPass && typeof finalPass === 'object' && extraction && !issues.length);
         return {
-            mode: expandMechanicsMode((repaired ? repairPass : pass)?.m || (repaired ? repairPass : pass)?.mode),
-            pass: repaired ? repairPass : pass,
+            ok,
+            mode: expandMechanicsMode(finalPass?.m || finalPass?.mode),
+            pass: finalPass,
             originalPass: pass,
             response,
             repairResponse,
             repaired,
             validationIssues: issues,
-            extraction,
+            extraction: ok ? extraction : null,
+            expandedExtraction: extraction,
         };
     } catch (error) {
-        console.warn('[RP Engine Tracker] Mechanics pass failed or timed out; falling back to deterministic extraction.', error);
-        return null;
+        console.warn('[RP Engine Tracker] Mechanics schema pass failed.', error);
+        return {
+            ok: false,
+            mode: 'SCHEMA_ERROR',
+            pass,
+            originalPass: pass,
+            response,
+            repairResponse,
+            repaired,
+            validationIssues: mechanicsPassInvalidReasons(repairPass || pass, extraction, [error?.message || String(error)]),
+            extraction: null,
+            expandedExtraction: extraction,
+            error: error?.message || String(error),
+        };
     }
 }
 
@@ -1830,11 +1908,24 @@ async function runResolver(chat) {
         parsed.originalModelSchema = mechanicsResult.repaired ? structuredClone(mechanicsResult.originalPass || null) : null;
         parsed.schemaRepaired = mechanicsResult.repaired ? 'Y' : 'N';
         parsed.schemaValidationIssues = Array.isArray(mechanicsResult.validationIssues) ? [...mechanicsResult.validationIssues] : [];
+        parsed.schemaRawResponse = String(mechanicsResult.response || '').slice(0, 6000);
+        parsed.schemaRepairResponse = String(mechanicsResult.repairResponse || '').slice(0, 6000);
     }
 
     if (!parsed) {
-        console.warn('[RP Engine Tracker] Resolver returned no usable structure; using fail-closed no-roll extraction.');
-        parsed = buildFailClosedExtraction(latestUserMessage, mechanicsResult?.response || '');
+        const issues = Array.isArray(mechanicsResult?.validationIssues) && mechanicsResult.validationIssues.length
+            ? mechanicsResult.validationIssues
+            : ['model did not complete the mandatory mechanics schema'];
+        throw mechanicsPassFailure('RP Engine schema pass failed. The model must return a complete mechanics schema before narration can proceed.', {
+            latestUserMessage,
+            modelSchema: mechanicsResult?.pass || null,
+            originalModelSchema: mechanicsResult?.originalPass || null,
+            expandedExtraction: mechanicsResult?.expandedExtraction || null,
+            validationIssues: issues,
+            rawResponse: mechanicsResult?.response || '',
+            repairResponse: mechanicsResult?.repairResponse || '',
+            error: mechanicsResult?.error || '',
+        });
     }
 
     parsed = validateTimeExtractionForLatestUserMessage(parsed, latestUserMessage);
@@ -2207,44 +2298,6 @@ function buildBlockedDeadReentryExtraction(npcName, latestUserMessage) {
         timeSkipReason: '',
         systemOnlyUpdate: 'Y',
         systemOnlyUpdateReason: 'Dead archived NPC cannot be returned to the active scene unless the user explicitly frames it as ghost, undead, resurrection, or revival.',
-        scene: { location: '', time: '', weather: '' },
-        npcFacts: [],
-        inventoryDeltas: [],
-        taskDeltas: [],
-    };
-}
-
-function buildFailClosedExtraction(latestUserMessage, response = '') {
-    const text = String(latestUserMessage || '').trim().slice(0, 300);
-    const evidence = String(response || '').trim().slice(0, 300);
-    return {
-        ooc: 'N',
-        oocMode: 'IC',
-        oocInstruction: '',
-        goal: text || 'unresolved action',
-        goalKind: 'Normal',
-        goalEvidence: text || evidence,
-        decisiveAction: text || 'unresolved action',
-        decisiveActionEvidence: text || evidence,
-        outcomeOnSuccess: '',
-        outcomeOnFailure: '',
-        actionTargets: [],
-        oppTargetsNpc: [],
-        oppTargetsEnv: [],
-        benefitedObservers: [],
-        harmedObservers: [],
-        npcInScene: [],
-        hasStakes: 'N',
-        stakesEvidence: 'Resolver failed closed; no explicit structured stakes were available.',
-        actionCount: 1,
-        userStat: 'MND',
-        userStatEvidence: '',
-        oppStat: 'ENV',
-        oppStatEvidence: '',
-        hostilePhysicalHarm: 'N',
-        newEncounter: 'N',
-        timeDeltaMinutes: 0,
-        timeSkipReason: '',
         scene: { location: '', time: '', weather: '' },
         npcFacts: [],
         inventoryDeltas: [],
@@ -2809,12 +2862,12 @@ function renderAuditDisplay(payload) {
             <summary>${escapeHtml(title)}</summary>
             <div class="rp-engine-audit-body">
                 <details open>
-                    <summary>Simplified Schema</summary>
-                    ${audit ? renderMechanicsSummary(audit, payload) : '<div class="rp-engine-muted">No mechanics summary stored.</div>'}
-                </details>
-                <details>
                     <summary>Model Schema</summary>
                     ${audit ? renderModelSchemaSummary(audit) : '<div class="rp-engine-muted">No model schema stored.</div>'}
+                </details>
+                <details>
+                    <summary>Mechanics Summary</summary>
+                    ${audit ? renderMechanicsSummary(audit, payload) : '<div class="rp-engine-muted">No mechanics summary stored.</div>'}
                 </details>
                 <details>
                     <summary>Narration Handoff</summary>
@@ -2828,11 +2881,25 @@ function renderAuditDisplay(payload) {
 function renderModelSchemaSummary(audit) {
     const extraction = audit?.extraction || {};
     const schema = extraction.modelSchema || null;
-    if (!schema) return '<div class="rp-engine-muted">No raw model schema stored.</div>';
+    const rawResponse = String(extraction.schemaRawResponse || '').trim();
+    const repairResponse = String(extraction.schemaRepairResponse || '').trim();
+    const issues = Array.isArray(extraction.schemaValidationIssues) ? extraction.schemaValidationIssues : [];
+    if (!schema) {
+        return `
+            <div class="rp-engine-audit-card ${audit?.schemaFailure || audit?.error ? 'rp-engine-audit-error' : ''}">
+                <div class="rp-engine-audit-title">${audit?.schemaFailure ? 'Mandatory Schema Failed' : 'Model Schema'}</div>
+                ${audit?.error ? renderKv('Error', audit.error) : ''}
+                ${issues.length ? renderKv('Validation Issues', issues.join(' | ')) : renderKv('Validation Issues', '(none recorded)')}
+                ${renderKv('Latest User Message', audit?.latestUserMessage || extraction.latestUserMessage)}
+                ${rawResponse ? `<details><summary>Raw Model Response</summary><pre>${escapeHtml(rawResponse)}</pre></details>` : '<div class="rp-engine-muted">No raw model response stored.</div>'}
+                ${repairResponse ? `<details><summary>Repair Response</summary><pre>${escapeHtml(repairResponse)}</pre></details>` : ''}
+                ${extraction.expandedExtraction ? `<details><summary>Expanded Partial Schema</summary><pre>${escapeHtml(formatJsonForDisplay(extraction.expandedExtraction))}</pre></details>` : ''}
+            </div>
+        `;
+    }
     const targets = schema.identifyTargets || {};
     const mapStats = schema.mapStats || {};
     const checkGate = schema.checkIntimacyGate || {};
-    const issues = Array.isArray(extraction.schemaValidationIssues) ? extraction.schemaValidationIssues : [];
     const repaired = extraction.schemaRepaired === 'Y';
     return `
         <div class="rp-engine-audit-card">
@@ -2862,6 +2929,8 @@ function renderModelSchemaSummary(audit) {
         </div>
         ${extraction.originalModelSchema ? `<details><summary>Original Before Repair</summary><pre>${escapeHtml(formatJsonForDisplay(extraction.originalModelSchema))}</pre></details>` : ''}
         <details><summary>Raw JSON</summary><pre>${escapeHtml(formatJsonForDisplay(schema))}</pre></details>
+        ${rawResponse ? `<details><summary>Raw Model Response</summary><pre>${escapeHtml(rawResponse)}</pre></details>` : ''}
+        ${repairResponse ? `<details><summary>Repair Response</summary><pre>${escapeHtml(repairResponse)}</pre></details>` : ''}
     `;
 }
 
@@ -2933,6 +3002,12 @@ function resolverModeLabel(extraction) {
 }
 
 function mechanicsSummaryBits(audit, payload) {
+    if (audit?.schemaFailure || audit?.extraction?.resolverMode === 'schema_failed') {
+        return ['schema failed', payload?.at ? new Date(payload.at).toLocaleTimeString() : ''].filter(Boolean);
+    }
+    if (audit?.error) {
+        return ['error', payload?.at ? new Date(payload.at).toLocaleTimeString() : ''].filter(Boolean);
+    }
     const packet = audit?.resolutionPacket || {};
     const chaos = audit?.chaosHandoff?.CHAOS || {};
     const status = packet.STAKES === 'Y'
@@ -4256,10 +4331,26 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
         });
     } catch (error) {
         const current = tracker();
+        const details = error?.details || {};
+        const schemaFailure = Boolean(error?.rpEngineSchemaFailure);
+        const auditExtraction = schemaFailure ? {
+            resolverMode: 'schema_failed',
+            mechanicsPassMode: 'SCHEMA_FAILED',
+            modelSchema: details.modelSchema && typeof details.modelSchema === 'object' ? structuredClone(details.modelSchema) : null,
+            originalModelSchema: details.originalModelSchema && typeof details.originalModelSchema === 'object' ? structuredClone(details.originalModelSchema) : null,
+            schemaRepaired: details.repairResponse ? 'Y' : 'N',
+            schemaValidationIssues: Array.isArray(details.validationIssues) ? [...details.validationIssues] : [],
+            schemaRawResponse: String(details.rawResponse || '').slice(0, 6000),
+            schemaRepairResponse: String(details.repairResponse || '').slice(0, 6000),
+            expandedExtraction: details.expandedExtraction && typeof details.expandedExtraction === 'object' ? structuredClone(details.expandedExtraction) : null,
+            latestUserMessage,
+        } : null;
         current.lastAudit = {
             at: new Date().toISOString(),
             error: error?.message || String(error),
             latestUserMessage,
+            schemaFailure,
+            extraction: auditExtraction,
         };
         chat_metadata[METADATA_KEY] = current;
         pendingAuditDisplayAfterGeneration = {
@@ -4274,6 +4365,9 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
         saveTracker();
         pendingPanelRefreshAfterGeneration = true;
         clearMechanicsHandoff();
+        if (schemaFailure && typeof abort === 'function') {
+            abort(true);
+        }
         console.error('[RP Engine Tracker] Mechanics interceptor failed.', error);
     } finally {
         resolving = false;

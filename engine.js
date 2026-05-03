@@ -3505,6 +3505,9 @@ function sanitizeExtraction(value) {
         originalModelSchema: input.originalModelSchema && typeof input.originalModelSchema === 'object' ? structuredClone(input.originalModelSchema) : null,
         schemaRepaired: yn(input.schemaRepaired),
         schemaValidationIssues: Array.isArray(input.schemaValidationIssues) ? cleanList(input.schemaValidationIssues).slice(0, 12) : [],
+        schemaRawResponse: String(input.schemaRawResponse || '').trim().slice(0, 6000),
+        schemaRepairResponse: String(input.schemaRepairResponse || '').trim().slice(0, 6000),
+        expandedExtraction: input.expandedExtraction && typeof input.expandedExtraction === 'object' ? structuredClone(input.expandedExtraction) : null,
     };
     return normalizeExtractionMechanics(clean);
 }
