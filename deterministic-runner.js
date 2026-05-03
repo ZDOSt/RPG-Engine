@@ -50,6 +50,7 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
         proactivityResults: proactivity.results,
         aggressionResults: aggression.results,
         sceneTrackerUpdate: trackerUpdate,
+        persistencePolicy: buildPersistencePolicy(),
         resultLine: resolution.resultLine,
         narrationGuidance: buildNarrationGuidance(resolution.packet, relationships.handoffs, chaos.handoff, proactivity.results, aggression.results),
     };
@@ -101,7 +102,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
     const targetState = trackerSnapshot[intimacyTarget] || null;
     const intimacyConsent = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)
         && targetState
-        && (targetState.currentDisposition?.B >= 4 || targetState.intimacyGate === 'ALLOW')
+        && currentIntimacyGateAllows(targetState)
         ? 'Y'
         : 'N';
     audit.push(`2.3 checkIntimacyGate=${intimacyConsent}`);
@@ -336,19 +337,14 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
 
         const classified = classifyDisposition(currentDisposition);
         const threshold = checkThreshold(currentDisposition, sem.overrideFlags || {});
-        const intimacyGate = threshold.LockActive === 'Y'
-            ? 'DENY'
-            : isAllowed === 'Y'
-                ? 'ALLOW'
-                : currentDisposition.B >= 4
-                    ? 'ALLOW'
-                    : threshold.OverrideActive === 'Y'
-                        ? 'ALLOW'
-                        : 'SKIP';
+        const resolvedGate = resolveIntimacyGate(state, threshold, currentDisposition, isAllowed);
+        const intimacyGate = resolvedGate.IntimacyGate;
+        const intimacyGateSource = resolvedGate.IntimacyGateSource;
 
         audit.push(`3.6 classifyDisposition=${compact(classified)}`);
         audit.push(`3.6a checkThreshold=${compact(threshold)}`);
         audit.push(`3.6b IntimacyGate=${intimacyGate}`);
+        audit.push(`3.6c IntimacyGateSource=${intimacyGateSource}`);
 
         const handoff = {
             NPC: npc,
@@ -362,6 +358,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
             OutcomeTier: resolutionPacket.OutcomeTier || 'NONE',
             NarrationBand: resolutionPacket.Outcome || 'standard',
             IntimacyGate: intimacyGate,
+            IntimacyGateSource: intimacyGateSource,
             HostilePressure: hostilePressure,
             HostileLandedPressure: hostileLandedPressure,
             DominantLock: dominantLock,
@@ -375,6 +372,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
             currentRapport,
             rapportEncounterLock,
             intimacyGate,
+            intimacyGateSource,
             currentCoreStats: coreStats,
             hostilePressure,
             hostileLandedPressure,
@@ -863,6 +861,44 @@ function checkThreshold(disposition, flags) {
     return { LockActive, OverrideActive: Override !== 'NONE' ? 'Y' : 'N', Override };
 }
 
+function currentIntimacyGateAllows(state) {
+    if (state?.intimacyGate !== 'ALLOW') return state?.currentDisposition?.B >= 4;
+    if (state?.currentDisposition?.F >= 3 || state?.currentDisposition?.H >= 3) return false;
+    if (state?.intimacyGateSource === 'B4' && state?.currentDisposition?.B < 4) return false;
+    return true;
+}
+
+function resolveIntimacyGate(previousState, threshold, disposition, isAllowed) {
+    if (threshold.LockActive === 'Y') {
+        return { IntimacyGate: 'DENY', IntimacyGateSource: 'LOCK' };
+    }
+
+    if (isAllowed === 'Y') {
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
+    }
+
+    if (threshold.OverrideActive === 'Y') {
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: `OVERRIDE:${threshold.Override}` };
+    }
+
+    if (disposition.B >= 4) {
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: 'B4' };
+    }
+
+    if (previousState.intimacyGate === 'ALLOW') {
+        if (previousState.intimacyGateSource === 'B4' && disposition.B < 4) {
+            return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
+        }
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
+    }
+
+    if (previousState.intimacyGate === 'DENY') {
+        return { IntimacyGate: 'DENY', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_DENY' };
+    }
+
+    return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
+}
+
 function getChaosContext(handoffs, sceneSummary) {
     if (handoffs.length >= 2) return 'PUBLIC';
     if (/\b(public|crowd|open|market|tavern|street|square)\b/i.test(sceneSummary)) return 'PUBLIC';
@@ -987,18 +1023,34 @@ function buildNarrationGuidance(resolution, handoffs, chaos, proactivity, aggres
     };
 }
 
+function buildPersistencePolicy() {
+    return {
+        staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
+        persistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportEncounterLock', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode'],
+        perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'CHAOS', 'proactivityResults', 'aggressionResults'],
+    };
+}
+
 function normalizeTrackerEntry(value) {
     return {
         currentDisposition: normalizeDisposition(value?.currentDisposition),
         currentRapport: clamp(Number(value?.currentRapport ?? 0), 0, 5),
         rapportEncounterLock: value?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
         intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(value?.intimacyGate) ? value.intimacyGate : 'SKIP',
+        intimacyGateSource: normalizeIntimacyGateSource(value?.intimacyGateSource),
         currentCoreStats: value?.currentCoreStats ? normalizeCore(value.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 }) : null,
         hostilePressure: clamp(Number(value?.hostilePressure ?? 0), 0, 20),
         hostileLandedPressure: clamp(Number(value?.hostileLandedPressure ?? 0), 0, 20),
         dominantLock: ['FEAR', 'HOSTILITY'].includes(value?.dominantLock) ? value.dominantLock : 'None',
         pressureMode: ['none', 'cornered', 'dominated'].includes(value?.pressureMode) ? value.pressureMode : 'none',
     };
+}
+
+function normalizeIntimacyGateSource(value) {
+    const text = String(value ?? 'NONE');
+    if (text === 'B4' || text === 'LOCK' || text === 'NONE' || text === 'PRIOR_ALLOW' || text === 'PRIOR_DENY') return text;
+    if (text.startsWith('OVERRIDE:')) return text;
+    return 'NONE';
 }
 
 function normalizeDisposition(value) {
@@ -1118,10 +1170,20 @@ function normalizeActionMarkers(markers) {
 
 function normalizeCore(value, fallback) {
     return {
+        Rank: normalizeRank(value?.Rank ?? fallback.Rank),
+        MainStat: normalizeMainStat(value?.MainStat ?? fallback.MainStat),
         PHY: clamp(Number(value?.PHY ?? fallback.PHY), 1, 10),
         MND: clamp(Number(value?.MND ?? fallback.MND), 1, 10),
         CHA: clamp(Number(value?.CHA ?? fallback.CHA), 1, 10),
     };
+}
+
+function normalizeRank(value) {
+    return ['Weak', 'Average', 'Trained', 'Elite', 'Boss', 'none'].includes(value) ? value : 'none';
+}
+
+function normalizeMainStat(value) {
+    return ['PHY', 'MND', 'CHA', 'Balanced', 'none'].includes(value) ? value : 'none';
 }
 
 function statValue(core, stat) {
