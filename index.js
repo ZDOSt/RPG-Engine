@@ -1,5 +1,7 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
-import { PRE_FLIGHT_PROMPT_TEXT } from './pre-flight.js';
+import { formatPreFlightDebug, formatPreFlightError, formatPreFlightPending } from './pre-flight.js';
+import { extractSemanticLedger } from './semantic-extractor.js';
+import { buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
 
 const EXTENSION_NAME = 'Structured Preflight Engines';
 const ENGINE_PROMPT_KEY = 'structured_preflight_engines';
@@ -36,7 +38,7 @@ function injectEngines() {
 
     context.setExtensionPrompt(
         PRE_FLIGHT_PROMPT_KEY,
-        PRE_FLIGHT_PROMPT_TEXT,
+        formatPreFlightPending(),
         EXTENSION_PROMPT_TYPES.IN_CHAT,
         0,
         false,
@@ -44,8 +46,49 @@ function injectEngines() {
     );
 }
 
-globalThis.StructuredPreflightEngines_generationInterceptor = async function () {
+function injectPreFlight(value) {
+    const context = getContext();
+    if (!context?.setExtensionPrompt) return;
+
+    context.setExtensionPrompt(
+        PRE_FLIGHT_PROMPT_KEY,
+        value,
+        EXTENSION_PROMPT_TYPES.IN_CHAT,
+        0,
+        false,
+        EXTENSION_PROMPT_ROLES.SYSTEM,
+    );
+}
+
+let runningSemanticPass = false;
+
+globalThis.StructuredPreflightEngines_generationInterceptor = async function (coreChat, contextSize, abort, type) {
     injectEngines();
+
+    if (runningSemanticPass) {
+        return false;
+    }
+
+    const context = getContext();
+    if (!context) {
+        injectPreFlight(formatPreFlightError('SillyTavern context unavailable.'));
+        return false;
+    }
+
+    try {
+        runningSemanticPass = true;
+        const trackerSnapshot = buildTrackerSnapshot(context);
+        const semanticLedger = await extractSemanticLedger(context, coreChat, type, trackerSnapshot);
+        const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, type);
+        await saveTrackerUpdate(context, report.trackerUpdate);
+        injectPreFlight(formatPreFlightDebug(report));
+    } catch (error) {
+        console.error(`[${EXTENSION_NAME}] deterministic pre-flight failed`, error);
+        injectPreFlight(formatPreFlightError(error));
+    } finally {
+        runningSemanticPass = false;
+    }
+
     return false;
 };
 
