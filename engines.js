@@ -3,7 +3,7 @@ export const ENGINE_PROMPT_TEXT = String.raw`[STRUCTURED_PREFLIGHT_ENGINE_EXTENS
 function ResolutionEngine(input) {
   const DEF = Object.freeze({
     UNIVERSAL:
-'EXPLICIT-ONLY. MUST be stated in Character Card / Lore / Scene text / tracker. NO invention. Uncertain = N or default. FIRST-YES-WINS = first matching explicit rule becomes final. No reconsideration. NEVER invent stats, targets, actions, obstacles, or outcomes. MAX 3 ACTIONS. TIE = DEFENDER / OPPOSITION WINS. ROLLS = 1d20 + relevant stat vs opposing 1d20 + relevant stat, or vs plain Environment 1d20.',
+'EXPLICIT-ONLY. MUST be stated in Character Card / Lore / Scene text / tracker. NO invention. Uncertain = N or default. FIRST-YES-WINS = first matching explicit rule becomes final. No reconsideration. NEVER invent stats, targets, actions, obstacles, or outcomes. MAX 3 ACTIONS. TIE = STALEMATE / STRUGGLE. ROLLS = 1d20 + relevant stat vs opposing 1d20 + relevant stat, or vs plain Environment 1d20.',
     STATS:
 'PHY = challenges that require physical effort, strength, agility, speed, coordination, endurance, stealth movement, combat skill, or bodily execution under risk. MND = challenges that require thought, memory, perception, focus, reasoning, knowledge, awareness, will, or deliberate mental/supernatural exertion. CHA = social challenges that require persuasion, deception, intimidation, negotiation, emotional influence, personal presence, or interpersonal skill. Core stat scale is 1 to 10.',
     STAKES:
@@ -113,6 +113,7 @@ function ResolutionEngine(input) {
         margin >= 8 -> OutcomeTier:Critical_Success LandedActions:3 Outcome:dominant_impact CounterPotential:none
         margin >= 5 -> OutcomeTier:Moderate_Success LandedActions:2 Outcome:solid_impact CounterPotential:none
         margin >= 1 -> OutcomeTier:Minor_Success LandedActions:1 Outcome:light_impact CounterPotential:none
+        margin = 0 -> OutcomeTier:Stalemate LandedActions:0 Outcome:struggle CounterPotential:none
         margin >= -3 -> OutcomeTier:Minor_Failure LandedActions:0 Outcome:checked CounterPotential:light
         margin >= -7 -> OutcomeTier:Moderate_Failure LandedActions:0 Outcome:deflected CounterPotential:medium
         else -> OutcomeTier:Critical_Failure LandedActions:0 Outcome:avoided CounterPotential:severe
@@ -120,6 +121,7 @@ function ResolutionEngine(input) {
       return {OutcomeTier, LandedActions, Outcome, CounterPotential}
     else:
       if margin >= 1 -> OutcomeTier:Success LandedActions:(none) Outcome:success CounterPotential:none
+      if margin = 0 -> OutcomeTier:Stalemate LandedActions:(none) Outcome:struggle CounterPotential:none
       else -> OutcomeTier:Failure LandedActions:(none) Outcome:failure CounterPotential:none
       return {OutcomeTier, LandedActions, Outcome, CounterPotential}
 

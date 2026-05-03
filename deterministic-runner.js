@@ -107,9 +107,15 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         : 'N';
     audit.push(`2.3 checkIntimacyGate=${intimacyConsent}`);
 
-    let hasStakes = bool(semantic.hasStakesCandidate) ? 'Y' : 'N';
-    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) {
-        hasStakes = intimacyConsent === 'N' ? 'Y' : 'N';
+    const semanticHasStakes = bool(semantic.hasStakesCandidate) ? 'Y' : 'N';
+    const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
+    const stakesOverrideEvidence = getStakesOverrideEvidence(goal, intimacyTarget, targetState, semanticHasStakes, intimacyConsent);
+    const hasStakes = stakesOverrideEvidence?.hasStakes || semanticHasStakes;
+    const stakesRule = stakesOverrideEvidence?.rule || (isIntimacyAdvance ? 'semantic_final_intimacy_no_hard_override' : 'semantic_final');
+    audit.push(`2.4a semanticHasStakesCandidate=${semanticHasStakes}`);
+    audit.push(`2.4b deterministicStakesRule=${stakesRule}`);
+    if (stakesOverrideEvidence) {
+        audit.push(`2.4c deterministicStakesEvidence=${compact(stakesOverrideEvidence.evidence)}`);
     }
     audit.push(`2.4 hasStakes=${hasStakes}`);
 
@@ -190,9 +196,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         if (hostilePhysical) {
             outcome = hostilePhysicalOutcome(margin, actions.length);
         } else {
-            outcome = margin >= 1
-                ? { OutcomeTier: 'Success', LandedActions: '(none)', Outcome: 'success', CounterPotential: 'none' }
-                : { OutcomeTier: 'Failure', LandedActions: '(none)', Outcome: 'failure', CounterPotential: 'none' };
+            outcome = nonHostileOutcome(margin);
         }
 
         audit.push(`2.7o resolveOutcome=atkDie:${atkDie}, atkTot:${atkTot}, defDie:${defDie}, defTot:${defTot}, margin:${margin}, hostilePhysicalIntent:${hostilePhysical ? 'Y' : 'N'} -> ${compact(outcome)}`);
@@ -287,7 +291,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
         const isAllowed = resolutionPacket.IntimacyConsent;
         const outcomeKey = String(resolutionPacket.Outcome || 'no_roll');
         const stakeChange = sem.stakeChangeByOutcome?.[outcomeKey] || 'none';
-        const auditInteraction = stakeChange === 'benefit' ? 'Y' : 'N';
+        const auditInteraction = resolutionPacket.STAKES === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
         const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem);
         const hostilePressureResult = applyHostilePhysicalPressure(npc, resolutionPacket, {
             currentDisposition,
@@ -582,7 +586,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
         const npcTotal = npcDie + npcCore.PHY + counterBonus;
         const userTotal = userDie + userCore.PHY;
         const margin = npcTotal - userTotal;
-        const ReactionOutcome = margin >= 5 ? 'npc_overpowers' : margin >= 1 ? 'npc_succeeds' : margin >= -3 ? 'user_resists' : 'user_dominates';
+        const ReactionOutcome = aggressionReactionOutcome(margin);
         results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin };
         audit.push(`7.5 ${npc}.npcCore=${compact(npcCore)}`);
         audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}+${counterBonus}=${npcTotal}`);
@@ -608,6 +612,7 @@ function hostilePhysicalOutcome(margin, actionLength) {
     if (margin >= 8) outcome = { OutcomeTier: 'Critical_Success', LandedActions: 3, Outcome: 'dominant_impact', CounterPotential: 'none' };
     else if (margin >= 5) outcome = { OutcomeTier: 'Moderate_Success', LandedActions: 2, Outcome: 'solid_impact', CounterPotential: 'none' };
     else if (margin >= 1) outcome = { OutcomeTier: 'Minor_Success', LandedActions: 1, Outcome: 'light_impact', CounterPotential: 'none' };
+    else if (margin === 0) outcome = { OutcomeTier: 'Stalemate', LandedActions: 0, Outcome: 'struggle', CounterPotential: 'none' };
     else if (margin >= -3) outcome = { OutcomeTier: 'Minor_Failure', LandedActions: 0, Outcome: 'checked', CounterPotential: 'light' };
     else if (margin >= -7) outcome = { OutcomeTier: 'Moderate_Failure', LandedActions: 0, Outcome: 'deflected', CounterPotential: 'medium' };
     else outcome = { OutcomeTier: 'Critical_Failure', LandedActions: 0, Outcome: 'avoided', CounterPotential: 'severe' };
@@ -615,11 +620,25 @@ function hostilePhysicalOutcome(margin, actionLength) {
     return outcome;
 }
 
+function nonHostileOutcome(margin) {
+    if (margin >= 1) return { OutcomeTier: 'Success', LandedActions: '(none)', Outcome: 'success', CounterPotential: 'none' };
+    if (margin === 0) return { OutcomeTier: 'Stalemate', LandedActions: '(none)', Outcome: 'struggle', CounterPotential: 'none' };
+    return { OutcomeTier: 'Failure', LandedActions: '(none)', Outcome: 'failure', CounterPotential: 'none' };
+}
+
 function counterBonusFromPotential(counterPotential) {
     if (counterPotential === 'light') return 2;
     if (counterPotential === 'medium') return 4;
     if (counterPotential === 'severe') return 6;
     return 0;
+}
+
+function aggressionReactionOutcome(margin) {
+    if (margin >= 5) return 'npc_overpowers';
+    if (margin >= 1) return 'npc_succeeds';
+    if (margin === 0) return 'stalemate';
+    if (margin >= -3) return 'user_resists';
+    return 'user_dominates';
 }
 
 function chooseGeneratedCore(ledger, resolutionSemantic, primaryOppTarget) {
@@ -666,8 +685,13 @@ function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem) {
     const landed = landedBool(packet.LandedActions);
     const g = packet.GOAL;
     const out = packet.Outcome;
+    const hasStakes = packet.STAKES === 'Y';
 
     if (!isDirect && !isOpp && !isBenefited && !isHarmed) return 'No Change';
+    if (!hasStakes) {
+        if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g) && isAllowed === 'Y') return 'Bond';
+        return 'No Change';
+    }
     if (auditInteraction === 'Y' && !isHarmed) return 'Bond';
     if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
     if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
@@ -692,6 +716,7 @@ function updateRapport(currentRapport, target, rapportEncounterLock, mode = 'nor
 
 function applyHostilePhysicalPressure(npc, packet, state) {
     if (packet.HostilePhysicalIntent !== 'Y') return null;
+    if (packet.STAKES !== 'Y') return null;
 
     const isDirect = includesName(packet.ActionTargets, npc);
     const isOpp = includesName(packet.OppTargets?.NPC, npc);
@@ -866,6 +891,54 @@ function currentIntimacyGateAllows(state) {
     if (state?.currentDisposition?.F >= 3 || state?.currentDisposition?.H >= 3) return false;
     if (state?.intimacyGateSource === 'B4' && state?.currentDisposition?.B < 4) return false;
     return true;
+}
+
+function getStakesOverrideEvidence(goal, intimacyTarget, targetState, semanticHasStakes, intimacyConsent) {
+    if (!['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) return null;
+
+    const disposition = targetState?.currentDisposition || null;
+    const evidence = {
+        target: intimacyTarget || NONE,
+        currentDisposition: disposition ? formatDisposition(disposition) : null,
+        priorIntimacyGate: targetState?.intimacyGate || 'SKIP',
+        priorIntimacyGateSource: targetState?.intimacyGateSource || 'NONE',
+        intimacyConsent,
+    };
+
+    if (semanticHasStakes === 'Y' && intimacyConsent === 'Y' && targetState?.intimacyGate === 'ALLOW') {
+        return {
+            hasStakes: 'N',
+            rule: 'hard_override_allowed_intimacy_prior_ALLOW',
+            evidence: {
+                ...evidence,
+                hardRule: 'ResolutionEngine.hasStakes: allowed intimacy advance returns N',
+            },
+        };
+    }
+
+    if (semanticHasStakes === 'Y' && intimacyConsent === 'Y' && disposition?.B >= 4 && disposition.F < 3 && disposition.H < 3) {
+        return {
+            hasStakes: 'N',
+            rule: 'hard_override_allowed_intimacy_B4',
+            evidence: {
+                ...evidence,
+                hardRule: 'ResolutionEngine.hasStakes: allowed intimacy advance returns N',
+            },
+        };
+    }
+
+    if (semanticHasStakes === 'N' && intimacyConsent === 'N') {
+        return {
+            hasStakes: 'Y',
+            rule: 'hard_override_denied_intimacy_no_allow',
+            evidence: {
+                ...evidence,
+                hardRule: 'ResolutionEngine.hasStakes: denied intimacy advance returns Y',
+            },
+        };
+    }
+
+    return null;
 }
 
 function resolveIntimacyGate(previousState, threshold, disposition, isAllowed) {

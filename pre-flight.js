@@ -138,6 +138,9 @@ function buildAggressionGuide(aggressionResults) {
         if (value.ReactionOutcome === 'npc_succeeds') {
             return `${name}: ${attackType} succeeds modestly; narrate proportional effect. Do not narrate any follow-up action or dialogue by {{user}}.`;
         }
+        if (value.ReactionOutcome === 'stalemate') {
+            return `${name}: ${attackType} meets equal resistance; narrate a cinematic stalemate, clash, bind, or struggle. Stop in the deadlock. Do not narrate {{user}}'s counterattack, choices, thoughts, feelings, or dialogue.`;
+        }
         if (value.ReactionOutcome === 'user_resists') {
             return `${name}: ${attackType} is partly resisted; stop at the moment of impact/contact/near-contact. Do not narrate {{user}}'s counterattack, actions, reactions, thoughts, feelings, or dialogue.`;
         }

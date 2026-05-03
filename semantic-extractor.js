@@ -11,6 +11,7 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
         responseLength: 4500,
         trimNames: false,
         prefill: '{',
+        jsonSchema: SEMANTIC_LEDGER_SCHEMA,
     });
 
     const ledger = parseJson(raw);
@@ -58,7 +59,30 @@ const SEMANTIC_LEDGER_SCHEMA = Object.freeze({
         type: 'object',
         additionalProperties: false,
         properties: {
-            userCoreStats: CORE_SCHEMA,
+            engineContext: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    userCoreStats: CORE_SCHEMA,
+                    trackerRelevantNPCs: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: true,
+                            properties: {
+                                NPC: { type: 'string' },
+                                currentDisposition: { type: ['string', 'null'] },
+                                currentRapport: { type: 'integer', minimum: 0, maximum: 5 },
+                                rapportEncounterLock: { type: 'string', enum: ['Y', 'N'] },
+                                intimacyGate: { type: 'string', enum: ['ALLOW', 'DENY', 'SKIP'] },
+                                currentCoreStats: CORE_SCHEMA,
+                            },
+                            required: ['NPC'],
+                        },
+                    },
+                },
+                required: ['userCoreStats', 'trackerRelevantNPCs'],
+            },
             resolutionSemantic: {
                 type: 'object',
                 additionalProperties: false,
@@ -139,11 +163,12 @@ const SEMANTIC_LEDGER_SCHEMA = Object.freeze({
                                 dominant_impact: { type: 'string', enum: ['benefit', 'harm', 'none'] },
                                 solid_impact: { type: 'string', enum: ['benefit', 'harm', 'none'] },
                                 light_impact: { type: 'string', enum: ['benefit', 'harm', 'none'] },
+                                struggle: { type: 'string', enum: ['benefit', 'harm', 'none'] },
                                 checked: { type: 'string', enum: ['benefit', 'harm', 'none'] },
                                 deflected: { type: 'string', enum: ['benefit', 'harm', 'none'] },
                                 avoided: { type: 'string', enum: ['benefit', 'harm', 'none'] },
                             },
-                            required: ['no_roll', 'success', 'failure', 'dominant_impact', 'solid_impact', 'light_impact', 'checked', 'deflected', 'avoided'],
+                            required: ['no_roll', 'success', 'failure', 'dominant_impact', 'solid_impact', 'light_impact', 'struggle', 'checked', 'deflected', 'avoided'],
                         },
                         overrideFlags: {
                             type: 'object',
@@ -201,9 +226,58 @@ const SEMANTIC_LEDGER_SCHEMA = Object.freeze({
                 required: ['cap'],
             },
         },
-        required: ['userCoreStats', 'resolutionSemantic', 'relationshipSemantic', 'chaosSemantic', 'nameSemantic', 'proactivitySemantic'],
+        required: ['engineContext', 'resolutionSemantic', 'relationshipSemantic', 'chaosSemantic', 'nameSemantic', 'proactivitySemantic'],
     },
 });
+
+const SEMANTIC_LEDGER_TEMPLATE = `{
+  "engineContext": {
+    "userCoreStats": {"PHY": 1, "MND": 1, "CHA": 1},
+    "trackerRelevantNPCs": [
+      {
+        "NPC": "name",
+        "currentDisposition": "B#/F#/H# or null",
+        "currentRapport": 0,
+        "rapportEncounterLock": "Y|N",
+        "intimacyGate": "ALLOW|DENY|SKIP",
+        "currentCoreStats": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
+      }
+    ]
+  },
+  "resolutionSemantic": {
+    "goal": "plain final intent; use IntimacyAdvancePhysical/Verbal only for explicit direct intimate advances",
+    "intimacyAdvance": "none|physical|verbal",
+    "explicitMeans": "plain explicit means that determine success/failure",
+    "targets": {
+      "ActionTargets": ["living NPC names or (none)"],
+      "OppTargets": {"NPC": ["living opposing NPC names or (none)"], "ENV": ["non-living obstacle names or (none)"]},
+      "BenefitedObservers": ["living NPC names or (none)"],
+      "HarmedObservers": ["living NPC names or (none)"]
+    },
+    "hasStakesCandidate": true,
+    "actionMarkers": ["a1"],
+    "userStat": "PHY|MND|CHA",
+    "oppStat": "PHY|MND|CHA|ENV",
+    "primaryOppTarget": "name or (none)",
+    "hostilePhysicalIntent": false,
+    "genStatsIfNeeded": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
+  },
+  "relationshipSemantic": [
+    {
+      "NPC": "living NPC name",
+      "relevant": true,
+      "initFlags": {"romanticOpen": false, "userBadRep": false, "userGoodRep": false, "userNonHuman": false, "fearImmunity": false},
+      "newEncounterExplicit": false,
+      "explicitIntimidationOrCoercion": false,
+      "stakeChangeByOutcome": {"no_roll": "none", "success": "benefit|harm|none", "failure": "benefit|harm|none", "dominant_impact": "benefit|harm|none", "solid_impact": "benefit|harm|none", "light_impact": "benefit|harm|none", "struggle": "benefit|harm|none", "checked": "benefit|harm|none", "deflected": "benefit|harm|none", "avoided": "benefit|harm|none"},
+      "overrideFlags": {"Exploitation": false, "Hedonist": false, "Transactional": false, "Established": false},
+      "coreStatsIfNeeded": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
+    }
+  ],
+  "chaosSemantic": {"sceneSummary": "short scene summary"},
+  "nameSemantic": {"nameRequired": false, "explicitNameKnown": true, "isLocation": false, "seed": "(none)", "normalizeSeed": "(none)", "detectMode": "none|PERSON|LOCATION", "generatedName": "(none)"},
+  "proactivitySemantic": {"cap": 1}
+}`;
 
 function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
     const chatContext = formatChatContext(coreChat);
@@ -219,6 +293,8 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
                 'Return exactly one complete, valid JSON object. Do not wrap it in markdown. Do not return an empty object. ' +
                 'Do not narrate. Do not roll dice. Do not calculate outcomes. ' +
                 'Classify only contextual/semantic predicates needed by the engines. Use EXPLICIT-ONLY and FIRST-YES-WINS from the engine reference. ' +
+                'The semantic/contextual fields you return are authoritative; the deterministic runner should not reinterpret them. ' +
+                'hasStakesCandidate is contextual and FINAL: return true only when success or failure would materially change stakes under DEF.STAKES; return false for truly no-stakes acts. ' +
                 'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, relationshipSemantic.NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
                 'Create one relationshipSemantic entry for each living NPC in ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, or otherwise directly interacted with or materially affected by the last user input. ' +
                 'For each living NPC in relationshipSemantic, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. ' +
@@ -242,47 +318,22 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             content: `Engine reference:\n${ENGINE_PROMPT_TEXT}`,
         },
         {
+            role: 'system',
+            content:
+                'Semantic extraction order mirrors the original engine dependency order. ' +
+                'First read engineContext/tracker/persona/card/chat. Then fill ResolutionEngine semantic fields in this order: identifyGoal, identifyTargets, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. ' +
+                'Then fill RelationshipEngine semantic fields in this order: relevant NPCs, current state context, init flags, new encounter flag, auditInteraction/stakeChangeByOutcome, route context flags, override flags, coreStatsIfNeeded. ' +
+                'Then fill chaosSemantic, nameSemantic, and proactivitySemantic. ' +
+                'Tie rule override: exact roll ties are cinematic stalemates/struggles, not defender wins; include stakeChangeByOutcome.struggle accordingly. ' +
+                'Do not use deterministic outcomes, dice, or guesses to change semantic stakes.',
+        },
+        {
             role: 'user',
             content:
                 `Recent chat context, newest last:\n${chatContext}\n\n` +
-                'Important classification reminders: Asking/proposing/requesting intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
+                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. For hasStakesCandidate, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
                 'Return one complete JSON object with this exact shape. The assistant prefill is "{", so continue the object from its first property and close it with "}".\n' +
-                `{
-  "userCoreStats": {"PHY": 1, "MND": 1, "CHA": 1},
-  "resolutionSemantic": {
-    "goal": "plain final intent",
-    "intimacyAdvance": "none|physical|verbal",
-    "explicitMeans": "plain explicit means",
-    "targets": {
-      "ActionTargets": ["NPC names or (none)"],
-      "OppTargets": {"NPC": ["NPC names or (none)"], "ENV": ["obstacle names or (none)"]},
-      "BenefitedObservers": ["NPC names or (none)"],
-      "HarmedObservers": ["NPC names or (none)"]
-    },
-    "hasStakesCandidate": true,
-    "actionMarkers": ["a1"],
-    "userStat": "PHY|MND|CHA",
-    "oppStat": "PHY|MND|CHA|ENV",
-    "primaryOppTarget": "name or (none)",
-    "hostilePhysicalIntent": false,
-    "genStatsIfNeeded": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
-  },
-  "relationshipSemantic": [
-    {
-      "NPC": "name",
-      "relevant": true,
-      "initFlags": {"romanticOpen": false, "userBadRep": false, "userGoodRep": false, "userNonHuman": false, "fearImmunity": false},
-      "newEncounterExplicit": false,
-      "explicitIntimidationOrCoercion": false,
-      "stakeChangeByOutcome": {"no_roll": "none", "success": "benefit|harm|none", "failure": "benefit|harm|none", "dominant_impact": "benefit|harm|none", "solid_impact": "benefit|harm|none", "light_impact": "benefit|harm|none", "checked": "benefit|harm|none", "deflected": "benefit|harm|none", "avoided": "benefit|harm|none"},
-      "overrideFlags": {"Exploitation": false, "Hedonist": false, "Transactional": false, "Established": false},
-      "coreStatsIfNeeded": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
-    }
-  ],
-  "chaosSemantic": {"sceneSummary": "short scene summary"},
-  "nameSemantic": {"nameRequired": false, "explicitNameKnown": true, "isLocation": false, "seed": "(none)", "normalizeSeed": "(none)", "detectMode": "none|PERSON|LOCATION", "generatedName": "(none)"},
-  "proactivitySemantic": {"cap": 1}
-}`,
+                SEMANTIC_LEDGER_TEMPLATE,
         },
     ];
 }
@@ -382,6 +433,10 @@ function extractJsonObject(text) {
 }
 
 function normalizeLedger(ledger) {
+    if (ledger.engineContext && !ledger.userCoreStats) {
+        ledger.userCoreStats = ledger.engineContext.userCoreStats;
+    }
+    delete ledger.engineContext;
     ledger.userCoreStats = normalizeCore(ledger.userCoreStats);
     ledger.resolutionSemantic = ledger.resolutionSemantic || {};
     ledger.resolutionSemantic.targets = ledger.resolutionSemantic.targets || {};
