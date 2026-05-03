@@ -62,10 +62,12 @@ export function formatNarratorPromptContext(report) {
         'Write final narration immediately. No analysis. Final message must be non-empty.',
         'Length target: 80-140 words unless the scene requires less.',
         'RESULT=' + compact.result,
+        'ACTIONS=' + compact.actions,
         'NPC=' + compact.npc,
         'CHAOS=' + compact.chaos,
         'PROACTIVE=' + compact.proactive,
         'AGGRESSION=' + compact.aggression,
+        'AGGRESSION_GUIDE=' + compact.aggressionGuide,
         'GUIDE=' + compact.guide,
     ];
 
@@ -81,6 +83,7 @@ function buildNarratorSummary(handoff, resolution) {
         `gate:${h.IntimacyGate}`,
         `stakes:${h.NPC_STAKES}`,
         `landed:${h.Landed}`,
+        `pressure:${h.HostilePressure ?? 0}/${h.HostileLandedPressure ?? 0}/${h.DominantLock ?? 'None'}/${h.PressureMode ?? 'none'}`,
     ].join('/')).join(';') || 'none';
 
     const chaos = handoff.chaosHandoff?.CHAOS ?? {};
@@ -99,18 +102,37 @@ function buildNarratorSummary(handoff, resolution) {
     const aggressionText = Object.entries(handoff.aggressionResults ?? {}).map(([name, value]) =>
         `${name}/${value.ReactionOutcome}/margin:${value.Margin}`,
     ).join(';') || 'none';
+    const aggressionGuide = aggressionText === 'none'
+        ? buildNoAggressionGuide(resolution, handoff)
+        : 'Narrate the listed NPC follow-up physical action/result after the user action; do not ignore it.';
 
     const goal = resolution.GOAL ?? 'normal';
     const result = handoff.resultLine ?? `${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}`;
 
     return {
         result,
+        actions: list(resolution.actions),
         npc: npcText,
         chaos: chaosText,
         proactive: proactiveText,
         aggression: aggressionText,
+        aggressionGuide,
         guide: `${goal}; outcome:${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}; consent:${resolution.IntimacyConsent ?? 'N'}; targets:${list(resolution.ActionTargets)}; denied intimacy means refusal/boundary regardless of roll; narrate the scene now.`,
     };
+}
+
+function buildNoAggressionGuide(resolution, handoff) {
+    const hasAggressiveProactivity = Object.values(handoff.proactivityResults ?? {}).some(value =>
+        value?.Proactive === 'Y'
+        && value?.TargetsUser === 'Y'
+        && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL'].includes(value?.Intent));
+
+    if (!hasAggressiveProactivity) return 'none';
+    if (resolution.CounterPotential === 'none') {
+        return 'CounterPotential is none: do not narrate an NPC counter-hit. Show stance, threat, guard, withdrawal, boundary, or preparation instead.';
+    }
+
+    return 'No aggression result was produced; do not invent a resolved NPC hit.';
 }
 
 export function formatDebugMessagePrefix(preFlightAudit, narratorPromptContext) {

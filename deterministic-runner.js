@@ -38,7 +38,7 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
     const chaos = runChaos(ledger, relationships.handoffs, resolution.packet, dice, audit);
     const name = runNameGeneration(ledger, audit);
     const proactivity = runProactivity(ledger, relationships.handoffs, resolution.packet, chaos.handoff, dice, audit);
-    const aggression = runAggression(ledger, trackerSnapshot, relationships.trackerUpdate, proactivity.results, dice, audit);
+    const aggression = runAggression(ledger, trackerSnapshot, relationships.trackerUpdate, proactivity.results, resolution.packet, dice, audit);
 
     const trackerUpdate = { npcs: relationships.trackerUpdate };
     const finalNarrativeHandoff = {
@@ -117,6 +117,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         CounterPotential: 'none',
     };
     let resultLine = 'No roll';
+    let hostilePhysical = false;
 
     if (hasStakes === 'N') {
         audit.push('2.6 hasStakes=N');
@@ -165,7 +166,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         const atkTot = atkDie + statValue(userCore, userStat);
         const defTot = oppStat === 'ENV' ? defDie : defDie + statValue(targetCore, oppStat);
         const margin = atkTot - defTot;
-        const hostilePhysical = userStat === 'PHY' && bool(semantic.hostilePhysicalIntent);
+        hostilePhysical = userStat === 'PHY' && bool(semantic.hostilePhysicalIntent);
 
         if (hostilePhysical) {
             outcome = hostilePhysicalOutcome(margin, actions.length);
@@ -188,6 +189,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         OutcomeTier: outcome.OutcomeTier,
         Outcome: outcome.Outcome,
         CounterPotential: outcome.CounterPotential,
+        HostilePhysicalIntent: hostilePhysical ? 'Y' : 'N',
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
         BenefitedObservers: showNone(targets.BenefitedObservers),
@@ -239,6 +241,10 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
         let rapportEncounterLock = newEncounter === 'Y' ? 'N' : state.rapportEncounterLock;
         let currentDisposition = state.currentDisposition;
         let currentRapport = state.currentRapport;
+        let hostilePressure = state.hostilePressure;
+        let hostileLandedPressure = state.hostileLandedPressure;
+        let dominantLock = state.dominantLock;
+        let pressureMode = state.pressureMode;
 
         audit.push(`3.3 getCurrentRelationalState=${compact(state)}`);
         audit.push(`3.3a newEncounterExplicit=${newEncounter}`);
@@ -312,6 +318,10 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
             OutcomeTier: resolutionPacket.OutcomeTier || 'NONE',
             NarrationBand: resolutionPacket.Outcome || 'standard',
             IntimacyGate: intimacyGate,
+            HostilePressure: hostilePressure,
+            HostileLandedPressure: hostileLandedPressure,
+            DominantLock: dominantLock,
+            PressureMode: pressureMode,
         };
         handoffs.push(handoff);
 
@@ -322,6 +332,10 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
             rapportEncounterLock,
             intimacyGate,
             currentCoreStats: coreStats,
+            hostilePressure,
+            hostileLandedPressure,
+            dominantLock,
+            pressureMode,
         };
 
         audit.push(`3.7 NPC_HANDOFF=${compact(handoff)}`);
@@ -470,18 +484,24 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
     return { results };
 }
 
-function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResults, dice, audit) {
+function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResults, resolutionPacket, dice, audit) {
     const userCore = normalizeCore(ledger.userCoreStats, { PHY: 1, MND: 1, CHA: 1 });
+    const counterPotential = resolutionPacket?.CounterPotential || 'none';
+    const counterAllowed = ['light', 'medium', 'severe'].includes(counterPotential);
     const aggressive = Object.entries(proactivityResults).filter(([, result]) =>
+        counterAllowed
+        &&
         result.Proactive === 'Y'
         && result.TargetsUser === 'Y'
         && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL'].includes(result.Intent));
     const results = {};
 
     audit.push('STEP 7: EXECUTE NPCAggressionResolution');
+    audit.push(`7.1 counterPotential=${counterPotential}`);
     audit.push(`7.2 AggressionPresent=${aggressive.length ? 'Y' : 'N'}`);
 
     if (!aggressive.length) {
+        if (!counterAllowed) audit.push('7.2a counterPotential=none -> no immediate counterattack roll');
         audit.push('7.2a AGGRESSION_RESULTS={}');
         audit.push('---');
         return { results };
@@ -764,6 +784,10 @@ function normalizeTrackerEntry(value) {
         rapportEncounterLock: value?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
         intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(value?.intimacyGate) ? value.intimacyGate : 'SKIP',
         currentCoreStats: value?.currentCoreStats ? normalizeCore(value.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 }) : null,
+        hostilePressure: clamp(Number(value?.hostilePressure ?? 0), 0, 20),
+        hostileLandedPressure: clamp(Number(value?.hostileLandedPressure ?? 0), 0, 20),
+        dominantLock: ['FEAR', 'HOSTILITY'].includes(value?.dominantLock) ? value.dominantLock : 'None',
+        pressureMode: ['none', 'cornered', 'dominated'].includes(value?.pressureMode) ? value.pressureMode : 'none',
     };
 }
 
