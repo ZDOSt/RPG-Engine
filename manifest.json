@@ -1,19 +1,14 @@
 {
-    "display_name": "RP Engine Tracker",
-    "loading_order": 100,
+    "display_name": "Structured Preflight Engines",
+    "loading_order": 999,
     "requires": [],
     "optional": [],
-    "js": "index.js?v=0.1.223",
-    "css": "style.css?v=0.1.223",
-    "author": "Codex",
-    "version": "0.1.223",
-    "homePage": "https://github.com/SillyTavern/SillyTavern",
-    "generate_interceptor": "rpEngineTrackerInterceptor"
+    "js": "index.js",
+    "author": "Local",
+    "version": "0.1.0",
+    "homePage": "https://docs.sillytavern.app/for-contributors/writing-extensions/",
+    "generate_interceptor": "StructuredPreflightEngines_generationInterceptor",
+    "hooks": {
+        "disable": "onDisable"
+    }
 }
-
-
-
-
-
-
-
