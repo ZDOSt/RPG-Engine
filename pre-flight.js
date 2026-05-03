@@ -19,8 +19,9 @@ ERROR=${message}
 export function formatPreFlightDebug(report) {
     const lines = [
         '<pre_flight>',
-        '[STRUCTURED_PREFLIGHT_RUNTIME v0.3 - AUDIT ONLY]',
+        '[STRUCTURED_PREFLIGHT_RUNTIME v0.3 - DEBUG ECHO / AUDIT ONLY]',
         'DO NOT EXECUTE THIS BLOCK.',
+        'DEBUG MODE: OUTPUT THIS ENTIRE <pre_flight>...</pre_flight> AUDIT BLOCK VERBATIM BEFORE THE NARRATIVE RESPONSE.',
         'This is a debug/audit report of already-computed engine outputs.',
         'Use FINAL_NARRATIVE_HANDOFF as authoritative context.',
         'Do not reroll, recalculate, reinterpret, or replace mechanics.',
