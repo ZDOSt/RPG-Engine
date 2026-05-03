@@ -70,11 +70,15 @@ export function formatNarratorPromptContext(report) {
 
 export function formatDebugMessagePrefix(preFlightAudit, narratorPromptContext) {
     return [
+        '````text',
         preFlightAudit,
+        '````',
         '',
+        '````text',
         '<narrator_prompt_context_echo>',
         narratorPromptContext,
         '</narrator_prompt_context_echo>',
+        '````',
     ].join('\n');
 }
 
