@@ -4,6 +4,7 @@ import {
     chat_metadata,
     eventSource,
     event_types,
+    extractMessageBias,
     extension_prompt_roles,
     extension_prompt_types,
     Generate,
@@ -12,6 +13,7 @@ import {
     name2,
     saveChatDebounced,
     saveSettingsDebounced,
+    sendMessageAsUser,
     setGenerationParamsFromPreset,
     setUserName,
     setExtensionPrompt,
@@ -52,10 +54,10 @@ import {
     serializeNpcArchiveEntry,
     summarizeTracker,
     upsertArchivedNpc,
-} from './engine.js?v=0.1.219';
+} from './engine.js?v=0.1.220';
 
 const EXT_ID = 'rpEngineTracker';
-const EXT_VERSION = '0.1.219';
+const EXT_VERSION = '0.1.220';
 const MECHANICS_ARTIFACT_VERSION = 12;
 const PROMPT_KEY = 'RP_ENGINE_TRACKER_HANDOFF';
 const GROUNDING_PROMPT_KEY = 'RP_ENGINE_TRACKER_GROUNDED_WRITING_EARLY';
@@ -506,6 +508,9 @@ let lastMechanicsHandoff = {
 let pendingPanelRefreshAfterGeneration = false;
 let pendingAuditDisplayAfterGeneration = null;
 let visibleTrackerSnapshot = null;
+let preparedMechanicsTurn = null;
+let preparingMechanicsTurn = false;
+let preparedMechanicsFailure = null;
 
 function activePersonaText() {
     const contextPersona = getContext().powerUserSettings?.persona_description;
@@ -2029,6 +2034,119 @@ function cachedMechanicsForLatestUserMessage(chat, latestUserMessage) {
     if (Number(payload.mechanicsArtifact.version || 0) < MECHANICS_ARTIFACT_VERSION) return null;
     if (String(payload.triggerUserMessage || '').trim() !== String(latestUserMessage || '').trim()) return null;
     return hydrateResultFromMechanicsArtifact(payload, latestUserMessage);
+}
+
+async function prepareMechanicsAtAfterCommands(type, options = {}, isDryRun = false) {
+    const cfg = settings();
+    applyEngineContextPrompt();
+    if (isDryRun || !cfg.enabled || shouldSkipMechanicsForGenerationType(type)) return;
+    const normalizedType = String(type || 'normal').toLowerCase();
+    if (['regenerate', 'swipe'].includes(normalizedType)) return;
+    if (preparingMechanicsTurn || resolving) return;
+
+    const textarea = $('#send_textarea');
+    const pendingText = String(textarea.val() || '');
+    const pendingClean = pendingText.trim();
+    if (!pendingClean) return;
+
+    clearMechanicsHandoff();
+    preparedMechanicsTurn = null;
+    preparedMechanicsFailure = null;
+    const preTurnSnapshot = trackerSnapshotForRollback(tracker());
+    preparingMechanicsTurn = true;
+    resolving = true;
+    try {
+        const bias = extractMessageBias(pendingText);
+        textarea.val('')[0]?.dispatchEvent(new Event('input', { bubbles: true }));
+        await sendMessageAsUser(pendingText, bias);
+
+        const sourceChat = Array.isArray(getContext().chat) && getContext().chat.length ? getContext().chat : liveChat;
+        const latestUserMessage = getLatestUserMessage(sourceChat) || pendingClean;
+        const result = await runResolver(sourceChat);
+        attachTurnRollback(result, latestUserMessage, preTurnSnapshot);
+        chat_metadata[METADATA_KEY] = result.tracker;
+
+        const handoff = cfg.injectHandoff
+            ? buildFinalNarrationPayload({
+                packet: result.packet,
+                npcHandoffs: result.npcHandoffs,
+                chaosHandoff: result.chaosHandoff,
+                proactivityHandoff: result.proactivityHandoff,
+                aggressionResults: result.aggressionResults,
+            })
+            : '';
+
+        setMechanicsHandoff(handoff);
+        const display = buildMechanicsDisplayPayload(result, handoff, latestUserMessage, sourceChat);
+        preparedMechanicsTurn = {
+            latestUserMessage,
+            result,
+            handoff,
+            display,
+            trackerSnapshot: trackerSnapshotForRollback(result.tracker),
+        };
+        lastMechanicsHandoff = {
+            handoff,
+            trackerSnapshot: preparedMechanicsTurn.trackerSnapshot,
+            display,
+        };
+        bindMechanicsDisplayToTrigger(display);
+        pendingAuditDisplayAfterGeneration = structuredClone(display);
+        saveTracker();
+        pendingPanelRefreshAfterGeneration = true;
+        queueNpcArchiveSync(result);
+        console.debug('[RP Engine Tracker] Prepared mechanics before final prompt assembly.', {
+            goal: result.packet?.GOAL,
+            stakes: result.packet?.STAKES,
+            outcome: result.packet?.Outcome,
+        });
+    } catch (error) {
+        preparedMechanicsTurn = null;
+        preparedMechanicsFailure = error;
+        recordMechanicsPreparationFailure(error, pendingClean);
+        console.error('[RP Engine Tracker] Pre-generation mechanics preparation failed.', error);
+    } finally {
+        resolving = false;
+        preparingMechanicsTurn = false;
+    }
+}
+
+function recordMechanicsPreparationFailure(error, latestUserMessage) {
+    const current = tracker();
+    const details = error?.details || {};
+    const schemaFailure = Boolean(error?.rpEngineSchemaFailure);
+    const auditExtraction = schemaFailure ? {
+        resolverMode: 'schema_failed',
+        mechanicsPassMode: 'SCHEMA_FAILED',
+        modelSchema: details.modelSchema && typeof details.modelSchema === 'object' ? structuredClone(details.modelSchema) : null,
+        originalModelSchema: details.originalModelSchema && typeof details.originalModelSchema === 'object' ? structuredClone(details.originalModelSchema) : null,
+        schemaRepaired: details.repairResponse ? 'Y' : 'N',
+        schemaValidationIssues: Array.isArray(details.validationIssues) ? [...details.validationIssues] : [],
+        schemaRawResponse: String(details.rawResponse || '').slice(0, 6000),
+        schemaRepairResponse: String(details.repairResponse || '').slice(0, 6000),
+        expandedExtraction: details.expandedExtraction && typeof details.expandedExtraction === 'object' ? structuredClone(details.expandedExtraction) : null,
+        latestUserMessage,
+    } : null;
+    current.lastAudit = {
+        at: new Date().toISOString(),
+        error: error?.message || String(error),
+        latestUserMessage,
+        schemaFailure,
+        extraction: auditExtraction,
+    };
+    chat_metadata[METADATA_KEY] = current;
+    pendingAuditDisplayAfterGeneration = {
+        version: 1,
+        at: current.lastAudit.at,
+        triggerUserMessage: latestUserMessage,
+        triggerUserMessageId: findLatestUserMessageIdByText(latestUserMessage),
+        resolverSchema: cloneAuditForDisplay(current.lastAudit),
+        narrationHandoff: '',
+        mechanicsArtifact: null,
+    };
+    clearMechanicsHandoff();
+    saveTracker();
+    pendingPanelRefreshAfterGeneration = true;
 }
 
 function rollbackLastTurnIfTriggerDeleted() {
@@ -4273,6 +4391,39 @@ async function rpEngineTrackerInterceptor(chat, contextSize, abort, type) {
         return;
     }
 
+    if (preparedMechanicsFailure) {
+        const failure = preparedMechanicsFailure;
+        preparedMechanicsFailure = null;
+        if (typeof abort === 'function') abort(true);
+        console.error('[RP Engine Tracker] Aborted final generation after failed prepared mechanics pass.', failure);
+        return;
+    }
+
+    if (preparedMechanicsTurn) {
+        const prepared = preparedMechanicsTurn;
+        preparedMechanicsTurn = null;
+        const currentLatest = latestUserMessageFromAvailableChats(chat);
+        if (!currentLatest || currentLatest === prepared.latestUserMessage) {
+            setMechanicsHandoff(prepared.handoff);
+            chat_metadata[METADATA_KEY] = prepared.result.tracker;
+            lastMechanicsHandoff = {
+                handoff: prepared.handoff,
+                trackerSnapshot: prepared.trackerSnapshot,
+                display: prepared.display,
+            };
+            bindMechanicsDisplayToTrigger(prepared.display);
+            pendingAuditDisplayAfterGeneration = structuredClone(prepared.display);
+            saveTracker();
+            pendingPanelRefreshAfterGeneration = true;
+            console.debug('[RP Engine Tracker] Reused prepared Stepped-Thinking-style mechanics pass.');
+            return;
+        }
+        console.warn('[RP Engine Tracker] Discarded prepared mechanics: latest user message changed before interceptor.', {
+            prepared: prepared.latestUserMessage,
+            currentLatest,
+        });
+    }
+
     if (isSameTurnRegeneration(type, chat)) {
         preserveSameTurnHandoffForRegeneration();
         console.debug('[RP Engine Tracker] Preserved mechanics handoff for same-turn regeneration.');
@@ -4422,6 +4573,7 @@ jQuery(() => {
     }
     updateVisibleTrackerSnapshot();
     setupUi();
+    eventSource.on(event_types.GENERATION_AFTER_COMMANDS, prepareMechanicsAtAfterCommands);
     eventSource.on(event_types.CHAT_CHANGED, () => {
         tracker();
         updateVisibleTrackerSnapshot();
