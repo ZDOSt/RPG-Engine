@@ -34,6 +34,8 @@ const state = {
     runningSemanticPass: false,
     lastDebugPrefix: '',
     lastDebugKey: null,
+    pendingRun: null,
+    chatSignature: [],
     subscribed: false,
 };
 
@@ -81,10 +83,82 @@ function injectNarratorContext(value) {
     );
 }
 
+function getChatId(context = getContext()) {
+    return typeof context?.getCurrentChatId === 'function' ? context.getCurrentChatId() : '';
+}
+
+function getMessageKey(messageId, context = getContext()) {
+    return `${getChatId(context)}:${messageId}`;
+}
+
+function getTrackerRoot(context = getContext()) {
+    if (!context?.chatMetadata) return null;
+    context.chatMetadata.structuredPreflightTracker = context.chatMetadata.structuredPreflightTracker || { npcs: {}, snapshots: {} };
+    const root = context.chatMetadata.structuredPreflightTracker;
+    root.npcs = root.npcs || {};
+    root.snapshots = root.snapshots || {};
+    return root;
+}
+
+function clone(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function captureChatSignature(context = getContext()) {
+    if (!Array.isArray(context?.chat)) return [];
+    return context.chat.map(message => [
+        message?.is_user ? 'user' : 'assistant',
+        String(message?.name ?? ''),
+        String(message?.send_date ?? ''),
+        String(message?.mes ?? '').slice(0, 80),
+    ].join('|'));
+}
+
+function firstChangedIndex(before, after) {
+    const max = Math.max(before?.length || 0, after?.length || 0);
+    for (let index = 0; index < max; index += 1) {
+        if ((before?.[index] ?? null) !== (after?.[index] ?? null)) return index;
+    }
+    return max;
+}
+
+function stripComputedDebugPrefix(text) {
+    return String(text ?? '')
+        .replace(/^````text\s*\n&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*````\s*\n+/i, '')
+        .replace(/^````text\s*\n<pre_flight>[\s\S]*?<\/pre_flight>\s*````\s*\n+/i, '')
+        .replace(/^````text\s*\n<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*````\s*\n+/i, '');
+}
+
+function restoreTrackerForRegeneration(type) {
+    if (!['regenerate', 'swipe', 'continue'].includes(String(type))) return;
+
+    const context = getContext();
+    const root = getTrackerRoot(context);
+    if (!root) return;
+
+    const targetMessageId = Array.isArray(context?.chat) ? context.chat.length - 1 : null;
+    const snapshot = targetMessageId == null ? null : root.snapshots?.[getMessageKey(targetMessageId, context)]?.before;
+    if (snapshot) {
+        root.npcs = clone(snapshot) || {};
+        root.snapshots[getMessageKey(targetMessageId, context)].restoredForRegeneration = Date.now();
+        console.info(`[${EXTENSION_NAME}] restored tracker snapshot before ${type} of message ${targetMessageId}`);
+    }
+
+    state.lastDebugKey = null;
+    state.lastDebugPrefix = '';
+}
+
+async function persistMetadata(context = getContext()) {
+    if (typeof context?.saveMetadataDebounced === 'function') {
+        context.saveMetadataDebounced();
+    } else if (typeof context?.saveMetadata === 'function') {
+        await context.saveMetadata();
+    }
+}
+
 async function prependComputedDebug(messageId, type) {
     const context = getContext();
-    const chatId = typeof context?.getCurrentChatId === 'function' ? context.getCurrentChatId() : '';
-    const messageKey = `${chatId}:${messageId}`;
+    const messageKey = getMessageKey(messageId, context);
 
     if (!state.lastDebugPrefix || state.lastDebugKey === messageKey) return;
     if (type === 'impersonate') return;
@@ -96,12 +170,17 @@ async function prependComputedDebug(messageId, type) {
 
     const currentText = String(message.mes ?? '');
     const displayText = message.extra.display_text == null ? null : String(message.extra.display_text);
-    const visibleText = displayText ?? currentText;
+    const visibleText = stripComputedDebugPrefix(displayText ?? currentText);
 
-    if (visibleText.startsWith('````text\n&lt;pre_flight&gt;') || visibleText.startsWith('<pre_flight>')) {
-        state.lastDebugKey = messageKey;
-        state.lastDebugPrefix = '';
-        return;
+    const root = getTrackerRoot(context);
+    if (root && state.pendingRun) {
+        root.snapshots[messageKey] = {
+            before: clone(state.pendingRun.trackerBefore),
+            after: clone(state.pendingRun.trackerAfter),
+            type: state.pendingRun.type,
+            savedAt: Date.now(),
+        };
+        await persistMetadata(context);
     }
 
     message.extra.display_text = `${state.lastDebugPrefix}\n\n${visibleText}`;
@@ -115,6 +194,56 @@ async function prependComputedDebug(messageId, type) {
     if (typeof context.saveChat === 'function') {
         await context.saveChat();
     }
+
+    state.chatSignature = captureChatSignature(context);
+}
+
+async function handleMessageDeleted(newLength) {
+    const context = getContext();
+    const root = getTrackerRoot(context);
+    if (!root) return;
+
+    const currentSignature = captureChatSignature(context);
+    const firstAffectedIndex = firstChangedIndex(state.chatSignature, currentSignature);
+    const chatLength = Number.isFinite(Number(newLength))
+        ? Number(newLength)
+        : Array.isArray(context?.chat) ? context.chat.length : 0;
+    const chatId = getChatId(context);
+    let restoreCandidate = null;
+
+    for (const [key, snapshot] of Object.entries(root.snapshots || {})) {
+        const [snapshotChatId, rawMessageId] = key.split(':');
+        const messageId = Number(rawMessageId);
+        if (snapshotChatId !== chatId) continue;
+        if (Number.isFinite(messageId) && messageId >= Math.min(chatLength, firstAffectedIndex)) {
+            if (snapshot?.before && (!restoreCandidate || messageId < restoreCandidate.messageId)) {
+                restoreCandidate = { messageId, before: snapshot.before };
+            }
+            delete root.snapshots[key];
+        }
+    }
+
+    state.lastDebugPrefix = '';
+    state.lastDebugKey = null;
+    state.chatSignature = currentSignature;
+
+    if (restoreCandidate) {
+        root.npcs = clone(restoreCandidate.before) || {};
+        await persistMetadata(context);
+        console.info(`[${EXTENSION_NAME}] restored tracker snapshot after message deletion from index ${Math.min(chatLength, firstAffectedIndex)}`);
+    }
+}
+
+function handleMessageSwiped() {
+    state.lastDebugKey = null;
+    state.chatSignature = captureChatSignature();
+}
+
+function handleChatChanged() {
+    state.lastDebugKey = null;
+    state.lastDebugPrefix = '';
+    state.pendingRun = null;
+    state.chatSignature = captureChatSignature();
 }
 
 function subscribeMessageHandler() {
@@ -124,11 +253,9 @@ function subscribeMessageHandler() {
     if (!context?.eventSource?.on || !context?.eventTypes?.MESSAGE_RECEIVED) return;
 
     context.eventSource.on(context.eventTypes.MESSAGE_RECEIVED, prependComputedDebug);
-    if (context.eventTypes.CHAT_CHANGED) {
-        context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
-            state.lastDebugKey = null;
-        });
-    }
+    if (context.eventTypes.MESSAGE_DELETED) context.eventSource.on(context.eventTypes.MESSAGE_DELETED, handleMessageDeleted);
+    if (context.eventTypes.MESSAGE_SWIPED) context.eventSource.on(context.eventTypes.MESSAGE_SWIPED, handleMessageSwiped);
+    if (context.eventTypes.CHAT_CHANGED) context.eventSource.on(context.eventTypes.CHAT_CHANGED, handleChatChanged);
     state.subscribed = true;
 }
 
@@ -149,6 +276,9 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         return false;
     }
 
+    state.chatSignature = captureChatSignature(context);
+    restoreTrackerForRegeneration(type);
+
     try {
         state.runningSemanticPass = true;
         const trackerSnapshot = buildTrackerSnapshot(context);
@@ -157,6 +287,11 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         await saveTrackerUpdate(context, report.trackerUpdate);
         const audit = formatPreFlightDebug(report);
         const narratorContext = formatNarratorPromptContext(report);
+        state.pendingRun = {
+            type: type || 'normal',
+            trackerBefore: trackerSnapshot,
+            trackerAfter: report.trackerUpdate?.npcs || {},
+        };
         state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
         injectNarratorContext(narratorContext);
     } catch (error) {
@@ -179,13 +314,19 @@ export function onDisable() {
         delete context.extensionPrompts[NARRATOR_PROMPT_KEY];
     }
     if (state.subscribed && context?.eventSource && context?.eventTypes?.MESSAGE_RECEIVED) {
-        const eventName = context.eventTypes.MESSAGE_RECEIVED;
-        if (typeof context.eventSource.off === 'function') {
-            context.eventSource.off(eventName, prependComputedDebug);
-        } else if (typeof context.eventSource.removeListener === 'function') {
-            context.eventSource.removeListener(eventName, prependComputedDebug);
-        }
+        removeEventHandler(context, context.eventTypes.MESSAGE_RECEIVED, prependComputedDebug);
+        if (context.eventTypes.MESSAGE_DELETED) removeEventHandler(context, context.eventTypes.MESSAGE_DELETED, handleMessageDeleted);
+        if (context.eventTypes.MESSAGE_SWIPED) removeEventHandler(context, context.eventTypes.MESSAGE_SWIPED, handleMessageSwiped);
+        if (context.eventTypes.CHAT_CHANGED) removeEventHandler(context, context.eventTypes.CHAT_CHANGED, handleChatChanged);
         state.subscribed = false;
+    }
+}
+
+function removeEventHandler(context, eventName, handler) {
+    if (typeof context?.eventSource?.off === 'function') {
+        context.eventSource.off(eventName, handler);
+    } else if (typeof context?.eventSource?.removeListener === 'function') {
+        context.eventSource.removeListener(eventName, handler);
     }
 }
 

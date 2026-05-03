@@ -67,7 +67,9 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
 
 function runResolution(ledger, trackerSnapshot, dice, audit, context) {
     const semantic = ledger.resolutionSemantic || {};
-    const targets = normalizeTargets(semantic.targets);
+    const targetClassifier = buildTargetClassifier(ledger, trackerSnapshot, context);
+    const rawTargets = normalizeTargets(semantic.targets);
+    const targets = sanitizeTargets(rawTargets, targetClassifier);
     const intimacyAdvance = String(semantic.intimacyAdvance || 'none').toLowerCase();
     const goal = intimacyAdvance === 'physical'
         ? 'IntimacyAdvancePhysical'
@@ -79,11 +81,21 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
     audit.push('STEP 1: SILENT SEMANTIC PASS COMPLETE');
     audit.push('SEMANTIC_LEDGER=');
     audit.push(stableStringify(ledger));
+    if (ledger.deterministicOverrides?.userCoreStats) {
+        audit.push(`DETERMINISTIC_OVERRIDE.userCoreStats=${compact(ledger.deterministicOverrides.userCoreStats)}`);
+    }
     audit.push('---');
     audit.push('STEP 2: EXECUTE ResolutionEngine(input) USING SEMANTIC_LEDGER');
     audit.push(`2.0 roll_pool=[r0=${rollPool[0]},r1=${rollPool[1]},r2=${rollPool[2]},r3=${rollPool[3]},r4=${rollPool[4]},r5=${rollPool[5]}]`);
     audit.push(`2.1 identifyGoal=${goal}`);
     audit.push(`2.2 identifyTargets=${formatTargets(targets)}`);
+    if (!sameTargets(rawTargets, targets)) {
+        audit.push(`2.2a deterministicTargetSanitizer=${compact({
+            reason: 'living targets only; non-living blockers moved to ENV',
+            from: targetSummary(rawTargets),
+            to: targetSummary(targets),
+        })}`);
+    }
 
     const intimacyTarget = firstReal(targets.ActionTargets) || semantic.primaryOppTarget;
     const targetState = trackerSnapshot[intimacyTarget] || null;
@@ -105,8 +117,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         ...targets.OppTargets.NPC,
         ...targets.BenefitedObservers,
         ...targets.HarmedObservers,
-        ...ledger.relationshipSemantic.map(x => x.NPC),
-    ].filter(isReal));
+        ...ledger.relationshipSemantic.map(x => x.NPC).filter(name => targetClassifier.isLiving(name)),
+    ].filter(name => isReal(name) && targetClassifier.isLiving(name)));
     audit.push(`2.5 NPCInScene=[${npcInScene.join(',') || NONE}]`);
 
     let actions = ['a1'];
@@ -126,11 +138,17 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
     } else {
         actions = normalizeActionMarkers(semantic.actionMarkers);
         const userStat = normalizeStat(semantic.userStat, 'PHY');
-        const oppStat = normalizeOppStat(semantic.oppStat);
+        let oppStat = normalizeOppStat(semantic.oppStat);
         const userCore = normalizeCore(ledger.userCoreStats, { PHY: 1, MND: 1, CHA: 1 });
         let targetCore = null;
-        const primaryOppTarget = isReal(semantic.primaryOppTarget) ? semantic.primaryOppTarget : firstReal(targets.OppTargets.NPC);
+        const semanticPrimaryOppTarget = isReal(semantic.primaryOppTarget) && targetClassifier.isLiving(semantic.primaryOppTarget)
+            ? semantic.primaryOppTarget
+            : null;
+        const primaryOppTarget = semanticPrimaryOppTarget || firstReal(targets.OppTargets.NPC);
         const currentTargetCore = primaryOppTarget ? trackerSnapshot[primaryOppTarget]?.currentCoreStats : null;
+        if (oppStat !== 'ENV' && !primaryOppTarget) {
+            oppStat = 'ENV';
+        }
 
         audit.push('2.7 hasStakes=Y');
         audit.push(`2.7a actionCount=[${actions.join(',')}]`);
@@ -269,20 +287,46 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
         const outcomeKey = String(resolutionPacket.Outcome || 'no_roll');
         const stakeChange = sem.stakeChangeByOutcome?.[outcomeKey] || 'none';
         const auditInteraction = stakeChange === 'benefit' ? 'Y' : 'N';
-        const target = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem);
-        const rapport = updateRapport(currentRapport, target, rapportEncounterLock);
+        const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem);
+        const hostilePressureResult = applyHostilePhysicalPressure(npc, resolutionPacket, {
+            currentDisposition,
+            hostilePressure,
+            hostileLandedPressure,
+            dominantLock,
+            pressureMode,
+        });
+        const target = hostilePressureResult?.target || routedTarget;
+        const rapport = updateRapport(currentRapport, target, rapportEncounterLock, hostilePressureResult ? 'hostilePressure' : 'normal');
         currentRapport = rapport.currentRapport;
         rapportEncounterLock = rapport.rapportEncounterLock;
+        hostilePressure = hostilePressureResult?.hostilePressure ?? hostilePressure;
+        hostileLandedPressure = hostilePressureResult?.hostileLandedPressure ?? hostileLandedPressure;
+        dominantLock = hostilePressureResult?.dominantLock ?? dominantLock;
+        pressureMode = hostilePressureResult?.pressureMode ?? pressureMode;
 
         audit.push(`3.4 isAllowed=${isAllowed}`);
         audit.push(`3.4a auditInteraction=stakeChangeByOutcome[${outcomeKey}]=${stakeChange} -> ${auditInteraction}`);
         audit.push(`3.4b NPC_STAKES=${auditInteraction}`);
-        audit.push(`3.4c routeDispositionTarget=${target}`);
+        audit.push(`3.4c routeDispositionTarget=${routedTarget}`);
+        if (hostilePressureResult) {
+            audit.push(`3.4c.1 hostilePhysicalPressure=${compact({
+                target,
+                hostilePressure,
+                hostileLandedPressure,
+                dominantLock,
+                pressureMode,
+                deltas: hostilePressureResult.deltas,
+            })}`);
+        }
         audit.push(`3.4d updateRapport=${compact(rapport)}`);
 
-        const deltas = deriveDirection(target, currentDisposition, currentRapport, auditInteraction);
+        const deltas = hostilePressureResult?.deltas || deriveDirection(target, currentDisposition, currentRapport, auditInteraction);
         const updatedDisposition = updateDisposition(currentDisposition, deltas);
         currentDisposition = updatedDisposition;
+        if (hostilePressureResult?.dominatedFearBreak && currentDisposition.F >= 4 && currentDisposition.H >= 3) {
+            currentDisposition = { ...currentDisposition, H: clamp(currentDisposition.H - 1, 1, 4) };
+            audit.push(`3.5a.1 dominatedFearBreak lowers hostility -> ${formatDisposition(currentDisposition)}`);
+        }
         currentRapport = deltas.rapportReset === 'Y' ? 0 : currentRapport;
 
         audit.push(`3.5 deriveDirection=${compact(deltas)}`);
@@ -421,7 +465,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
     for (const handoff of handoffs) {
         const fin = parseFinalState(handoff.FinalState);
         const lock = handoff.Lock && handoff.Lock !== 'None' ? handoff.Lock : deriveLock(fin);
-        const impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate);
+        const impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode);
         const tier = classifyProactivityTier(handoff, chaosBand, counterPotential, lock, fin);
 
         results[handoff.NPC] = {
@@ -439,7 +483,9 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         audit.push(`6.4g classifyProactivityTier=${tier}`);
 
         if (tier === 'FORCED') {
-            candidates.push({ NPC: handoff.NPC, die: 20, tier, intent: 'ESCALATE_VIOLENCE', impulse: 'ANGER', TargetsUser: 'Y', Threshold: 'AUTO', passes: 'Y' });
+            const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
+            const targetsUser = targetsUserFromIntent(intent);
+            candidates.push({ NPC: handoff.NPC, die: 20, tier, intent, impulse, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' });
             audit.push('6.4i FORCED candidate');
             continue;
         }
@@ -455,7 +501,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         results[handoff.NPC].Threshold = threshold;
 
         if (passes === 'Y') {
-            const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override);
+            const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
             const targetsUser = targetsUserFromIntent(intent);
             candidates.push({ NPC: handoff.NPC, die, tier, intent, impulse, TargetsUser: targetsUser, Threshold: threshold, passes });
             audit.push(`6.5c selectIntent=${intent}`);
@@ -488,20 +534,42 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     const userCore = normalizeCore(ledger.userCoreStats, { PHY: 1, MND: 1, CHA: 1 });
     const counterPotential = resolutionPacket?.CounterPotential || 'none';
     const counterAllowed = ['light', 'medium', 'severe'].includes(counterPotential);
-    const aggressive = Object.entries(proactivityResults).filter(([, result]) =>
-        counterAllowed
+    const counterBonus = counterBonusFromPotential(counterPotential);
+    const criticalSuccess = resolutionPacket?.OutcomeTier === 'Critical_Success';
+    const retaliationAllowed = resolutionPacket?.HostilePhysicalIntent === 'Y';
+    const attackType = criticalSuccess ? 'None' : counterAllowed ? 'CounterAttack' : retaliationAllowed ? 'Retaliation' : 'None';
+    const proactiveAggressive = Object.entries(proactivityResults).filter(([, result]) =>
+        attackType !== 'None'
         &&
         result.Proactive === 'Y'
         && result.TargetsUser === 'Y'
-        && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL'].includes(result.Intent));
+        && isImmediateAttackIntent(result.Intent));
+    const counterTarget = counterAllowed ? firstReal(resolutionPacket?.OppTargets?.NPC) || firstReal(resolutionPacket?.ActionTargets) : null;
+    const aggressive = counterAllowed && !criticalSuccess && counterTarget
+        ? [proactiveAggressive.find(([npc]) => sameName(npc, counterTarget)) || [counterTarget, {
+            Proactive: 'Y',
+            Intent: 'BOUNDARY_PHYSICAL',
+            Impulse: 'ANGER',
+            TargetsUser: 'Y',
+            ProactivityTier: 'FORCED',
+            ProactivityDie: 20,
+            Threshold: 'AUTO',
+        }]]
+        : proactiveAggressive;
     const results = {};
 
     audit.push('STEP 7: EXECUTE NPCAggressionResolution');
     audit.push(`7.1 counterPotential=${counterPotential}`);
+    audit.push(`7.1a counterBonus=${counterBonus}`);
+    audit.push(`7.1b immediateAttackType=${attackType}`);
+    audit.push(`7.1c counterTarget=${counterTarget || NONE}`);
     audit.push(`7.2 AggressionPresent=${aggressive.length ? 'Y' : 'N'}`);
 
     if (!aggressive.length) {
-        if (!counterAllowed) audit.push('7.2a counterPotential=none -> no immediate counterattack roll');
+        if (criticalSuccess) audit.push('7.2a Critical_Success -> no immediate NPC attack roll');
+        else if (counterAllowed) audit.push('7.2a no qualifying proactive counterattack');
+        else if (retaliationAllowed) audit.push('7.2a no qualifying proactive retaliation');
+        else audit.push('7.2a no immediate counterattack/retaliation trigger');
         audit.push('7.2a AGGRESSION_RESULTS={}');
         audit.push('---');
         return { results };
@@ -509,17 +577,17 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
 
     audit.push(`7.3 getUserCoreStats=${compact(userCore)}`);
 
-    for (const [npc] of aggressive) {
+    for (const [npc, proactivityResult] of aggressive) {
         const npcCore = normalizeCore(trackerUpdate[npc]?.currentCoreStats || trackerSnapshot[npc]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
         const npcDie = dice.d20();
         const userDie = dice.d20();
-        const npcTotal = npcDie + npcCore.PHY;
+        const npcTotal = npcDie + npcCore.PHY + counterBonus;
         const userTotal = userDie + userCore.PHY;
         const margin = npcTotal - userTotal;
         const ReactionOutcome = margin >= 5 ? 'npc_overpowers' : margin >= 1 ? 'npc_succeeds' : margin >= -3 ? 'user_resists' : 'user_dominates';
-        results[npc] = { ReactionOutcome, Margin: margin };
+        results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin };
         audit.push(`7.5 ${npc}.npcCore=${compact(npcCore)}`);
-        audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}=${npcTotal}`);
+        audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}+${counterBonus}=${npcTotal}`);
         audit.push(`7.5f userTotal=${userDie}+${userCore.PHY}=${userTotal}`);
         audit.push(`7.6 AGGRESSION_RESULT=${compact(results[npc])}`);
     }
@@ -547,6 +615,13 @@ function hostilePhysicalOutcome(margin, actionLength) {
     else outcome = { OutcomeTier: 'Critical_Failure', LandedActions: 0, Outcome: 'avoided', CounterPotential: 'severe' };
     outcome.LandedActions = Math.min(outcome.LandedActions, actionLength);
     return outcome;
+}
+
+function counterBonusFromPotential(counterPotential) {
+    if (counterPotential === 'light') return 2;
+    if (counterPotential === 'medium') return 4;
+    if (counterPotential === 'severe') return 6;
+    return 0;
 }
 
 function chooseGeneratedCore(ledger, resolutionSemantic, primaryOppTarget) {
@@ -595,6 +670,7 @@ function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem) {
     const out = packet.Outcome;
 
     if (!isDirect && !isOpp && !isBenefited && !isHarmed) return 'No Change';
+    if (auditInteraction === 'Y' && !isHarmed) return 'Bond';
     if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
     if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g)) {
@@ -608,11 +684,130 @@ function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem) {
     return 'No Change';
 }
 
-function updateRapport(currentRapport, target, rapportEncounterLock) {
+function updateRapport(currentRapport, target, rapportEncounterLock, mode = 'normal') {
     if (rapportEncounterLock === 'Y') return { currentRapport, rapportEncounterLock: 'Y' };
+    if (mode === 'hostilePressure' && target === 'No Change') return { currentRapport, rapportEncounterLock: 'Y' };
     if (['Bond', 'No Change'].includes(target)) return { currentRapport: Math.min(5, currentRapport + 1), rapportEncounterLock: 'Y' };
     if (['Hostility', 'Fear', 'FearHostility'].includes(target)) return { currentRapport: Math.max(0, currentRapport - 1), rapportEncounterLock: 'Y' };
     return { currentRapport, rapportEncounterLock };
+}
+
+function applyHostilePhysicalPressure(npc, packet, state) {
+    if (packet.HostilePhysicalIntent !== 'Y') return null;
+
+    const isDirect = includesName(packet.ActionTargets, npc);
+    const isOpp = includesName(packet.OppTargets?.NPC, npc);
+    const isHarmed = includesName(packet.HarmedObservers, npc);
+    if (!isDirect && !isOpp && !isHarmed) return null;
+
+    const landed = landedBool(packet.LandedActions);
+    const severity = hostilePressureSeverity(packet.Outcome);
+    const hostilePressure = clamp(state.hostilePressure + Math.max(1, severity), 0, 20);
+    const hostileLandedPressure = landed
+        ? clamp(state.hostileLandedPressure + Math.max(1, severity), 0, 20)
+        : state.hostileLandedPressure;
+
+    const pressureState = {
+        disposition: state.currentDisposition,
+        dominantLock: state.dominantLock,
+        pressureMode: state.pressureMode,
+    };
+
+    let deltas = { b: 0, f: 0, h: 0 };
+    let dominatedFearBreak = false;
+
+    if (!landed) {
+        if (hostilePressure >= 2) {
+            deltas = addDispositionPressure(pressureState, 1, 'failed');
+        }
+    } else if (packet.Outcome === 'light_impact') {
+        deltas = addDispositionPressure(pressureState, 1, 'landed');
+    } else if (['solid_impact', 'dominant_impact'].includes(packet.Outcome)) {
+        deltas = addDispositionPressure(pressureState, severity, 'dominance');
+        dominatedFearBreak = pressureState.pressureMode === 'dominated';
+    }
+
+    const target = targetFromDeltas(deltas);
+
+    return {
+        target,
+        deltas,
+        hostilePressure,
+        hostileLandedPressure,
+        dominantLock: pressureState.dominantLock,
+        pressureMode: pressureState.pressureMode,
+        dominatedFearBreak,
+    };
+}
+
+function hostilePressureSeverity(outcome) {
+    if (outcome === 'dominant_impact') return 2;
+    if (outcome === 'solid_impact') return 2;
+    return 1;
+}
+
+function addDispositionPressure(state, amount, mode) {
+    const disposition = state.disposition;
+    let deltas;
+
+    if (mode === 'failed') {
+        deltas = disposition.H > disposition.F
+            ? addHostilityPressure(state, amount)
+            : addFearPressure(state, amount);
+    } else if (mode === 'landed') {
+        deltas = disposition.F > disposition.H
+            ? addFearPressure(state, amount)
+            : addHostilityPressure(state, amount);
+    } else if (state.dominantLock === 'HOSTILITY' || disposition.H >= 4) {
+        state.pressureMode = 'dominated';
+        deltas = addFearPressure(state, amount, { noCorneredOverflow: true });
+    } else if (disposition.F > disposition.H) {
+        deltas = addFearPressure(state, amount);
+    } else if (disposition.H > disposition.F) {
+        deltas = addHostilityPressure(state, amount);
+    } else {
+        deltas = { b: -1, f: 1, h: 1 };
+    }
+
+    const projected = updateDisposition(disposition, deltas);
+    updatePressureLockState(state, disposition, projected);
+    return deltas;
+}
+
+function addFearPressure(state, amount, options = {}) {
+    const room = Math.max(0, 4 - state.disposition.F);
+    const f = Math.min(amount, room);
+    const overflow = Math.max(0, amount - f);
+    const h = options.noCorneredOverflow ? 0 : overflow;
+
+    if (overflow > 0 && !options.noCorneredOverflow) {
+        state.pressureMode = 'cornered';
+        if (state.dominantLock === 'None') state.dominantLock = 'FEAR';
+    }
+
+    return { b: f || h ? -1 : 0, f, h };
+}
+
+function addHostilityPressure(state, amount) {
+    return { b: -1, f: 0, h: amount };
+}
+
+function updatePressureLockState(state, before, after) {
+    if (state.dominantLock !== 'None') return;
+
+    const fearHit = before.F < 4 && after.F >= 4;
+    const hostilityHit = before.H < 4 && after.H >= 4;
+
+    if (fearHit && !hostilityHit) state.dominantLock = 'FEAR';
+    else if (hostilityHit && !fearHit) state.dominantLock = 'HOSTILITY';
+    else if (fearHit && hostilityHit) state.dominantLock = state.pressureMode === 'cornered' ? 'FEAR' : 'HOSTILITY';
+}
+
+function targetFromDeltas(deltas) {
+    if ((deltas.f || 0) > 0 && (deltas.h || 0) > 0) return 'FearHostility';
+    if ((deltas.f || 0) > 0) return 'Fear';
+    if ((deltas.h || 0) > 0) return 'Hostility';
+    return 'No Change';
 }
 
 function deriveDirection(target, currentDisposition, currentRapport, auditInteraction) {
@@ -703,13 +898,16 @@ function pickVector(ctx, i, index) {
 function classifyAction(packet) {
     if (packet.GOAL === 'IntimacyAdvancePhysical') return 'Intimacy_Physical';
     if (packet.GOAL === 'IntimacyAdvanceVerbal') return 'Intimacy_Verbal';
+    if (packet.HostilePhysicalIntent === 'Y') return 'Combat';
     if (landedBool(packet.LandedActions)) return 'Combat';
     if (toRealArray(packet.ActionTargets).length >= 1 && packet.LandedActions === '(none)') return 'Social';
     if (toRealArray(packet.OppTargets?.ENV).length >= 1) return 'Skill';
     return 'Normal_Interaction';
 }
 
-function deriveImpulse(kind, lock, fin, intimacyGate) {
+function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'none') {
+    if (pressureMode === 'cornered') return 'ANGER';
+    if (pressureMode === 'dominated') return 'FEAR';
     if (lock === 'HATRED') return 'ANGER';
     if (lock === 'TERROR') return 'FEAR';
     if (['Combat', 'Social'].includes(kind) && fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
@@ -747,7 +945,15 @@ function thresholdFromTier(tier) {
     return 16;
 }
 
-function selectIntent(impulse, kind, fin, intimacyGate, override) {
+function selectIntent(impulse, kind, fin, intimacyGate, override, pressureMode = 'none') {
+    if (pressureMode === 'cornered') {
+        return fin.H >= 4 ? 'ESCALATE_VIOLENCE' : 'BOUNDARY_PHYSICAL';
+    }
+
+    if (pressureMode === 'dominated') {
+        return fin.F >= 4 ? 'CALL_HELP_OR_AUTHORITY' : 'WITHDRAW_OR_BOUNDARY';
+    }
+
     if (impulse === 'ANGER') {
         if (kind === 'Intimacy_Physical' && intimacyGate === 'DENY') return 'BOUNDARY_PHYSICAL';
         if (kind === 'Combat' || fin.H >= 4) return 'ESCALATE_VIOLENCE';
@@ -764,6 +970,10 @@ function selectIntent(impulse, kind, fin, intimacyGate, override) {
 
 function targetsUserFromIntent(intent) {
     return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(intent) ? 'Y' : 'N';
+}
+
+function isImmediateAttackIntent(intent) {
+    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(intent);
 }
 
 function buildNarrationGuidance(resolution, handoffs, chaos, proactivity, aggression) {
@@ -813,6 +1023,92 @@ function normalizeTargets(value) {
         BenefitedObservers: toRealArray(value?.BenefitedObservers),
         HarmedObservers: toRealArray(value?.HarmedObservers),
     };
+}
+
+function sanitizeTargets(targets, classifier) {
+    const actionTargets = [];
+    const oppNpc = [];
+    const oppEnv = [...targets.OppTargets.ENV];
+    const benefited = [];
+    const harmed = [];
+
+    for (const name of targets.ActionTargets) {
+        if (classifier.isLiving(name)) actionTargets.push(name);
+        else oppEnv.push(name);
+    }
+    for (const name of targets.OppTargets.NPC) {
+        if (classifier.isLiving(name)) oppNpc.push(name);
+        else oppEnv.push(name);
+    }
+    for (const name of targets.BenefitedObservers) {
+        if (classifier.isLiving(name)) benefited.push(name);
+        else oppEnv.push(name);
+    }
+    for (const name of targets.HarmedObservers) {
+        if (classifier.isLiving(name)) harmed.push(name);
+        else oppEnv.push(name);
+    }
+
+    return {
+        ActionTargets: unique(actionTargets),
+        OppTargets: {
+            NPC: unique(oppNpc),
+            ENV: unique(oppEnv.filter(isReal)),
+        },
+        BenefitedObservers: unique(benefited),
+        HarmedObservers: unique(harmed),
+    };
+}
+
+function buildTargetClassifier(ledger, trackerSnapshot, context) {
+    const livingNames = new Set();
+
+    for (const name of Object.keys(trackerSnapshot || {})) addLivingName(livingNames, name);
+    for (const item of ledger.relationshipSemantic || []) addLivingName(livingNames, item?.NPC);
+
+    try {
+        const fields = typeof context?.getCharacterCardFields === 'function' ? context.getCharacterCardFields() : {};
+        addLivingName(livingNames, fields?.name);
+    } catch {
+        // Non-fatal; semantic/tracker names are still available.
+    }
+
+    addLivingName(livingNames, context?.name2);
+    addLivingName(livingNames, context?.name1);
+
+    return {
+        isLiving(name) {
+            const normalized = normalizeNameKey(name);
+            if (!normalized) return false;
+            return livingNames.has(normalized);
+        },
+    };
+}
+
+function addLivingName(set, name) {
+    const normalized = normalizeNameKey(name);
+    if (normalized) set.add(normalized);
+}
+
+function sameTargets(a, b) {
+    return JSON.stringify(targetSummary(a)) === JSON.stringify(targetSummary(b));
+}
+
+function targetSummary(targets) {
+    return {
+        ActionTargets: showNone(targets.ActionTargets),
+        OppTargets: {
+            NPC: showNone(targets.OppTargets?.NPC),
+            ENV: showNone(targets.OppTargets?.ENV),
+        },
+        BenefitedObservers: showNone(targets.BenefitedObservers),
+        HarmedObservers: showNone(targets.HarmedObservers),
+    };
+}
+
+function normalizeNameKey(name) {
+    const text = String(name ?? '').trim().toLowerCase();
+    return isReal(text) ? text : '';
 }
 
 function normalizeActionMarkers(markers) {

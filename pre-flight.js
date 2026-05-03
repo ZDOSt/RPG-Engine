@@ -60,9 +60,12 @@ export function formatNarratorPromptContext(report) {
         '[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.6 - MINIMAL AUTHORITATIVE]',
         'Use this mechanics summary. Do not reroll or expose mechanics unless OOC.',
         'Write final narration immediately. No analysis. Final message must be non-empty.',
+        'Never narrate voluntary {{user}} actions, counterattacks, thoughts, feelings, decisions, or dialogue beyond the explicit user input.',
+        'Involuntary reflexive physical reactions caused directly by computed external impact/restraint are allowed; keep them immediate/passive and do not turn them into choices, tactics, counters, or dialogue.',
         'Length target: 80-140 words unless the scene requires less.',
         'RESULT=' + compact.result,
         'ACTIONS=' + compact.actions,
+        'COUNTER=' + compact.counter,
         'NPC=' + compact.npc,
         'CHAOS=' + compact.chaos,
         'PROACTIVE=' + compact.proactive,
@@ -100,11 +103,11 @@ function buildNarratorSummary(handoff, resolution) {
     ].join('/')).join(';') || 'none';
 
     const aggressionText = Object.entries(handoff.aggressionResults ?? {}).map(([name, value]) =>
-        `${name}/${value.ReactionOutcome}/margin:${value.Margin}`,
+        `${name}/${value.AttackType ?? 'Attack'}/${value.ReactionOutcome}/bonus:${value.CounterBonus ?? 0}/margin:${value.Margin}`,
     ).join(';') || 'none';
     const aggressionGuide = aggressionText === 'none'
         ? buildNoAggressionGuide(resolution, handoff)
-        : 'Narrate the listed NPC follow-up physical action/result after the user action; do not ignore it.';
+        : buildAggressionGuide(handoff.aggressionResults);
 
     const goal = resolution.GOAL ?? 'normal';
     const result = handoff.resultLine ?? `${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}`;
@@ -112,6 +115,7 @@ function buildNarratorSummary(handoff, resolution) {
     return {
         result,
         actions: list(resolution.actions),
+        counter: resolution.CounterPotential ?? 'none',
         npc: npcText,
         chaos: chaosText,
         proactive: proactiveText,
@@ -121,15 +125,40 @@ function buildNarratorSummary(handoff, resolution) {
     };
 }
 
+function buildAggressionGuide(aggressionResults) {
+    const parts = Object.entries(aggressionResults ?? {}).map(([name, value]) => {
+        const attackType = value.AttackType === 'Retaliation'
+            ? 'retaliation after the user action'
+            : value.AttackType === 'CounterAttack'
+                ? `counterattack exploiting the opening (${value.CounterPotential}+${value.CounterBonus})`
+                : 'immediate NPC attack';
+        if (value.ReactionOutcome === 'npc_overpowers') {
+            return `${name}: ${attackType} strongly succeeds/overpowers; narrate clear NPC advantage. Do not narrate any follow-up action or dialogue by {{user}}.`;
+        }
+        if (value.ReactionOutcome === 'npc_succeeds') {
+            return `${name}: ${attackType} succeeds modestly; narrate proportional effect. Do not narrate any follow-up action or dialogue by {{user}}.`;
+        }
+        if (value.ReactionOutcome === 'user_resists') {
+            return `${name}: ${attackType} is partly resisted; stop at the moment of impact/contact/near-contact. Do not narrate {{user}}'s counterattack, actions, reactions, thoughts, feelings, or dialogue.`;
+        }
+        if (value.ReactionOutcome === 'user_dominates') {
+            return `${name}: ${attackType} fails or is controlled/evaded; stop at the moment of failed impact/contact/near-contact. Do not narrate {{user}}'s counterattack, actions, reactions, thoughts, feelings, or dialogue.`;
+        }
+        return `${name}: use listed aggression result exactly.`;
+    });
+
+    return parts.join(' ');
+}
+
 function buildNoAggressionGuide(resolution, handoff) {
     const hasAggressiveProactivity = Object.values(handoff.proactivityResults ?? {}).some(value =>
         value?.Proactive === 'Y'
         && value?.TargetsUser === 'Y'
-        && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL'].includes(value?.Intent));
+        && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(value?.Intent));
 
     if (!hasAggressiveProactivity) return 'none';
-    if (resolution.CounterPotential === 'none') {
-        return 'CounterPotential is none: do not narrate an NPC counter-hit. Show stance, threat, guard, withdrawal, boundary, or preparation instead.';
+    if (resolution.OutcomeTier === 'Critical_Success') {
+        return 'Critical user success: do not narrate an immediate NPC attack. Show only survival, pain, guard, stagger, retreat, or failed preparation.';
     }
 
     return 'No aggression result was produced; do not invent a resolved NPC hit.';
