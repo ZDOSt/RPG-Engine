@@ -71,7 +71,7 @@ export function formatNarratorPromptContext(report) {
 export function formatDebugMessagePrefix(preFlightAudit, narratorPromptContext) {
     return [
         '````text',
-        preFlightAudit,
+        escapeReasoningTagsForDisplay(preFlightAudit),
         '````',
         '',
         '````text',
@@ -80,6 +80,12 @@ export function formatDebugMessagePrefix(preFlightAudit, narratorPromptContext) 
         '</narrator_prompt_context_echo>',
         '````',
     ].join('\n');
+}
+
+function escapeReasoningTagsForDisplay(value) {
+    return String(value)
+        .replaceAll('<pre_flight>', '&lt;pre_flight&gt;')
+        .replaceAll('</pre_flight>', '&lt;/pre_flight&gt;');
 }
 
 function stableStringify(value) {
