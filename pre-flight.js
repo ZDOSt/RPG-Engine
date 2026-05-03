@@ -6,6 +6,12 @@ No computed handoff is available yet. The extension will replace this with a com
 </pre_flight>`;
 }
 
+export function formatNarratorPromptPending() {
+    return String.raw`[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.4 - PENDING]
+No computed handoff is available yet.
+Narrate normally.`;
+}
+
 export function formatPreFlightError(error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     return String.raw`<pre_flight>
@@ -16,15 +22,23 @@ ERROR=${message}
 </pre_flight>`;
 }
 
+export function formatNarratorPromptError(error) {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    return String.raw`[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.4 - ERROR]
+The deterministic pre-flight runner failed before narration.
+ERROR=${message}
+Narrate normally from available chat context.`;
+}
+
 export function formatPreFlightDebug(report) {
     const lines = [
         '<pre_flight>',
-        '[STRUCTURED_PREFLIGHT_RUNTIME v0.3 - DEBUG ECHO / AUDIT ONLY]',
+        '[STRUCTURED_PREFLIGHT_RUNTIME v0.4 - COMPUTED DEBUG / AUDIT ONLY]',
         'DO NOT EXECUTE THIS BLOCK.',
-        'DEBUG MODE: OUTPUT THIS ENTIRE <pre_flight>...</pre_flight> AUDIT BLOCK VERBATIM BEFORE THE NARRATIVE RESPONSE.',
+        'Do not output, quote, paraphrase, reroll, recalculate, reinterpret, or replace this audit block.',
+        'The extension prepends this exact computed block to the final assistant message after generation.',
         'This is a debug/audit report of already-computed engine outputs.',
         'Use FINAL_NARRATIVE_HANDOFF as authoritative context.',
-        'Do not reroll, recalculate, reinterpret, or replace mechanics.',
         '==COMPUTED OUTPUTS==',
         '',
         ...report.auditLines,
@@ -35,6 +49,33 @@ export function formatPreFlightDebug(report) {
     ];
 
     return lines.join('\n');
+}
+
+export function formatNarratorPromptContext(report) {
+    const lines = [
+        '[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.4 - EXACT PROMPT CONTEXT]',
+        'Use FINAL_NARRATIVE_HANDOFF as authoritative context for the next narrative response.',
+        'Do not reroll, recalculate, reinterpret, or replace mechanics.',
+        'Do not output, quote, paraphrase, or summarize this narrator context.',
+        'Do not output the debug/audit <pre_flight> block.',
+        'Narrate according to computed outcomes unless the user is speaking out of character.',
+        'RESULT_LINE=' + (report?.finalNarrativeHandoff?.resultLine ?? 'No roll'),
+        '',
+        'FINAL_NARRATIVE_HANDOFF=',
+        stableStringify(report?.finalNarrativeHandoff ?? {}),
+    ];
+
+    return lines.join('\n');
+}
+
+export function formatDebugMessagePrefix(preFlightAudit, narratorPromptContext) {
+    return [
+        preFlightAudit,
+        '',
+        '<narrator_prompt_context_echo>',
+        narratorPromptContext,
+        '</narrator_prompt_context_echo>',
+    ].join('\n');
 }
 
 function stableStringify(value) {
