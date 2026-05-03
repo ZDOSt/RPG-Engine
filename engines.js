@@ -1,4 +1,6 @@
-export const ENGINE_PROMPT_TEXT = String.raw`function ResolutionEngine(input) {
+export const ENGINE_PROMPT_TEXT = String.raw`[STRUCTURED_PREFLIGHT_ENGINE_EXTENSION v0.1 - SOURCE: EXTENSION ONLY]
+
+function ResolutionEngine(input) {
   const DEF = Object.freeze({
     UNIVERSAL:
 'EXPLICIT-ONLY. MUST be stated in Character Card / Lore / Scene text / tracker. NO invention. Uncertain = N or default. FIRST-YES-WINS = first matching explicit rule becomes final. No reconsideration. NEVER invent stats, targets, actions, obstacles, or outcomes. MAX 3 ACTIONS. TIE = DEFENDER / OPPOSITION WINS. ROLLS = 1d20 + relevant stat vs opposing 1d20 + relevant stat, or vs plain Environment 1d20.',
