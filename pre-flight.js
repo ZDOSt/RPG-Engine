@@ -31,21 +31,82 @@ Narrate normally from available chat context.`;
 }
 
 export function formatPreFlightDebug(report) {
-    const semanticLedger = report?.semanticLedger ?? {};
+    const semanticLedger = buildReadableSemanticDebug(report?.semanticLedger ?? {});
 
     const lines = [
         '<pre_flight>',
-        '[STRUCTURED_PREFLIGHT_RUNTIME v0.7 - MODEL FIELD DEBUG ONLY]',
+        '[STRUCTURED_PREFLIGHT_RUNTIME v0.8 - SIMPLE MODEL FIELD DEBUG]',
         'DO NOT EXECUTE THIS BLOCK.',
-        'This shows the final semantic/contextual fields filled by the model before deterministic rules.',
+        'This shows the simplified semantic/contextual fields filled by the model before deterministic rules.',
         'Use the narrator prompt context echo below as the final authoritative narration handoff.',
         '==MODEL_FILLED_FIELDS==',
         '',
-        stableStringify(semanticLedger),
+        ...semanticLedger,
         '</pre_flight>',
     ];
 
     return lines.join('\n');
+}
+
+function buildReadableSemanticDebug(ledger) {
+    const resolution = ledger?.resolutionEngine ?? {};
+    const targets = resolution.identifyTargets ?? {};
+    const oppTargets = targets.OppTargets ?? {};
+    const relationships = Array.isArray(ledger?.relationshipEngine) ? ledger.relationshipEngine : [];
+    const chaos = ledger?.chaosSemantic ?? {};
+    const name = ledger?.nameSemantic ?? {};
+    const proactivity = ledger?.proactivitySemantic ?? {};
+    const userCore = ledger?.engineContext?.userCoreStats ?? {};
+    const trackerNpcs = Array.isArray(ledger?.engineContext?.trackerRelevantNPCs)
+        ? ledger.engineContext.trackerRelevantNPCs
+        : [];
+
+    const lines = [
+        'engineContext.userCoreStats=' + inline({
+            PHY: userCore.PHY ?? 1,
+            MND: userCore.MND ?? 1,
+            CHA: userCore.CHA ?? 1,
+        }),
+        'engineContext.trackerRelevantNPCs=' + (trackerNpcs.map(npc => [
+            npc.NPC ?? '(none)',
+            npc.currentDisposition ?? 'null',
+            `rapport:${npc.currentRapport ?? 0}`,
+            `gate:${npc.intimacyGate ?? 'SKIP'}`,
+        ].join('/')).join('; ') || 'none'),
+        '',
+        'resolutionEngine.identifyGoal=' + valueOrNone(resolution.identifyGoal),
+        'resolutionEngine.intimacyAdvance=' + valueOrNone(resolution.intimacyAdvance),
+        'resolutionEngine.explicitMeans=' + valueOrNone(resolution.explicitMeans),
+        'resolutionEngine.identifyTargets.ActionTargets=' + list(targets.ActionTargets),
+        'resolutionEngine.identifyTargets.OppTargets.NPC=' + list(oppTargets.NPC),
+        'resolutionEngine.identifyTargets.OppTargets.ENV=' + list(oppTargets.ENV),
+        'resolutionEngine.identifyTargets.BenefitedObservers=' + list(targets.BenefitedObservers),
+        'resolutionEngine.identifyTargets.HarmedObservers=' + list(targets.HarmedObservers),
+        'resolutionEngine.hasStakes=' + String(Boolean(resolution.hasStakes)),
+        'resolutionEngine.actionCount=' + list(resolution.actionCount),
+        'resolutionEngine.mapStats=' + inline(resolution.mapStats ?? {}),
+        'resolutionEngine.primaryOppTarget=' + valueOrNone(resolution.primaryOppTarget),
+        'resolutionEngine.hostilePhysicalIntent=' + String(Boolean(resolution.hostilePhysicalIntent)),
+        'resolutionEngine.genStats=' + coreLine(resolution.genStats),
+        '',
+        'relationshipEngine=' + (relationships.length ? '' : 'none'),
+        ...relationships.map(item => [
+            `- ${valueOrNone(item.NPC)}`,
+            `relevant:${Boolean(item.relevant)}`,
+            `init:${inline(item.initFlags ?? {})}`,
+            `newEncounter:${Boolean(item.newEncounterExplicit)}`,
+            `intimidation:${Boolean(item.explicitIntimidationOrCoercion)}`,
+            `stakes:${inline(item.stakeChangeByOutcome ?? {})}`,
+            `override:${inline(item.overrideFlags ?? {})}`,
+            `genStats:${coreLine(item.genStats)}`,
+        ].join(' | ')),
+        '',
+        'chaosSemantic.sceneSummary=' + valueOrNone(chaos.sceneSummary),
+        'nameSemantic=' + inline(name),
+        'proactivitySemantic=' + inline(proactivity),
+    ];
+
+    return lines;
 }
 
 export function formatNarratorPromptContext(report) {
@@ -184,8 +245,24 @@ function escapeReasoningTagsForDisplay(value) {
         .replaceAll('</pre_flight>', '&lt;/pre_flight&gt;');
 }
 
-function stableStringify(value) {
-    return JSON.stringify(value, null, 2);
+function inline(value) {
+    return JSON.stringify(value ?? {});
+}
+
+function valueOrNone(value) {
+    const text = String(value ?? '').trim();
+    return text || '(none)';
+}
+
+function coreLine(core) {
+    if (!core) return '{}';
+    return inline({
+        Rank: core.Rank ?? 'none',
+        MainStat: core.MainStat ?? 'none',
+        PHY: core.PHY ?? 1,
+        MND: core.MND ?? 1,
+        CHA: core.CHA ?? 1,
+    });
 }
 
 function list(value) {

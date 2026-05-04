@@ -20,7 +20,7 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
             ledger = parseJson(repairRaw);
             validateRawLedgerContract(ledger, repairRaw);
             semanticLedgerRepair = {
-                source: 'generateRawData jsonSchema repair pass',
+                source: 'prompt schema repair pass + local validation',
                 reason: error instanceof Error ? error.message : String(error),
             };
         } catch (repairError) {
@@ -37,9 +37,9 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
     normalized.deterministicOverrides = {
         ...(normalized.deterministicOverrides || {}),
         semanticLedgerExtraction: {
-            source: 'SillyTavern generateRawData jsonSchema',
-            schema: SEMANTIC_LEDGER_JSON_SCHEMA.name,
-            strict: SEMANTIC_LEDGER_JSON_SCHEMA.strict,
+            source: 'SillyTavern generateRawData prompt schema + assistant prefill + local validation',
+            schema: 'structured_preflight_name_anchored_prompt_schema_v3',
+            strict: true,
         },
     };
     if (semanticLedgerRepair) {
@@ -67,7 +67,7 @@ async function generateSemanticRaw(context, prompt, responseLength = 2600) {
     return await context.generateRawData({
         prompt,
         responseLength,
-        jsonSchema: SEMANTIC_LEDGER_JSON_SCHEMA,
+        prefill: SEMANTIC_JSON_PREFILL,
     });
 }
 
@@ -80,7 +80,7 @@ function buildSemanticRepairPrompt(raw, error) {
             content:
                 'You repair a failed semantic ledger response for a SillyTavern rules extension. ' +
                 'The output contract is mandatory and non-negotiable. Any response that omits, renames, paraphrases, fences, or corrupts the required ledger is invalid. ' +
-                'Return exactly one complete valid JSON object matching the supplied JSON Schema. ' +
+                'Return exactly one complete valid JSON object matching the supplied name-anchored prompt schema. ' +
                 'No markdown, no prose, no narration, no dice, no calculations.',
         },
         {
@@ -88,255 +88,27 @@ function buildSemanticRepairPrompt(raw, error) {
             content:
                 `The previous response could not be parsed.\nERROR=${error instanceof Error ? error.message : String(error)}\n\n` +
                 `Previous raw text candidates:\n${clip(candidates, 6000)}\n\n` +
-                'Repair it into this exact object shape and field names. Return only the JSON object. Do not wrap it in tags or markdown.\n' +
+                STRICT_NAME_ANCHORED_FIELD_CONTRACT +
+                '\n\nRepair it into this exact object shape and field names. Return only the JSON object. Do not wrap it in tags or markdown.\n' +
                 SEMANTIC_LEDGER_TEMPLATE,
         },
     ];
 }
 
-const STAT_VALUE_ENUM = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-const RANK_ENUM = ['Weak', 'Average', 'Trained', 'Elite', 'Boss', 'none'];
-const MAIN_STAT_ENUM = ['PHY', 'MND', 'CHA', 'Balanced', 'none'];
-const STAKE_CHANGE_ENUM = ['benefit', 'harm', 'none'];
+const SEMANTIC_JSON_PREFILL = '{';
 
-const stringArraySchema = () => ({
-    type: 'array',
-    items: { type: 'string' },
-});
-
-const coreStatsSchema = () => ({
-    type: 'object',
-    additionalProperties: false,
-    required: ['Rank', 'MainStat', 'PHY', 'MND', 'CHA'],
-    properties: {
-        Rank: { type: 'string', enum: RANK_ENUM },
-        MainStat: { type: 'string', enum: MAIN_STAT_ENUM },
-        PHY: { type: 'integer', enum: STAT_VALUE_ENUM },
-        MND: { type: 'integer', enum: STAT_VALUE_ENUM },
-        CHA: { type: 'integer', enum: STAT_VALUE_ENUM },
-    },
-});
-
-const SEMANTIC_LEDGER_JSON_SCHEMA = Object.freeze({
-    name: 'structured_preflight_semantic_ledger_v2',
-    description: 'Semantic/contextual ledger for the Structured Preflight Engines deterministic runner.',
-    strict: true,
-    value: {
-        type: 'object',
-        additionalProperties: false,
-        required: [
-            'engineContext',
-            'resolutionEngine',
-            'relationshipEngine',
-            'chaosSemantic',
-            'nameSemantic',
-            'proactivitySemantic',
-        ],
-        properties: {
-            engineContext: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['userCoreStats', 'trackerRelevantNPCs'],
-                properties: {
-                    userCoreStats: coreStatsSchema(),
-                    trackerRelevantNPCs: {
-                        type: 'array',
-                        items: {
-                            type: 'object',
-                            additionalProperties: false,
-                            required: [
-                                'NPC',
-                                'currentDisposition',
-                                'currentRapport',
-                                'rapportEncounterLock',
-                                'intimacyGate',
-                                'currentCoreStats',
-                            ],
-                            properties: {
-                                NPC: { type: 'string' },
-                                currentDisposition: { type: ['string', 'null'] },
-                                currentRapport: { type: 'integer', enum: [0, 1, 2, 3, 4, 5] },
-                                rapportEncounterLock: { type: 'string', enum: ['Y', 'N'] },
-                                intimacyGate: { type: 'string', enum: ['ALLOW', 'DENY', 'SKIP'] },
-                                currentCoreStats: coreStatsSchema(),
-                            },
-                        },
-                    },
-                },
-            },
-            resolutionEngine: {
-                type: 'object',
-                additionalProperties: false,
-                required: [
-                    'identifyGoal',
-                    'intimacyAdvance',
-                    'explicitMeans',
-                    'identifyTargets',
-                    'hasStakes',
-                    'actionCount',
-                    'mapStats',
-                    'primaryOppTarget',
-                    'hostilePhysicalIntent',
-                    'genStats',
-                ],
-                properties: {
-                    identifyGoal: { type: 'string' },
-                    intimacyAdvance: { type: 'string', enum: ['none', 'physical', 'verbal'] },
-                    explicitMeans: { type: 'string' },
-                    identifyTargets: {
-                        type: 'object',
-                        additionalProperties: false,
-                        required: ['ActionTargets', 'OppTargets', 'BenefitedObservers', 'HarmedObservers'],
-                        properties: {
-                            ActionTargets: stringArraySchema(),
-                            OppTargets: {
-                                type: 'object',
-                                additionalProperties: false,
-                                required: ['NPC', 'ENV'],
-                                properties: {
-                                    NPC: stringArraySchema(),
-                                    ENV: stringArraySchema(),
-                                },
-                            },
-                            BenefitedObservers: stringArraySchema(),
-                            HarmedObservers: stringArraySchema(),
-                        },
-                    },
-                    hasStakes: { type: 'boolean' },
-                    actionCount: {
-                        type: 'array',
-                        items: { type: 'string', enum: ['a1', 'a2', 'a3'] },
-                    },
-                    mapStats: {
-                        type: 'object',
-                        additionalProperties: false,
-                        required: ['USER', 'OPP'],
-                        properties: {
-                            USER: { type: 'string', enum: ['PHY', 'MND', 'CHA'] },
-                            OPP: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'ENV'] },
-                        },
-                    },
-                    primaryOppTarget: { type: 'string' },
-                    hostilePhysicalIntent: { type: 'boolean' },
-                    genStats: coreStatsSchema(),
-                },
-            },
-            relationshipEngine: {
-                type: 'array',
-                items: {
-                    type: 'object',
-                    additionalProperties: false,
-                    required: [
-                        'NPC',
-                        'relevant',
-                        'initFlags',
-                        'newEncounterExplicit',
-                        'explicitIntimidationOrCoercion',
-                        'stakeChangeByOutcome',
-                        'overrideFlags',
-                        'genStats',
-                    ],
-                    properties: {
-                        NPC: { type: 'string' },
-                        relevant: { type: 'boolean' },
-                        initFlags: {
-                            type: 'object',
-                            additionalProperties: false,
-                            required: ['romanticOpen', 'userBadRep', 'userGoodRep', 'userNonHuman', 'fearImmunity'],
-                            properties: {
-                                romanticOpen: { type: 'boolean' },
-                                userBadRep: { type: 'boolean' },
-                                userGoodRep: { type: 'boolean' },
-                                userNonHuman: { type: 'boolean' },
-                                fearImmunity: { type: 'boolean' },
-                            },
-                        },
-                        newEncounterExplicit: { type: 'boolean' },
-                        explicitIntimidationOrCoercion: { type: 'boolean' },
-                        stakeChangeByOutcome: {
-                            type: 'object',
-                            additionalProperties: false,
-                            required: [
-                                'no_roll',
-                                'success',
-                                'failure',
-                                'dominant_impact',
-                                'solid_impact',
-                                'light_impact',
-                                'struggle',
-                                'checked',
-                                'deflected',
-                                'avoided',
-                            ],
-                            properties: {
-                                no_roll: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                success: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                failure: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                dominant_impact: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                solid_impact: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                light_impact: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                struggle: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                checked: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                deflected: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                                avoided: { type: 'string', enum: STAKE_CHANGE_ENUM },
-                            },
-                        },
-                        overrideFlags: {
-                            type: 'object',
-                            additionalProperties: false,
-                            required: ['Exploitation', 'Hedonist', 'Transactional', 'Established'],
-                            properties: {
-                                Exploitation: { type: 'boolean' },
-                                Hedonist: { type: 'boolean' },
-                                Transactional: { type: 'boolean' },
-                                Established: { type: 'boolean' },
-                            },
-                        },
-                        genStats: coreStatsSchema(),
-                    },
-                },
-            },
-            chaosSemantic: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['sceneSummary'],
-                properties: {
-                    sceneSummary: { type: 'string' },
-                },
-            },
-            nameSemantic: {
-                type: 'object',
-                additionalProperties: false,
-                required: [
-                    'nameRequired',
-                    'explicitNameKnown',
-                    'isLocation',
-                    'seed',
-                    'normalizeSeed',
-                    'detectMode',
-                    'generatedName',
-                ],
-                properties: {
-                    nameRequired: { type: 'boolean' },
-                    explicitNameKnown: { type: 'boolean' },
-                    isLocation: { type: 'boolean' },
-                    seed: { type: 'string' },
-                    normalizeSeed: { type: 'string' },
-                    detectMode: { type: 'string', enum: ['none', 'PERSON', 'LOCATION'] },
-                    generatedName: { type: 'string' },
-                },
-            },
-            proactivitySemantic: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['cap'],
-                properties: {
-                    cap: { type: 'integer', enum: [1, 2, 3] },
-                },
-            },
-        },
-    },
-});
+const STRICT_NAME_ANCHORED_FIELD_CONTRACT = [
+    'STRICT NAME-ANCHORED FIELD CONTRACT:',
+    '- Output exactly one JSON object. No markdown. No prose. No comments. No tags. No trailing explanation.',
+    '- The JSON object must start with engineContext, resolutionEngine, relationshipEngine, chaosSemantic, nameSemantic, proactivitySemantic.',
+    '- Field names are literal engine anchors. Do not rename, paraphrase, flatten, omit, or add fields.',
+    '- Use booleans true/false, numbers for numeric fields, arrays for list fields, and strings only where the template uses strings.',
+    '- Use "(none)" only inside string/list values when the engine result is none. Do not use null except engineContext.trackerRelevantNPCs[].currentDisposition may be null.',
+    '- All relationshipEngine[].stakeChangeByOutcome values must be exactly "benefit", "harm", or "none".',
+    '- All genStats blocks must include Rank, MainStat, PHY, MND, CHA.',
+    '- All mapStats blocks must include USER and OPP.',
+    '- If you cannot find explicit evidence, use the engine default for that field; never invent missing facts.',
+].join('\n');
 
 const SEMANTIC_LEDGER_TEMPLATE = `{
   "engineContext": {
@@ -397,7 +169,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             role: 'system',
             content:
                 'You are the semantic extraction pass for a SillyTavern roleplay rules extension. ' +
-                'The output contract is mandatory and non-negotiable: return exactly one complete, valid JSON object matching the supplied JSON Schema. ' +
+                'The output contract is mandatory and non-negotiable: return exactly one complete, valid JSON object matching the supplied name-anchored prompt schema. ' +
                 'Any response that renames fields, returns prose, returns markdown fences, returns an empty object, or leaves required fields missing is completely invalid and will be discarded. ' +
                 'Do not narrate. Do not roll dice. Do not calculate outcomes. ' +
                 'Classify only contextual/semantic predicates needed by the engines. Use EXPLICIT-ONLY and FIRST-YES-WINS from the engine reference. ' +
@@ -440,7 +212,8 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             content:
                 `Recent chat context, newest last:\n${chatContext}\n\n` +
                 'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
-                'MANDATORY OUTPUT CONTRACT: Return one complete JSON object with this exact shape and field names. Do not output anything before or after the JSON object.\n' +
+                STRICT_NAME_ANCHORED_FIELD_CONTRACT +
+                '\n\nMANDATORY OUTPUT CONTRACT: Return one complete JSON object with this exact shape and field names. Do not output anything before or after the JSON object.\n' +
                 SEMANTIC_LEDGER_TEMPLATE,
         },
     ];
@@ -494,12 +267,24 @@ function parseCoreStatsBlock(text) {
 }
 
 function formatChatContext(coreChat) {
-    const rows = Array.isArray(coreChat) ? coreChat.slice(-14) : [];
-    return rows.map((message, index) => {
+    const rows = Array.isArray(coreChat) ? coreChat : [];
+    const formatted = rows.map((message, index) => {
         const speaker = message?.is_user ? 'USER' : (message?.name || 'NPC');
-        const text = stripStructuredDebug(String(message?.mes ?? message?.message ?? message?.content ?? '')).trim();
+        const text = clip(stripStructuredDebug(String(message?.mes ?? message?.message ?? message?.content ?? '')).trim(), 1200);
         return `${index + 1}. ${speaker}: ${text}`;
-    }).join('\n');
+    });
+    const newestFirst = [...formatted].reverse();
+    const kept = [];
+    let total = 0;
+
+    for (const line of newestFirst) {
+        const nextTotal = total + line.length + 1;
+        if (kept.length && nextTotal > 12000) break;
+        kept.push(line);
+        total = nextTotal;
+    }
+
+    return kept.reverse().join('\n');
 }
 
 function clip(value, maxLength) {
@@ -540,6 +325,9 @@ function parseLedgerText(text) {
     }
     if (sourceText.startsWith('{')) {
         return JSON.parse(extractJsonObject(sourceText));
+    }
+    if (sourceText.startsWith('"engineContext"')) {
+        return JSON.parse(extractJsonObject(`{${sourceText}`));
     }
 
     throw new Error('missing mandatory JSON object');
