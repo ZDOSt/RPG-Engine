@@ -152,7 +152,7 @@ function buildReadableDeterministicDebug(handoff) {
             `npcHandoffs[${index}].Target=${valueOrNone(npc.Target)}`,
             `npcHandoffs[${index}].NPC_STAKES=${valueOrNone(npc.NPC_STAKES)}`,
             `npcHandoffs[${index}].IntimacyGate=${valueOrNone(npc.IntimacyGate)}`,
-            `npcHandoffs[${index}].RelationToUserAction=${valueOrNone(npc.RelationToUserAction)}`,
+            `npcHandoffs[${index}].RelationToUserAction=${inline(npc.RelationToUserAction ?? {})}`,
             `npcHandoffs[${index}].PressureMode=${valueOrNone(npc.PressureMode)}`,
         ]),
         '',
@@ -163,7 +163,7 @@ function buildReadableDeterministicDebug(handoff) {
             anchor: chaos.anchor ?? 'None',
             vector: chaos.vector ?? 'None',
         }),
-        'proactivityResults=' + inline(proactivity),
+        'proactivityResults=' + inline(formatProactivityForNarration(proactivity)),
         'aggressionResults=' + inline(aggression),
         'trackerUpdate=' + inline(handoff?.sceneTrackerUpdate ?? {}),
     ];
@@ -172,7 +172,7 @@ function buildReadableDeterministicDebug(handoff) {
 export function formatNarratorPromptContext(report) {
     const handoff = report?.finalNarrativeHandoff ?? {};
     const resolution = handoff.resolutionPacket ?? {};
-    const compact = buildNarratorSummary(handoff, resolution);
+    const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {});
 
     const lines = [
         '[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.6 - MINIMAL AUTHORITATIVE]',
@@ -181,21 +181,28 @@ export function formatNarratorPromptContext(report) {
         'Never narrate voluntary {{user}} actions, counterattacks, thoughts, feelings, decisions, or dialogue beyond the explicit user input.',
         'Involuntary reflexive physical reactions caused directly by computed external impact/restraint are allowed; keep them immediate/passive and do not turn them into choices, tactics, counters, or dialogue.',
         'Length target: 80-140 words unless the scene requires less.',
-        'RESULT=' + compact.result,
-        'ACTIONS=' + compact.actions,
-        'COUNTER=' + compact.counter,
-        'NPC=' + compact.npc,
-        'CHAOS=' + compact.chaos,
-        'PROACTIVE=' + compact.proactive,
-        'AGGRESSION=' + compact.aggression,
-        'AGGRESSION_GUIDE=' + compact.aggressionGuide,
-        'GUIDE=' + compact.guide,
+        '',
+        'User Actions: ' + summary.userAction,
+        'Result: ' + summary.result,
+        'Action Count: ' + summary.actions,
+        'Stakes: ' + summary.stakes,
+        'Intimacy Consent: ' + summary.consent,
+        'Targets: ' + summary.targets,
+        'Counter Potential: ' + summary.counter,
+        'NPC State: ' + summary.npc,
+        'Chaos: ' + summary.chaos,
+        'Proactivity: ' + summary.proactive,
+        'Aggression: ' + summary.aggression,
+        'Aggression Guide: ' + summary.aggressionGuide,
+        'GUIDE=' + summary.guide,
     ];
 
     return lines.join('\n');
 }
 
-function buildNarratorSummary(handoff, resolution) {
+function buildNarratorSummary(handoff, resolution, ledger = {}) {
+    const semanticResolution = ledger?.resolutionEngine ?? {};
+    const userAction = readableActionDescription(semanticResolution, resolution);
     const npcText = (handoff.npcHandoffs ?? []).map(h => [
         h.NPC,
         h.FinalState,
@@ -212,13 +219,13 @@ function buildNarratorSummary(handoff, resolution) {
         ? `${chaos.band}/${chaos.magnitude}/${chaos.anchor}/${chaos.vector}`
         : 'none';
 
-    const proactiveText = Object.entries(handoff.proactivityResults ?? {}).map(([name, value]) => [
-        name,
-        value.Proactive,
-        value.Intent,
-        value.Impulse,
-        `targetsUser:${value.TargetsUser}`,
-    ].join('/')).join(';') || 'none';
+    const proactiveText = Object.entries(formatProactivityForNarration(handoff.proactivityResults ?? {}))
+        .filter(([, value]) => value?.Proactive === 'Y')
+        .map(([name, value]) => [
+            `${name}: ${value.Intent}`,
+            `impulse:${value.Impulse}`,
+            `triggersAggressionRoll:${value.triggersAggressionRoll}`,
+        ].join('/')).join(';') || 'none';
 
     const aggressionText = Object.entries(handoff.aggressionResults ?? {}).map(([name, value]) =>
         `${name}/${value.AttackType ?? 'Attack'}/${value.ReactionOutcome}/bonus:${value.CounterBonus ?? 0}/margin:${value.Margin}`,
@@ -227,20 +234,101 @@ function buildNarratorSummary(handoff, resolution) {
         ? buildNoAggressionGuide(resolution, handoff)
         : buildAggressionGuide(handoff.aggressionResults);
 
-    const goal = resolution.GOAL ?? 'normal';
     const result = handoff.resultLine ?? `${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}`;
+    const guide = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText });
 
     return {
+        userAction,
         result,
         actions: list(resolution.actions),
+        stakes: resolution.STAKES ?? 'N',
+        consent: intimacyConsentSummary(resolution),
+        targets: targetSummary(resolution),
         counter: resolution.CounterPotential ?? 'none',
         npc: npcText,
         chaos: chaosText,
         proactive: proactiveText,
         aggression: aggressionText,
         aggressionGuide,
-        guide: `${goal}; outcome:${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}; consent:${resolution.IntimacyConsent ?? 'N'}; targets:${list(resolution.ActionTargets)}; denied intimacy means refusal/boundary regardless of roll; narrate the scene now.`,
+        guide,
     };
+}
+
+function readableActionDescription(semanticResolution, resolution) {
+    const explicit = valueOrNone(semanticResolution.explicitMeans);
+    if (explicit !== '(none)') return explicit;
+    const goal = valueOrNone(resolution.GOAL);
+    const targets = list(resolution.ActionTargets);
+    return targets && targets !== 'none' ? `${goal} toward ${targets}` : goal;
+}
+
+function targetSummary(resolution) {
+    const parts = [];
+    const actionTargets = list(resolution.ActionTargets);
+    const oppNpc = list(resolution.OppTargets?.NPC);
+    const oppEnv = list(resolution.OppTargets?.ENV);
+    const benefited = list(resolution.BenefitedObservers);
+    const harmed = list(resolution.HarmedObservers);
+    if (!isNoneText(actionTargets)) parts.push(`action:${actionTargets}`);
+    if (!isNoneText(oppNpc)) parts.push(`opposes:${oppNpc}`);
+    if (!isNoneText(oppEnv)) parts.push(`env:${oppEnv}`);
+    if (!isNoneText(benefited)) parts.push(`benefits:${benefited}`);
+    if (!isNoneText(harmed)) parts.push(`harms:${harmed}`);
+    return parts.join('; ') || 'none';
+}
+
+function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText }) {
+    const goal = resolution.GOAL ?? 'normal';
+    const outcome = `${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}`;
+    const primaryNpc = handoff.npcHandoffs?.[0];
+    const npcName = primaryNpc?.NPC || list(resolution.ActionTargets) || 'the NPC';
+    const state = primaryNpc ? `${primaryNpc.Behavior}/${primaryNpc.Target}` : npcText;
+
+    if (aggressionText !== 'none') {
+        return `The user action is ${userAction}; resolve it as ${outcome}, then narrate the listed NPC attack result. Stop at the aggression guide boundary and do not invent any user follow-up.`;
+    }
+
+    if (proactiveText !== 'none') {
+        return `The user action is ${userAction}; resolve it as ${outcome}. Then let the listed proactive NPC action happen naturally without treating triggersAggressionRoll:N as “not directed at the user.”`;
+    }
+
+    if (goal === 'IntimacyAdvancePhysical' || goal === 'IntimacyAdvanceVerbal') {
+        const allowed = resolution.IntimacyConsent === 'Y' || resolution.STAKES === 'N';
+        const chaosNote = chaosText !== 'none' ? ' while including the listed chaos beat without changing that gate result' : '';
+        return `The user action is ${userAction}; resolve it as ${outcome}. ${allowed ? `${npcName} may receive it according to the current gate and relationship state${chaosNote}.` : `${npcName} refuses or sets a boundary because the intimacy gate is not allowing it${chaosNote}.`}`;
+    }
+
+    if (resolution.STAKES === 'N') {
+        const chaosNote = chaosText !== 'none' ? ' and include the listed chaos beat as a brief scene event' : '';
+        return `The user action is ${userAction}; no roll is needed. Keep ${npcName}'s response consistent with ${state}, with no invented hostility or extra mechanics${chaosNote}.`;
+    }
+
+    if (chaosText !== 'none') {
+        return `The user action is ${userAction}; resolve it as ${outcome}. Include the listed chaos beat while keeping NPC state anchored to ${state}.`;
+    }
+
+    return `The user action is ${userAction}; resolve it as ${outcome}. Narrate the NPC response according to ${state} and the listed targets.`;
+}
+
+function intimacyConsentSummary(resolution) {
+    if (resolution.GOAL !== 'IntimacyAdvancePhysical' && resolution.GOAL !== 'IntimacyAdvanceVerbal') return 'not applicable';
+    return resolution.IntimacyConsent ?? 'N';
+}
+
+function formatProactivityForNarration(proactivity) {
+    const formatted = {};
+    for (const [name, value] of Object.entries(proactivity ?? {})) {
+        formatted[name] = {
+            Proactive: value?.Proactive ?? 'N',
+            Intent: value?.Intent ?? 'NONE',
+            Impulse: value?.Impulse ?? 'NONE',
+            triggersAggressionRoll: value?.TargetsUser === 'Y' ? 'Y' : 'N',
+            ProactivityTier: value?.ProactivityTier,
+            ProactivityDie: value?.ProactivityDie,
+            Threshold: value?.Threshold,
+        };
+    }
+    return formatted;
 }
 
 function buildAggressionGuide(aggressionResults) {
@@ -327,4 +415,9 @@ function coreLine(core) {
 
 function list(value) {
     return Array.isArray(value) ? value.join(',') : String(value ?? 'none');
+}
+
+function isNoneText(value) {
+    const text = String(value ?? '').trim().toLowerCase();
+    return !text || text === 'none' || text === '(none)' || text === 'null';
 }

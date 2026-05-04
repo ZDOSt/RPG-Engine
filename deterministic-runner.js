@@ -480,7 +480,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
     for (const handoff of handoffs) {
         const fin = parseFinalState(handoff.FinalState);
         const lock = handoff.Lock && handoff.Lock !== 'None' ? handoff.Lock : deriveLock(fin);
-        const impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode);
+        const impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode, handoff.Target);
         const proactivityGuard = proactivityRefereeGuard(handoff, resolutionPacket);
         const tier = proactivityGuard
             ? 'DORMANT'
@@ -489,7 +489,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         results[handoff.NPC] = {
             Proactive: 'N',
             Intent: 'NONE',
-            Impulse: impulse,
+            Impulse: 'NONE',
             TargetsUser: 'N',
             ProactivityTier: tier,
         };
@@ -527,6 +527,8 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             candidates.push({ NPC: handoff.NPC, die, tier, intent, impulse, TargetsUser: targetsUser, Threshold: threshold, passes });
             audit.push(`6.5c selectIntent=${intent}`);
             audit.push(`6.5e targetsUserFromIntent=${targetsUser}`);
+        } else {
+            audit.push('6.5c Proactive=N -> Intent=NONE, Impulse=NONE, TargetsUser=N');
         }
     }
 
@@ -1061,17 +1063,25 @@ function classifyAction(packet) {
     return 'Normal_Interaction';
 }
 
-function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'none') {
+function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'none', target = 'No Change') {
     if (pressureMode === 'cornered') return 'ANGER';
     if (pressureMode === 'dominated') return 'FEAR';
     if (lock === 'HATRED') return 'ANGER';
     if (lock === 'TERROR') return 'FEAR';
-    if (['Combat', 'Social'].includes(kind) && fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
-    if (kind === 'Social' && fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
+    if (target === 'Hostility') return 'ANGER';
+    if (target === 'Fear') return 'FEAR';
+    if (target === 'FearHostility') return fin.F > fin.H ? 'FEAR' : 'ANGER';
+    if (target === 'Bond') return 'BOND';
     if (['Intimacy_Physical', 'Intimacy_Verbal'].includes(kind) && intimacyGate === 'DENY') return 'ANGER';
+    if (kind === 'Combat') return fin.F > fin.H ? 'FEAR' : 'ANGER';
+    if (kind === 'Social') {
+        if (fin.H > fin.F && fin.H > fin.B) return 'ANGER';
+        if (fin.F > fin.H && fin.F > fin.B) return 'FEAR';
+        return 'BOND';
+    }
     if (['Normal_Interaction', 'Skill'].includes(kind) && fin.B >= fin.H && fin.B >= fin.F) return 'BOND';
-    if (fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
-    if (fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
+    if (fin.H > fin.F && fin.H > fin.B) return 'ANGER';
+    if (fin.F > fin.H && fin.F > fin.B) return 'FEAR';
     return 'BOND';
 }
 
