@@ -33,8 +33,9 @@ export async function saveTrackerUpdate(context, trackerUpdate) {
 export function runDeterministicEngines(ledger, trackerSnapshot, context, type) {
     const audit = [];
     const dice = createDice();
-    const resolution = runResolution(ledger, trackerSnapshot, dice, audit, context);
-    const relationships = runRelationships(ledger, trackerSnapshot, resolution.packet, audit);
+    const refereeContext = buildRefereeContext(context);
+    const resolution = runResolution(ledger, trackerSnapshot, dice, audit, context, refereeContext);
+    const relationships = runRelationships(ledger, trackerSnapshot, resolution.packet, audit, refereeContext);
     const chaos = runChaos(ledger, relationships.handoffs, resolution.packet, dice, audit);
     const name = runNameGeneration(ledger, audit);
     const proactivity = runProactivity(ledger, relationships.handoffs, resolution.packet, chaos.handoff, dice, audit);
@@ -65,18 +66,18 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
     };
 }
 
-function runResolution(ledger, trackerSnapshot, dice, audit, context) {
+function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeContext) {
     const semantic = ledger.resolutionEngine || {};
     const targetClassifier = buildTargetClassifier(ledger, trackerSnapshot, context);
     const rawTargets = normalizeTargets(semantic.identifyTargets);
-    const targets = sanitizeTargets(rawTargets, targetClassifier);
     const intimacyAdvance = String(semantic.intimacyAdvance || 'none').toLowerCase();
     const goal = intimacyAdvance === 'physical'
         ? 'IntimacyAdvancePhysical'
         : intimacyAdvance === 'verbal'
             ? 'IntimacyAdvanceVerbal'
             : String(semantic.identifyGoal || 'Normal_Interaction');
-    semantic.primaryOppTarget = firstReal(targets.OppTargets.NPC) || NONE;
+    const semanticHasStakes = bool(semantic.hasStakes) ? 'Y' : 'N';
+    const preliminaryTargets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes: 'Y' });
 
     const rollPool = [dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20()];
     audit.push('STEP 1: SILENT SEMANTIC PASS COMPLETE');
@@ -95,27 +96,27 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
     audit.push('STEP 2: EXECUTE ResolutionEngine(input) USING SEMANTIC_LEDGER');
     audit.push(`2.0 roll_pool=[r0=${rollPool[0]},r1=${rollPool[1]},r2=${rollPool[2]},r3=${rollPool[3]},r4=${rollPool[4]},r5=${rollPool[5]}]`);
     audit.push(`2.1 identifyGoal=${goal}`);
-    audit.push(`2.2 identifyTargets=${formatTargets(targets)}`);
-    if (!sameTargets(rawTargets, targets)) {
-        audit.push(`2.2a deterministicTargetSanitizer=${compact({
-            reason: 'living targets only; non-living blockers moved to ENV',
-            from: targetSummary(rawTargets),
-            to: targetSummary(targets),
-        })}`);
-    }
+    audit.push(`2.2 identifyTargets.semantic=${formatTargets(rawTargets)}`);
 
-    const intimacyTarget = firstReal(targets.ActionTargets);
+    const intimacyTarget = firstReal(preliminaryTargets.ActionTargets);
+    const semanticRelationship = (ledger.relationshipEngine || []).find(item => sameName(item?.NPC, intimacyTarget)) || {};
     const targetState = trackerSnapshot[intimacyTarget] || null;
+    const preliminaryInitFlags = applyInitFlagReferee(semanticRelationship.initFlags || {}, refereeContext, audit, `2.3 checkIntimacyGate.initPreset(${intimacyTarget || NONE})`);
+    const preliminaryDisposition = targetState?.currentDisposition || initPreset(preliminaryInitFlags).disposition;
+    const preliminaryThreshold = checkThreshold(preliminaryDisposition, semanticRelationship.overrideFlags || {});
+    const intimacyAllowance = currentIntimacyGateAllows(targetState, preliminaryDisposition, preliminaryThreshold);
     const intimacyConsent = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)
-        && targetState
-        && currentIntimacyGateAllows(targetState)
+        && intimacyAllowance.allows
         ? 'Y'
         : 'N';
     audit.push(`2.3 checkIntimacyGate=${intimacyConsent}`);
+    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) {
+        audit.push(`2.3a checkIntimacyGate.threshold=${compact(preliminaryThreshold)}`);
+        audit.push(`2.3b checkIntimacyGate.evidence=${compact(intimacyAllowance)}`);
+    }
 
-    const semanticHasStakes = bool(semantic.hasStakes) ? 'Y' : 'N';
     const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
-    const stakesOverrideEvidence = getStakesOverrideEvidence(goal, intimacyTarget, targetState, semanticHasStakes, intimacyConsent);
+    const stakesOverrideEvidence = getStakesOverrideEvidence(goal, intimacyTarget, targetState, preliminaryDisposition, preliminaryThreshold, intimacyAllowance, semanticHasStakes, intimacyConsent);
     const hasStakes = stakesOverrideEvidence?.hasStakes || semanticHasStakes;
     const stakesRule = stakesOverrideEvidence?.rule || (isIntimacyAdvance ? 'semantic_final_intimacy_no_hard_override' : 'semantic_final');
     audit.push(`2.4a semanticHasStakes=${semanticHasStakes}`);
@@ -124,6 +125,18 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         audit.push(`2.4c deterministicStakesEvidence=${compact(stakesOverrideEvidence.evidence)}`);
     }
     audit.push(`2.4 hasStakes=${hasStakes}`);
+
+    const targets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes });
+    audit.push(`2.4d identifyTargets.final=${formatTargets(targets)}`);
+    if (!sameTargets(rawTargets, targets)) {
+        audit.push(`2.4e deterministicTargetSanitizer=${compact({
+            reason: hasStakes === 'N'
+                ? 'living targets only; non-living blockers moved to ENV; no-stakes living opposition converted to ActionTargets'
+                : 'living targets only; non-living blockers moved to ENV; direct targets removed from observer lists',
+            from: targetSummary(rawTargets),
+            to: targetSummary(targets),
+        })}`);
+    }
 
     const npcInScene = unique([
         ...targets.ActionTargets,
@@ -154,9 +167,9 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         let { userStat, oppStat } = applyMapStatsHardRules(semantic, goal, targets, semanticMapStats, audit);
         const userCore = getUserCoreStats(ledger);
         let targetCore = null;
-        const primaryOppTarget = firstReal(targets.OppTargets.NPC);
-        const currentTargetCore = primaryOppTarget ? trackerSnapshot[primaryOppTarget]?.currentCoreStats : null;
-        if (oppStat !== 'ENV' && !primaryOppTarget) {
+        const oppTargetsNpcFirst = firstReal(targets.OppTargets.NPC);
+        const currentTargetCore = oppTargetsNpcFirst ? trackerSnapshot[oppTargetsNpcFirst]?.currentCoreStats : null;
+        if (oppStat !== 'ENV' && !oppTargetsNpcFirst) {
             oppStat = 'ENV';
         }
 
@@ -169,15 +182,15 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
 
         if (oppStat !== 'ENV') {
             audit.push('2.7f mapStats.OPP!=ENV');
-            audit.push(`2.7g primaryOppTarget=${primaryOppTarget || NONE}`);
+            audit.push(`2.7g OppTargets.NPC[0]=${oppTargetsNpcFirst || NONE}`);
             if (currentTargetCore) {
                 targetCore = normalizeCore(currentTargetCore, { PHY: 1, MND: 1, CHA: 1 });
-                audit.push(`2.7h getCurrentCoreStats(${primaryOppTarget})=${compact(targetCore)}`);
+                audit.push(`2.7h getCurrentCoreStats(${oppTargetsNpcFirst})=${compact(targetCore)}`);
                 audit.push(`2.7n targetCore=${compact(targetCore)}`);
             } else {
-                const generatedCoreSource = chooseGeneratedCore(ledger, semantic, primaryOppTarget);
+                const generatedCoreSource = chooseGeneratedCore(ledger, semantic, oppTargetsNpcFirst);
                 targetCore = normalizeCore(generatedCoreSource.core, { PHY: 1, MND: 1, CHA: 1 });
-                audit.push(`2.7h getCurrentCoreStats(${primaryOppTarget || NONE})=missing`);
+                audit.push(`2.7h getCurrentCoreStats(${oppTargetsNpcFirst || NONE})=missing`);
                 audit.push('2.7i missing -> genStats');
                 if (generatedCoreSource.source !== 'resolutionEngine.genStats') {
                     audit.push(`2.7i.1 genStats source=${generatedCoreSource.source}`);
@@ -233,7 +246,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
     return { packet, resultLine };
 }
 
-function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
+function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refereeContext) {
     const semanticMap = new Map((ledger.relationshipEngine || []).filter(x => x?.NPC).map(x => [x.NPC, x]));
     const npcList = toRealArray(resolutionPacket.NPCInScene);
     const handoffs = [];
@@ -281,12 +294,13 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
         audit.push(`3.3b rapportEncounterLock=${rapportEncounterLock}`);
 
         if (!currentDisposition) {
-            const init = initPreset(sem.initFlags || {});
+            const effectiveInitFlags = applyInitFlagReferee(sem.initFlags || {}, refereeContext, audit, `3.3 ${npc}.initPreset`);
+            const init = initPreset(effectiveInitFlags);
             currentDisposition = init.disposition;
-            audit.push(`3.3e initPreset.romanticOpen=${yn(sem.initFlags?.romanticOpen)}`);
-            audit.push(`3.3f initPreset.userBadRep=${yn(sem.initFlags?.userBadRep)}`);
-            audit.push(`3.3g initPreset.userGoodRep=${yn(sem.initFlags?.userGoodRep)}`);
-            audit.push(`3.3h initPreset.userNonHuman=${yn(sem.initFlags?.userNonHuman)} fearImmunity=${yn(sem.initFlags?.fearImmunity)}`);
+            audit.push(`3.3e initPreset.romanticOpen=${yn(effectiveInitFlags.romanticOpen)}`);
+            audit.push(`3.3f initPreset.userBadRep=${yn(effectiveInitFlags.userBadRep)}`);
+            audit.push(`3.3g initPreset.userGoodRep=${yn(effectiveInitFlags.userGoodRep)}`);
+            audit.push(`3.3h initPreset.userNonHuman=${yn(effectiveInitFlags.userNonHuman)} fearImmunity=${yn(effectiveInitFlags.fearImmunity)}`);
             audit.push(`3.3i initPreset=${init.label}`);
             audit.push(`3.3j currentDisposition=${formatDisposition(currentDisposition)}`);
         } else {
@@ -297,8 +311,10 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
 
         const isAllowed = resolutionPacket.IntimacyConsent;
         const outcomeKey = String(resolutionPacket.Outcome || 'no_roll');
-        const stakeChange = sem.stakeChangeByOutcome?.[outcomeKey] || 'none';
-        const auditInteraction = resolutionPacket.STAKES === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
+        const stakeReferee = resolveStakeChangeByOutcome(npc, sem, resolutionPacket);
+        const stakeChange = stakeReferee.value;
+        const npcStakes = resolutionPacket.STAKES === 'Y' && ['benefit', 'harm'].includes(stakeChange) ? 'Y' : 'N';
+        const auditInteraction = npcStakes === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
         const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem);
         const hostilePressureResult = applyHostilePhysicalPressure(npc, resolutionPacket, {
             currentDisposition,
@@ -318,7 +334,10 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
 
         audit.push(`3.4 isAllowed=${isAllowed}`);
         audit.push(`3.4a auditInteraction=stakeChangeByOutcome[${outcomeKey}]=${stakeChange} -> ${auditInteraction}`);
-        audit.push(`3.4b NPC_STAKES=${auditInteraction}`);
+        if (stakeReferee.referee) {
+            audit.push(`3.4a.1 deterministicStakeChangeReferee=${compact(stakeReferee.referee)}`);
+        }
+        audit.push(`3.4b NPC_STAKES=${npcStakes}`);
         audit.push(`3.4c routeDispositionTarget=${routedTarget}`);
         if (hostilePressureResult) {
             audit.push(`3.4c.1 hostilePhysicalPressure=${compact({
@@ -348,14 +367,20 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
 
         const classified = classifyDisposition(currentDisposition);
         const threshold = checkThreshold(currentDisposition, sem.overrideFlags || {});
-        const resolvedGate = resolveIntimacyGate(state, threshold, currentDisposition, isAllowed);
+        const resolvedGate = resolveIntimacyGate(state, threshold, currentDisposition, isAllowed, resolutionPacket.GOAL);
         const intimacyGate = resolvedGate.IntimacyGate;
         const intimacyGateSource = resolvedGate.IntimacyGateSource;
+        const persistedGate = intimacyGate !== 'SKIP' && intimacyGateSource !== 'CURRENT_DENIED'
+            ? intimacyGate
+            : 'SKIP';
+        const persistedGateSource = persistedGate === 'SKIP' ? 'NONE' : intimacyGateSource;
 
         audit.push(`3.6 classifyDisposition=${compact(classified)}`);
         audit.push(`3.6a checkThreshold=${compact(threshold)}`);
         audit.push(`3.6b IntimacyGate=${intimacyGate}`);
         audit.push(`3.6c IntimacyGateSource=${intimacyGateSource}`);
+        audit.push(`3.6d persistedIntimacyGate=${persistedGate}`);
+        audit.push(`3.6e persistedIntimacyGateSource=${persistedGateSource}`);
 
         const handoff = {
             NPC: npc,
@@ -363,7 +388,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
             Lock: classified.lock,
             Behavior: classified.behavior,
             Target: target,
-            NPC_STAKES: auditInteraction,
+            NPC_STAKES: npcStakes,
             Override: threshold.Override,
             Landed: landedBool(resolutionPacket.LandedActions) ? 'Y' : 'N',
             OutcomeTier: resolutionPacket.OutcomeTier || 'NONE',
@@ -387,8 +412,8 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
             currentDisposition,
             currentRapport,
             rapportEncounterLock,
-            intimacyGate,
-            intimacyGateSource,
+            intimacyGate: persistedGate,
+            intimacyGateSource: persistedGateSource,
             currentCoreStats: coreStats,
             hostilePressure,
             hostileLandedPressure,
@@ -661,21 +686,104 @@ function aggressionReactionOutcome(margin) {
     return 'user_dominates';
 }
 
-function chooseGeneratedCore(ledger, resolutionEngine, primaryOppTarget) {
+function chooseGeneratedCore(ledger, resolutionEngine, oppTargetsNpcFirst) {
     const resolutionCore = resolutionEngine?.genStats;
     if (!isDefaultGeneratedCore(resolutionCore)) {
         return { core: resolutionCore, source: 'resolutionEngine.genStats' };
     }
 
     const relationshipCore = (ledger.relationshipEngine || [])
-        .find(item => sameName(item?.NPC, primaryOppTarget))
+        .find(item => sameName(item?.NPC, oppTargetsNpcFirst))
         ?.genStats;
 
     if (!isDefaultGeneratedCore(relationshipCore)) {
-        return { core: relationshipCore, source: `relationshipEngine[${primaryOppTarget}].genStats` };
+        return { core: relationshipCore, source: `relationshipEngine[${oppTargetsNpcFirst}].genStats` };
     }
 
     return { core: { Rank: 'none', MainStat: 'none', PHY: 1, MND: 1, CHA: 1 }, source: 'engine default core fallback', defaultFallback: true };
+}
+
+function buildRefereeContext(context) {
+    const fields = getCardFields(context);
+    const userText = String(fields.persona ?? '');
+
+    return {
+        userNonHuman: classifyUserNonHuman(userText),
+    };
+}
+
+function getCardFields(context) {
+    try {
+        return typeof context?.getCharacterCardFields === 'function' ? context.getCharacterCardFields() : {};
+    } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+function applyInitFlagReferee(flags, refereeContext, audit, label) {
+    const effective = { ...flags };
+    const classification = refereeContext?.userNonHuman;
+    if (!classification || classification.value == null) return effective;
+
+    const current = bool(effective.userNonHuman);
+    if (current === classification.value) return effective;
+
+    effective.userNonHuman = classification.value;
+    audit.push(`${label}.userNonHumanReferee=${compact({
+        hardRule: 'RelationshipEngine.initPreset: explicit user race/species evidence determines monster/non-typical userNonHuman flag',
+        from: current,
+        to: classification.value,
+        source: classification.source,
+        evidence: classification.evidence,
+    })}`);
+    return effective;
+}
+
+function classifyUserNonHuman(text) {
+    const source = String(text ?? '');
+    if (!source.trim()) return { value: null, source: 'no persona text', evidence: null };
+
+    const raceEvidence = explicitRaceEvidence(source);
+    if (raceEvidence) {
+        const raceClassification = classifyRaceText(raceEvidence);
+        if (raceClassification.value != null) {
+            return {
+                ...raceClassification,
+                source: 'explicit Race/Species/Ancestry/Lineage field',
+                evidence: snippet(raceEvidence),
+            };
+        }
+    }
+
+    const visibleMonster = source.match(/\b(visibly|obviously|clearly|appears?|looks?)\b.{0,80}\b(demonic|demon|monstrous|monster|undead|eldritch|bestial|construct-like|inhuman)\b/i)
+        || source.match(/\b(demonic|demon|monstrous|monster|undead|eldritch|bestial|construct-like|inhuman)\b.{0,80}\b(visibly|obviously|clearly|appears?|looks?)\b/i);
+    if (visibleMonster) {
+        return {
+            value: true,
+            source: 'explicit visible monstrous/inhuman description',
+            evidence: snippet(visibleMonster[0]),
+        };
+    }
+
+    return { value: null, source: 'no deterministic race/species evidence', evidence: null };
+}
+
+function explicitRaceEvidence(text) {
+    const matches = [...String(text).matchAll(/^\s*(?:[-*]\s*)?(?:Race|Species|Ancestry|Lineage|Heritage)\s*[:=]\s*(.+)$/gim)]
+        .map(match => match[1])
+        .filter(Boolean);
+    return matches.length ? matches.join('; ') : null;
+}
+
+function classifyRaceText(text) {
+    const source = String(text ?? '').toLowerCase();
+    const monsterRace = /\b(half[-\s]?demon|demon|demonic|devil|fiend|cambion|monster|monstrous|orc|ogre|goblin|hobgoblin|bugbear|troll|undead|vampire|dhampir|lich|wraith|ghoul|zombie|skeleton|werewolf|lycanthrope|eldritch|aberration|construct|golem|beastfolk|lizardfolk|kobold|minotaur|oni)\b/.test(source);
+    if (monsterRace) return { value: true };
+
+    const typicalRace = /\b(human|mortal|elf|elven|half[-\s]?elf|dwarf|dwarven|halfling|hobbit|gnome|fairy|fae|pixie|aasimar)\b/.test(source);
+    if (typicalRace) return { value: false };
+
+    return { value: null };
 }
 
 function isDefaultGeneratedCore(core) {
@@ -712,18 +820,61 @@ function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem) {
         if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g) && isAllowed === 'Y') return 'Bond';
         return 'No Change';
     }
-    if (auditInteraction === 'Y' && !isHarmed) return 'Bond';
-    if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
-    if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g)) {
         if (isAllowed === 'Y') return 'Bond';
         if (g === 'IntimacyAdvancePhysical') return 'FearHostility';
         return 'Hostility';
     }
+    if (auditInteraction === 'Y' && !isHarmed) return 'Bond';
+    if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
+    if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (bool(sem.explicitIntimidationOrCoercion)) return 'Fear';
     if (landed && (isDirect || isOpp || isHarmed)) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (auditInteraction === 'Y') return 'Bond';
     return 'No Change';
+}
+
+function resolveStakeChangeByOutcome(npc, sem, packet) {
+    const outcomeKey = String(packet.Outcome || 'no_roll');
+    const semanticValue = normalizeStakeChange(sem.stakeChangeByOutcome?.[outcomeKey]);
+    if (packet.STAKES !== 'Y') return { value: semanticValue };
+
+    const hardValue = hardStakeChangeFromTargetRole(npc, packet);
+    if (!hardValue || semanticValue === hardValue) return { value: semanticValue };
+
+    return {
+        value: hardValue,
+        referee: {
+            hardRule: 'RelationshipEngine.stakeChangeByOutcome: target category plus actual successful outcome determines impossible benefit/harm contradiction',
+            outcome: outcomeKey,
+            from: semanticValue,
+            to: hardValue,
+            relation: relationToUserAction(npc, packet),
+        },
+    };
+}
+
+function normalizeStakeChange(value) {
+    return ['benefit', 'harm', 'none'].includes(value) ? value : 'none';
+}
+
+function hardStakeChangeFromTargetRole(npc, packet) {
+    const relation = relationToUserAction(npc, packet);
+    const positiveOutcome = ['success', 'dominant_impact', 'solid_impact', 'light_impact'].includes(packet.Outcome);
+    const landed = landedBool(packet.LandedActions);
+    if (!positiveOutcome && !landed) return null;
+
+    if (relation.isBenefited && !relation.isDirect && !relation.isOpp) return 'benefit';
+    if (relation.isHarmed && !relation.isDirect && !relation.isOpp) return 'harm';
+    if ((relation.isDirect || relation.isOpp) && packet.classifyHostilePhysicalIntent === 'Y' && landed) return 'harm';
+    if (relation.isDirect
+        && ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)
+        && packet.IntimacyConsent !== 'Y'
+        && positiveOutcome) {
+        return 'harm';
+    }
+
+    return null;
 }
 
 function relationToUserAction(npc, packet) {
@@ -934,40 +1085,47 @@ function checkThreshold(disposition, flags) {
     return { LockActive, OverrideActive: Override !== 'NONE' ? 'Y' : 'N', Override };
 }
 
-function currentIntimacyGateAllows(state) {
-    if (state?.intimacyGate !== 'ALLOW') return state?.currentDisposition?.B >= 4;
-    if (state?.currentDisposition?.F >= 3 || state?.currentDisposition?.H >= 3) return false;
-    if (state?.intimacyGateSource === 'B4' && state?.currentDisposition?.B < 4) return false;
-    return true;
+function currentIntimacyGateAllows(state, disposition = state?.currentDisposition || null, threshold = null) {
+    if (disposition?.F >= 3 || disposition?.H >= 3) {
+        return { allows: false, source: 'LOCK', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
+    }
+
+    if (state?.intimacyGate === 'ALLOW') {
+        if (state?.intimacyGateSource === 'B4' && disposition?.B < 4) {
+            return { allows: false, source: 'B4_EXPIRED', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
+        }
+        return { allows: true, source: state?.intimacyGateSource || 'PRIOR_ALLOW', evidence: { priorIntimacyGate: state?.intimacyGate || 'ALLOW' } };
+    }
+
+    if (threshold?.OverrideActive === 'Y') {
+        return { allows: true, source: `OVERRIDE:${threshold.Override}`, evidence: threshold };
+    }
+
+    if (disposition?.B >= 4) {
+        return { allows: true, source: 'B4', evidence: { currentDisposition: formatDisposition(disposition) } };
+    }
+
+    return { allows: false, source: 'NONE', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
 }
 
-function getStakesOverrideEvidence(goal, intimacyTarget, targetState, semanticHasStakes, intimacyConsent) {
+function getStakesOverrideEvidence(goal, intimacyTarget, targetState, preliminaryDisposition, preliminaryThreshold, intimacyAllowance, semanticHasStakes, intimacyConsent) {
     if (!['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) return null;
 
-    const disposition = targetState?.currentDisposition || null;
+    const disposition = targetState?.currentDisposition || preliminaryDisposition || null;
     const evidence = {
         target: intimacyTarget || NONE,
         currentDisposition: disposition ? formatDisposition(disposition) : null,
         priorIntimacyGate: targetState?.intimacyGate || 'SKIP',
         priorIntimacyGateSource: targetState?.intimacyGateSource || 'NONE',
+        checkThreshold: preliminaryThreshold,
+        allowanceSource: intimacyAllowance?.source || 'NONE',
         intimacyConsent,
     };
 
-    if (semanticHasStakes === 'Y' && intimacyConsent === 'Y' && targetState?.intimacyGate === 'ALLOW') {
+    if (semanticHasStakes === 'Y' && intimacyConsent === 'Y' && intimacyAllowance?.source && intimacyAllowance.source !== 'NONE') {
         return {
             hasStakes: 'N',
-            rule: 'hard_override_allowed_intimacy_prior_ALLOW',
-            evidence: {
-                ...evidence,
-                hardRule: 'ResolutionEngine.hasStakes: allowed intimacy advance returns N',
-            },
-        };
-    }
-
-    if (semanticHasStakes === 'Y' && intimacyConsent === 'Y' && disposition?.B >= 4 && disposition.F < 3 && disposition.H < 3) {
-        return {
-            hasStakes: 'N',
-            rule: 'hard_override_allowed_intimacy_B4',
+            rule: `hard_override_allowed_intimacy_${intimacyAllowance.source}`,
             evidence: {
                 ...evidence,
                 hardRule: 'ResolutionEngine.hasStakes: allowed intimacy advance returns N',
@@ -989,12 +1147,20 @@ function getStakesOverrideEvidence(goal, intimacyTarget, targetState, semanticHa
     return null;
 }
 
-function resolveIntimacyGate(previousState, threshold, disposition, isAllowed) {
+function resolveIntimacyGate(previousState, threshold, disposition, isAllowed, goal = '') {
+    const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
+
     if (threshold.LockActive === 'Y') {
         return { IntimacyGate: 'DENY', IntimacyGateSource: 'LOCK' };
     }
 
     if (isAllowed === 'Y') {
+        if (threshold.OverrideActive === 'Y') {
+            return { IntimacyGate: 'ALLOW', IntimacyGateSource: `OVERRIDE:${threshold.Override}` };
+        }
+        if (disposition.B >= 4) {
+            return { IntimacyGate: 'ALLOW', IntimacyGateSource: 'B4' };
+        }
         return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
     }
 
@@ -1015,6 +1181,10 @@ function resolveIntimacyGate(previousState, threshold, disposition, isAllowed) {
 
     if (previousState.intimacyGate === 'DENY') {
         return { IntimacyGate: 'DENY', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_DENY' };
+    }
+
+    if (isIntimacyAdvance && isAllowed !== 'Y') {
+        return { IntimacyGate: 'DENY', IntimacyGateSource: 'CURRENT_DENIED' };
     }
 
     return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
@@ -1068,6 +1238,10 @@ function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'none', tar
     if (pressureMode === 'dominated') return 'FEAR';
     if (lock === 'HATRED') return 'ANGER';
     if (lock === 'TERROR') return 'FEAR';
+    if (target === 'Bond') return 'BOND';
+    if (target === 'Hostility') return 'ANGER';
+    if (target === 'Fear') return 'FEAR';
+    if (target === 'FearHostility') return fin.F > fin.H ? 'FEAR' : 'ANGER';
     if (['Combat', 'Social'].includes(kind) && fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
     if (kind === 'Social' && fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
     if (['Intimacy_Physical', 'Intimacy_Verbal'].includes(kind) && intimacyGate === 'DENY') return 'ANGER';
@@ -1097,6 +1271,7 @@ function classifyProactivityTier(handoff, chaosBand, counterPotential, lock, fin
 }
 
 function thresholdFromTier(tier) {
+    if (tier === 'FORCED') return 'AUTO';
     if (tier === 'HIGH') return 8;
     if (tier === 'MEDIUM') return 10;
     if (tier === 'LOW') return 13;
@@ -1190,7 +1365,7 @@ function normalizeTrackerEntry(value) {
 
 function normalizeIntimacyGateSource(value) {
     const text = String(value ?? 'NONE');
-    if (text === 'B4' || text === 'LOCK' || text === 'NONE' || text === 'PRIOR_ALLOW' || text === 'PRIOR_DENY') return text;
+    if (text === 'B4' || text === 'LOCK' || text === 'NONE' || text === 'PRIOR_ALLOW' || text === 'PRIOR_DENY' || text === 'CURRENT_DENIED') return text;
     if (text.startsWith('OVERRIDE:')) return text;
     return 'NONE';
 }
@@ -1219,7 +1394,7 @@ function normalizeTargets(value) {
     };
 }
 
-function sanitizeTargets(targets, classifier) {
+function sanitizeTargets(targets, classifier, options = {}) {
     const actionTargets = [];
     const oppNpc = [];
     const oppEnv = [...targets.OppTargets.ENV];
@@ -1231,7 +1406,10 @@ function sanitizeTargets(targets, classifier) {
         else oppEnv.push(name);
     }
     for (const name of targets.OppTargets.NPC) {
-        if (classifier.isLiving(name)) oppNpc.push(name);
+        if (classifier.isLiving(name)) {
+            if (options.hasStakes === 'N') actionTargets.push(name);
+            else oppNpc.push(name);
+        }
         else oppEnv.push(name);
     }
     for (const name of targets.BenefitedObservers) {
@@ -1371,6 +1549,19 @@ function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit) {
         oppStat = 'PHY';
     }
 
+    const socialRule = classifySocialMapStatsRule(semantic, targets);
+    if (socialRule) {
+        if (userStat !== 'CHA' || oppStat !== socialRule.oppStat) {
+            evidence.push({
+                hardRule: socialRule.hardRule,
+                from: { USER: userStat, OPP: oppStat },
+                to: { USER: 'CHA', OPP: socialRule.oppStat },
+            });
+        }
+        userStat = 'CHA';
+        oppStat = socialRule.oppStat;
+    }
+
     const hasLivingOpposition = toRealArray(targets.OppTargets?.NPC).length > 0;
     if (!hasLivingOpposition && oppStat !== 'ENV') {
         evidence.push({
@@ -1386,6 +1577,35 @@ function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit) {
     }
 
     return { userStat, oppStat };
+}
+
+function classifySocialMapStatsRule(semantic, targets) {
+    if (!firstReal(targets.OppTargets?.NPC)) return null;
+    if (bool(semantic.classifyHostilePhysicalIntent)) return null;
+    if (isBodyAffectingMagic(semantic, semantic.identifyGoal, targets)) return null;
+
+    const source = [
+        semantic.identifyGoal,
+        semantic.explicitMeans,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    const negative = /\b(bluff|lie|lying|deceiv|deception|trick|mislead|intimidat|coerc|threat|blackmail|manipulat|interrogat|humiliat|terroriz|menac|force(?:d)? submission|forced submission)\b/.test(source);
+    if (negative) {
+        return {
+            oppStat: 'MND',
+            hardRule: 'ResolutionEngine.mapStats: negative social opposition is USER=CHA and OPP=MND',
+        };
+    }
+
+    const positive = /\b(persuad|persuasion|negotiat|negotiation|diplomac|diplomacy|bargain|reassur|reconciliation|reconcile|good-faith|appeal|convince|reason with|mediate)\b/.test(source);
+    if (positive) {
+        return {
+            oppStat: 'CHA',
+            hardRule: 'ResolutionEngine.mapStats: positive social opposition is USER=CHA and OPP=CHA',
+        };
+    }
+
+    return null;
 }
 
 function isBodyAffectingMagic(semantic, goal, targets) {
@@ -1477,6 +1697,11 @@ function formatDisposition(disposition) {
 
 function compact(value) {
     return JSON.stringify(value);
+}
+
+function snippet(value, maxLength = 180) {
+    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+    return text.length <= maxLength ? text : `${text.slice(0, maxLength)}...`;
 }
 
 function stableStringify(value) {

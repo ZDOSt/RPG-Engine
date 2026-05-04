@@ -24,10 +24,13 @@ function ResolutionEngine(input) {
   identifyTargets(input, goal, context):
     policy: LOCKED, EXPLICIT-ONLY
     ActionTargets = LIVING entities targeted by {{user}}'s actions
-    OppTargets.NPC = LIVING entities who are actively or passively opposing, contesting, or resisting {{user}}'s actions
+    OppTargets.NPC = LIVING entities whose stakes are at risk and who actively or passively oppose, contest, or resist {{user}}'s actions
     OppTargets.ENV = NON-LIVING environmental or terrain feature, hazard, object, or other obstacle directly obstructing {{user}}'s actions
     BenefitedObservers = LIVING entities present in scene not in ActionTargets or OppTargets.NPC whose stakes improve as a result of {{user}}'s actions, as per DEF.STAKES
     HarmedObservers = LIVING entities present in scene not in ActionTargets or OppTargets.NPC whose stakes worsen as a result of {{user}}'s actions, as per DEF.STAKES
+    rule: if hasStakes=N, OppTargets.NPC must be [(none)] unless a hard intimacy gate rule forces stakes
+    rule: a direct ActionTarget can also be OppTargets.NPC only when that target's stakes are meaningfully contested or resisted
+    rule: ActionTargets, OppTargets.NPC, BenefitedObservers, and HarmedObservers are mutually exclusive observer categories except that direct ActionTargets may also be OppTargets.NPC when they are the resisting/opposing party
     rule: if any target list is not present, return [(none)]
     return {ActionTargets, OppTargets, BenefitedObservers, HarmedObservers}
 
@@ -35,6 +38,7 @@ function ResolutionEngine(input) {
     policy: LOCKED, EXPLICIT-ONLY
     rule: if goal=IntimacyAdvancePhysical or goal=IntimacyAdvanceVerbal, read exact target NPC entry in latest sceneTracker
     rule: return Y if B>=4 under currentDisposition OR IntimacyGate=ALLOW
+    rule: return Y if current explicit RelationshipEngine checkThreshold would produce OverrideActive=Y and no F/H lock blocks it
     else -> N
 
   hasStakes(input, goal, targets, IntimacyConsent, context):
@@ -56,10 +60,11 @@ function ResolutionEngine(input) {
     rule: if the final goal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling action.
     rule: if {{user}} uses deliberate mental/supernatural exertion to affect a living target's bodily functions or physical state (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding), USER=MND and OPP=PHY
     rule: if magic or a substance creates a non-living environmental hazard/obstacle instead of directly contesting a living target, put the hazard/obstacle in OppTargets.ENV and use OPP=ENV unless a living target explicitly resists the effect
+    rule: if explicit means is positive social interaction such as persuasion, negotiation, diplomacy, bargaining, reconciliation, reassurance, or good-faith appeal against a living opposing target, USER=CHA and OPP=CHA
+    rule: if explicit means is negative social interaction such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target, USER=CHA and OPP=MND
     rule: determine {{user}} stat by applying DEF.STATS to the explicit action-attempt that determines whether {{user}}'s goal succeeds or fails.
     rule: use final goal only if no distinct explicit means are present
-    rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that entity's resistance to {{user}}'s explicit means or goal
-    primaryOppTarget = first identifyTargets.OppTargets.NPC
+    rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that first OppTargets.NPC entity's resistance to {{user}}'s explicit means or goal
     rule: if OppTargets.NPC=[(none)] and OppTargets.ENV contains an obstacle, OPP=ENV
     return {USER, OPP}
 
@@ -104,8 +109,8 @@ function ResolutionEngine(input) {
 
   resolveOutcome(input, goal, actions, stats, userCore, targetCore):
     policy: LOCKED
-    comment: LandedActions and CounterPotential only apply to explicit hostile PHY actions meant to hurt or injure.
-    comment: For all other actions, resolution is binary: Success or Failure.
+    comment: LandedActions and CounterPotential only apply to explicit hostile PHY actions with classifyHostilePhysicalIntent=true.
+    comment: For all other actions, resolution is Success, Stalemate/struggle, or Failure.
     comment: CounterPotential = how open {{user}} is to a counter after failing a hostile PHY action.
     atkDie = 1d20
     atkTot = atkDie + userCore[stats.USER]
@@ -116,7 +121,7 @@ function ResolutionEngine(input) {
       defDie = 1d20
       defTot = defDie + targetCore[stats.OPP]
     margin = atkTot - defTot
-    if stats.USER=PHY and input shows explicit hostile/combat intent to hurt or injure:
+    if stats.USER=PHY and classifyHostilePhysicalIntent=true:
       tierTable:
         margin >= 8 -> OutcomeTier:Critical_Success LandedActions:3 Outcome:dominant_impact CounterPotential:none
         margin >= 5 -> OutcomeTier:Moderate_Success LandedActions:2 Outcome:solid_impact CounterPotential:none
@@ -134,28 +139,22 @@ function ResolutionEngine(input) {
       return {OutcomeTier, LandedActions, Outcome, CounterPotential}
 
   execution:
-      if npc not in resolutionPacket.NPCInScene -> return uninitialized handoff
-      state = getCurrentRelationalState(npc)
-      encounterReset = newEncounterExplicit()
-      if state.currentDisposition=null -> currentDisposition = initPreset()
-      else -> currentDisposition = state.currentDisposition
-      currentRapport = state.currentRapport
-      rapportEncounterLock = encounterReset=Y ? N : state.rapportEncounterLock
-      isAllowed = resolutionPacket.IntimacyConsent
-      audit = auditInteraction(npc, resolutionPacket)
-      target = routeDispositionTarget(npc, resolutionPacket, audit, isAllowed)
-      rapport = updateRapport(currentRapport, target, rapportEncounterLock)
-      deltas = deriveDirection(target, audit, currentDisposition, rapport.currentRapport, resolutionPacket)
-      currentDisposition = updateDisposition(currentDisposition, deltas)
-      if deltas.rapportReset=Y -> currentRapport = 0
-      else -> currentRapport = rapport.currentRapport
-      save currentRapport and rapportEncounterLock to sceneTracker
-      disposition = classifyDisposition(currentDisposition)
-      threshold = checkThreshold(currentDisposition)
-      IntimacyGate = threshold.LockActive=Y ? DENY : isAllowed=Y ? ALLOW : threshold.OverrideActive=Y ? ALLOW : currentDisposition.B>=4 ?    ALLOW : SKIP
-      save intimacy gate when ALLOW or DENY
-
-    return {GOAL:goal, actions:actions, IntimacyConsent:IntimacyConsent, STAKES:Y, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
+    goal = identifyGoal(input)
+    targets = identifyTargets(input, goal, context)
+    IntimacyConsent = checkIntimacyGate(goal, targets, context)
+    STAKES = hasStakes(input, goal, targets, IntimacyConsent, context)
+    actions = actionCount(input, goal)
+    if STAKES=N:
+      outcome = {OutcomeTier:NONE, LandedActions:(none), Outcome:no_roll, CounterPotential:none}
+    else:
+      stats = mapStats(input, goal, targets, context)
+      userCore = getUserCoreStats()
+      if stats.OPP!=ENV:
+        targetCore = getCurrentCoreStats(first OppTargets.NPC)
+        if missing -> targetCore = genStats(first OppTargets.NPC, context)
+      outcome = resolveOutcome(input, goal, actions, stats, userCore, targetCore)
+    NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, and relationshipEngine entries
+    return {GOAL:goal, actions:actions, IntimacyConsent:IntimacyConsent, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
 }
 ---------------------------
 function RelationshipEngine(npc, resolutionPacket) {
@@ -179,7 +178,11 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: currentRapport = valid 0-5 ? exact value : 0
     rule: rapportEncounterLock = valid Y/N ? exact value : N
     rule: intimacyGate = valid ALLOW/DENY ? exact value : SKIP
-    return {currentDisposition, currentRapport, rapportEncounterLock, intimacyGate}
+    rule: hostilePressure = valid number ? exact value : 0
+    rule: hostileLandedPressure = valid number ? exact value : 0
+    rule: dominantLock = valid FEAR/HOSTILITY/None ? exact value : None
+    rule: pressureMode = valid none/cornered/dominated ? exact value : none
+    return {currentDisposition, currentRapport, rapportEncounterLock, intimacyGate, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
 
   initPreset():
     policy: EO, FYW
@@ -198,6 +201,14 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: flirting, compliments, tone, or conversation alone do NOT count
     if scene facts show such benefit -> Y
     else -> N
+
+  stakeChangeByOutcome(npc, resolutionPacket):
+    policy: EO, FYW
+    rule: for each possible resolution outcome, return benefit if that outcome materially improves this NPC's stakes as per DEF.STAKES
+    rule: return harm if that outcome materially worsens this NPC's stakes as per DEF.STAKES
+    rule: return none if that outcome does not materially change this NPC's stakes
+    rule: NPC_STAKES=Y when the actual outcome's stakeChangeByOutcome is benefit or harm
+    rule: NPC_STAKES=N when the actual outcome's stakeChangeByOutcome is none
 
   routeDispositionTarget(npc, resolutionPacket, audit, isAllowed):
     policy: EO, FYW
@@ -223,6 +234,76 @@ function RelationshipEngine(npc, resolutionPacket) {
       if out in [dominant_impact, solid_impact] -> FearHostility
       else -> Hostility
     if benefit -> Bond
+    else -> No Change
+
+  applyHostilePhysicalPressure(npc, resolutionPacket, state):
+    policy: LOCKED, FYW
+    rule: use only when resolutionPacket.classifyHostilePhysicalIntent=Y and resolutionPacket.STAKES=Y
+    isDirect = resolutionPacket.ActionTargets.includes(npc.name)
+    isOpp = resolutionPacket.OppTargets.NPC.includes(npc.name)
+    isHarmed = resolutionPacket.HarmedObservers.includes(npc.name)
+    if !isDirect && !isOpp && !isHarmed -> none
+    landed = resolutionPacket.LandedActions > 0
+    severity = hostilePressureSeverity(resolutionPacket.Outcome)
+    hostilePressure = clamp(state.hostilePressure + max(1,severity), 0, 20)
+    hostileLandedPressure = landed ? clamp(state.hostileLandedPressure + max(1,severity), 0, 20) : state.hostileLandedPressure
+    pressureState = {disposition:state.currentDisposition, dominantLock:state.dominantLock, pressureMode:state.pressureMode}
+    if !landed:
+      if hostilePressure>=2 -> deltas = addDispositionPressure(pressureState, 1, failed)
+      else -> deltas = {b:0,f:0,h:0}
+    else if resolutionPacket.Outcome=light_impact -> deltas = addDispositionPressure(pressureState, 1, landed)
+    else if resolutionPacket.Outcome in [solid_impact, dominant_impact] -> deltas = addDispositionPressure(pressureState, severity, dominance)
+    target = targetFromDeltas(deltas)
+    dominatedFearBreak = pressureState.pressureMode=dominated ? Y : N
+    return {target, deltas, hostilePressure, hostileLandedPressure, dominantLock:pressureState.dominantLock, pressureMode:pressureState.pressureMode, dominatedFearBreak}
+
+  hostilePressureSeverity(outcome):
+    if outcome in [dominant_impact, solid_impact] -> 2
+    else -> 1
+
+  addDispositionPressure(state, amount, mode):
+    disposition = state.disposition
+    if mode=failed:
+      if disposition.H > disposition.F -> deltas = addHostilityPressure(state, amount)
+      else -> deltas = addFearPressure(state, amount)
+    else if mode=landed:
+      if disposition.F > disposition.H -> deltas = addFearPressure(state, amount)
+      else -> deltas = addHostilityPressure(state, amount)
+    else if state.dominantLock=HOSTILITY || disposition.H>=4:
+      state.pressureMode = dominated
+      deltas = addFearPressure(state, amount, noCorneredOverflow=Y)
+    else if disposition.F > disposition.H -> deltas = addFearPressure(state, amount)
+    else if disposition.H > disposition.F -> deltas = addHostilityPressure(state, amount)
+    else -> deltas = {b:-1,f:1,h:1}
+    projected = updateDisposition(disposition, deltas)
+    updatePressureLockState(state, disposition, projected)
+    return deltas
+
+  addFearPressure(state, amount, noCorneredOverflow=N):
+    room = max(0, 4 - state.disposition.F)
+    f = min(amount, room)
+    overflow = max(0, amount - f)
+    h = noCorneredOverflow=Y ? 0 : overflow
+    if overflow > 0 && noCorneredOverflow=N:
+      state.pressureMode = cornered
+      if state.dominantLock=None -> state.dominantLock = FEAR
+    return {b:(f>0 || h>0 ? -1 : 0), f:f, h:h}
+
+  addHostilityPressure(state, amount):
+    return {b:-1, f:0, h:amount}
+
+  updatePressureLockState(state, before, after):
+    if state.dominantLock!=None -> return
+    fearHit = before.F<4 && after.F>=4
+    hostilityHit = before.H<4 && after.H>=4
+    if fearHit && !hostilityHit -> state.dominantLock = FEAR
+    else if hostilityHit && !fearHit -> state.dominantLock = HOSTILITY
+    else if fearHit && hostilityHit -> state.dominantLock = state.pressureMode=cornered ? FEAR : HOSTILITY
+
+  targetFromDeltas(deltas):
+    if deltas.f>0 && deltas.h>0 -> FearHostility
+    if deltas.f>0 -> Fear
+    if deltas.h>0 -> Hostility
     else -> No Change
 
   newEncounterExplicit():
@@ -295,12 +376,18 @@ function RelationshipEngine(npc, resolutionPacket) {
   execution:
     if npc not in resolutionPacket.NPCInScene -> return uninitialized handoff
     read state, initialize disposition if missing, and update encounter lock
-    audit interaction, route disposition target, and update rapport
-    derive deltas, update disposition, and apply rapport reset if present
-    save currentRapport and rapportEncounterLock to sceneTracker
+    read stakeChangeByOutcome for actual resolution outcome, set NPC_STAKES from benefit/harm vs none, audit benefit interaction, route disposition target
+    hostilePressureResult = applyHostilePhysicalPressure(npc, resolutionPacket, state)
+    if hostilePressureResult exists -> target = hostilePressureResult.target else target = routeDispositionTarget
+    update rapport from final target
+    if hostilePressureResult exists -> deltas = hostilePressureResult.deltas else deltas = deriveDirection(target, audit, currentDisposition, rapport.currentRapport, resolutionPacket)
+    update disposition and apply rapport reset if present
+    if hostilePressureResult.dominatedFearBreak=Y and currentDisposition.F>=4 and currentDisposition.H>=3 -> lower currentDisposition.H by 1
+    save currentRapport, rapportEncounterLock, hostilePressure, hostileLandedPressure, dominantLock, and pressureMode to sceneTracker
     classify disposition, resolve threshold/override, and determine intimacy gate
     save intimacy gate when ALLOW or DENY
-    return NPC handoff
+    RelationToUserAction = {isDirect, isOpp, isBenefited, isHarmed}
+    return NPC handoff including HostilePressure, HostileLandedPressure, DominantLock, PressureMode, and RelationToUserAction
 }
 -----------------
 function CHAOS_INTERRUPT(resolutionPacket, npcHandoffList, sceneSummary, diceList) {
@@ -388,15 +475,24 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if resolutionPacket.STAKES=N -> Normal_Interaction
     if g=IntimacyAdvancePhysical -> Intimacy_Physical
     if g=IntimacyAdvanceVerbal -> Intimacy_Verbal
+    if resolutionPacket.classifyHostilePhysicalIntent=Y -> Combat
     if resolutionPacket.LandedActions > 0 -> Combat
     if resolutionPacket.ActionTargets contains >=1 living entity && resolutionPacket.LandedActions=(none) -> Social
     if resolutionPacket.OppTargets.ENV != [(none)] -> Skill
     else -> Normal_Interaction
 
-  deriveImpulse(kind, lock, fin, intimacyGate):
+  deriveImpulse(kind, lock, fin, intimacyGate, pressureMode, target):
     policy: FYW
+    if pressureMode=cornered -> ANGER
+    if pressureMode=dominated -> FEAR
     if lock=HATRED -> ANGER
     if lock=TERROR -> FEAR
+    if target=Bond -> BOND
+    if target=Hostility -> ANGER
+    if target=Fear -> FEAR
+    if target=FearHostility:
+      if fin.F > fin.H -> FEAR
+      else -> ANGER
     if kind in [Combat, Social] && fin.H>=fin.F && fin.H>=fin.B -> ANGER
     if kind=Social && fin.F>=fin.H && fin.F>=fin.B -> FEAR
     if kind in [Intimacy_Physical, Intimacy_Verbal] && intimacyGate=DENY -> ANGER
@@ -425,6 +521,15 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if chaosBand!=None -> LOW
     else -> DORMANT
 
+  proactivityRefereeGuard(handoff, resolutionPacket):
+    policy: LOCKED, FYW
+    relation = handoff.RelationToUserAction
+    if relation.isDirect || relation.isOpp || relation.isHarmed -> none
+    if relation.isBenefited && handoff.Target=Bond -> DORMANT
+    if handoff.NPC_STAKES=Y && handoff.Target=Bond && handoff.Landed=Y -> DORMANT
+    if handoff.Target=Bond && handoff.PressureMode=none && handoff.Lock not in [FREEZE,TERROR,HATRED] && resolutionPacket.classifyHostilePhysicalIntent!=Y && resolutionPacket.GOAL not in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal] -> DORMANT
+    else -> none
+
   thresholdFromTier(tier):
     if tier=FORCED -> AUTO
     if tier=HIGH -> 8
@@ -432,8 +537,14 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if tier=LOW -> 13
     else -> 16
 
-  selectIntent(impulse, kind, fin, intimacyGate, override):
+  selectIntent(impulse, kind, fin, intimacyGate, override, pressureMode):
     policy: FYW
+    if pressureMode=cornered:
+      if fin.H>=4 -> ESCALATE_VIOLENCE
+      else -> BOUNDARY_PHYSICAL
+    if pressureMode=dominated:
+      if fin.F>=4 -> CALL_HELP_OR_AUTHORITY
+      else -> WITHDRAW_OR_BOUNDARY
     if impulse=ANGER:
       if kind=Intimacy_Physical && intimacyGate=DENY -> BOUNDARY_PHYSICAL
       if kind=Combat || fin.H>=4 -> ESCALATE_VIOLENCE
@@ -459,10 +570,77 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     FOR EACH NPC handoff:
       fin = parseFinalState(handoff.FinalState)
       lock = derive or load lock
-      impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate)
-      tier = classifyProactivityTier(handoff, chaosBand, counterPotential)
-      roll or force proactivity, then selectIntent and store candidate if passed
+      impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode, handoff.Target)
+      guard = proactivityRefereeGuard(handoff, resolutionPacket)
+      if guard exists -> tier = DORMANT else tier = classifyProactivityTier(handoff, chaosBand, counterPotential)
+      provisionalResult = {NPC, Proactive:N, Intent:NONE, Impulse:NONE, TargetsUser:N, ProactivityTier:tier}
+      if tier=FORCED:
+        intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode)
+        candidate = {NPC,die:20,tier:FORCED,intent:intent,impulse:impulse,TargetsUser:targetsUserFromIntent(intent),Threshold:AUTO,passes:Y}
+      else:
+        roll proactivityDie, thresholdFromTier, passes
+      if passes=Y:
+        intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode)
+        store candidate
+      if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, TargetsUser:N
     sort candidates by die descending
     promote up to cap candidates to proactive results
     return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|NONE],Impulse:[ANGER|FEAR|BOND],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?}...}
+}
+----------------
+function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSnapshot, trackerUpdate, diceBudget) {
+  const DEF = Object.freeze({
+    EO:
+'EXPLICIT-ONLY. Use proactivityResults, resolutionPacket, trackerSnapshot, trackerUpdate, and diceBudget. Uncertain=N.',
+    UNIVERSAL:
+'Resolve immediate NPC attack/counter outcomes only after NPCProactivityEngine. Never narrate {{user}} voluntary follow-up actions here.'
+  });
+
+  counterBonusFromPotential(counterPotential):
+    if counterPotential=light -> 2
+    if counterPotential=medium -> 4
+    if counterPotential=severe -> 6
+    else -> 0
+
+  determineAttackType(resolutionPacket):
+    if resolutionPacket.OutcomeTier=Critical_Success -> None
+    if resolutionPacket.CounterPotential in [light,medium,severe] -> CounterAttack
+    if resolutionPacket.classifyHostilePhysicalIntent=Y -> Retaliation
+    else -> None
+
+  immediateCounterTarget(resolutionPacket):
+    if resolutionPacket.CounterPotential not in [light,medium,severe] -> none
+    if first resolutionPacket.OppTargets.NPC exists -> first resolutionPacket.OppTargets.NPC
+    else -> first resolutionPacket.ActionTargets
+
+  isImmediateAttackIntent(intent):
+    if intent in [ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, THREAT_OR_POSTURE] -> Y
+    else -> N
+
+  aggressionReactionOutcome(margin):
+    if margin >= 5 -> npc_overpowers
+    if margin >= 1 -> npc_succeeds
+    if margin = 0 -> stalemate
+    if margin >= -3 -> user_resists
+    else -> user_dominates
+
+  execution:
+    counterPotential = resolutionPacket.CounterPotential
+    counterBonus = counterBonusFromPotential(counterPotential)
+    attackType = determineAttackType(resolutionPacket)
+    if attackType=None -> return {}
+    aggressive = NPCs with Proactive=Y, TargetsUser=Y, and isImmediateAttackIntent(Intent)=Y
+    if attackType=CounterAttack and resolutionPacket.OutcomeTier!=Critical_Success:
+      counterTarget = immediateCounterTarget(resolutionPacket)
+      if counterTarget exists and not already aggressive -> force counterTarget as {Proactive:Y,Intent:BOUNDARY_PHYSICAL,Impulse:ANGER,TargetsUser:Y,ProactivityTier:FORCED,ProactivityDie:20,Threshold:AUTO}
+    FOR EACH aggressive NPC:
+      npcCore = getCurrentCoreStats(NPC) from trackerUpdate or trackerSnapshot
+      userCore = getUserCoreStats()
+      npcDie = 1d20
+      userDie = 1d20
+      npcTotal = npcDie + npcCore.PHY + counterBonus
+      userTotal = userDie + userCore.PHY
+      margin = npcTotal - userTotal
+      ReactionOutcome = aggressionReactionOutcome(margin)
+      return AGGRESSION_RESULT {AttackType, AttackIntent, CounterPotential, CounterBonus, ReactionOutcome, Margin}
 }`;

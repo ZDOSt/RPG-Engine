@@ -1,4 +1,4 @@
-export function formatPreFlightPending() {
+﻿export function formatPreFlightPending() {
     return String.raw`<pre_flight>
 [STRUCTURED_PREFLIGHT_RUNTIME v0.3 - AUDIT ONLY]
 DO NOT EXECUTE THIS BLOCK.
@@ -92,7 +92,6 @@ function buildReadableSemanticDebug(ledger) {
         'hasStakes=' + String(Boolean(resolution.hasStakes)),
         'actionCount=' + list(resolution.actionCount),
         'mapStats=' + inline(resolution.mapStats ?? {}),
-        'primaryOppTarget=' + valueOrNone(resolution.primaryOppTarget),
         'classifyHostilePhysicalIntent=' + String(Boolean(resolution.classifyHostilePhysicalIntent)),
         'genStats=' + coreLine(resolution.genStats),
         '',
@@ -178,6 +177,8 @@ export function formatNarratorPromptContext(report) {
         '[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.6 - MINIMAL AUTHORITATIVE]',
         'Use this mechanics summary. Do not reroll or expose mechanics unless OOC.',
         'Write final narration immediately. No analysis. Final message must be non-empty.',
+        'The GUIDE is mandatory and authoritative; follow it exactly when interpreting success, denial, proactivity, and aggression.',
+        'For intimacy, IntimacyGate=DENY means no cooperation, reciprocation, or compliance even when the roll succeeds.',
         'Never narrate voluntary {{user}} actions, counterattacks, thoughts, feelings, decisions, or dialogue beyond the explicit user input.',
         'Involuntary reflexive physical reactions caused directly by computed external impact/restraint are allowed; keep them immediate/passive and do not turn them into choices, tactics, counters, or dialogue.',
         'Length target: 80-140 words unless the scene requires less.',
@@ -283,19 +284,41 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const primaryNpc = handoff.npcHandoffs?.[0];
     const npcName = primaryNpc?.NPC || list(resolution.ActionTargets) || 'the NPC';
     const state = primaryNpc ? `${primaryNpc.Behavior}/${primaryNpc.Target}` : npcText;
+    const gate = strongestIntimacyGate(handoff, resolution);
+    const isIntimacyAdvance = goal === 'IntimacyAdvancePhysical' || goal === 'IntimacyAdvanceVerbal';
+    const intimacyDenied = isIntimacyAdvance
+        && (resolution.IntimacyConsent !== 'Y' || gate === 'DENY');
+    const intimacyAllowed = isIntimacyAdvance
+        && !intimacyDenied
+        && (resolution.IntimacyConsent === 'Y' || resolution.STAKES === 'N' || gate === 'ALLOW');
+    const chaosNote = chaosText !== 'none' ? ' Include the listed chaos beat without changing that gate result.' : '';
+    const aggressionNote = aggressionText !== 'none'
+        ? ' Then narrate the listed NPC attack result exactly and stop at the aggression guide boundary.'
+        : '';
+    const proactiveNote = aggressionText === 'none' && proactiveText !== 'none'
+        ? ' Then let the listed proactive NPC action happen only as denial, boundary, refusal, retreat, resistance, or escalation consistent with the gate.'
+        : '';
+
+    if (intimacyDenied) {
+        if (goal === 'IntimacyAdvancePhysical') {
+            return `The user action is ${userAction}; resolve it as ${outcome}. IntimacyGate=DENY: any successful physical attempt may land or create contact/positioning, but ${npcName} does not cooperate, reciprocate, or become willing; narrate rejection, recoil, pushing away, rebuke, resistance, flight, or escalation according to ${state}.${aggressionNote}${proactiveNote}${chaosNote}`;
+        }
+        return `The user action is ${userAction}; resolve it as ${outcome}. IntimacyGate=DENY: any successful verbal attempt may affect ${npcName}, but the request is refused; narrate a boundary, rebuke, annoyance, anger, fear, or refusal according to ${state}, never compliance with the intimacy request.${aggressionNote}${proactiveNote}${chaosNote}`;
+    }
 
     if (aggressionText !== 'none') {
         return `The user action is ${userAction}; resolve it as ${outcome}, then narrate the listed NPC attack result. Stop at the aggression guide boundary and do not invent any user follow-up.`;
     }
 
     if (proactiveText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}. Then let the listed proactive NPC action happen naturally without treating triggersAggressionRoll:N as “not directed at the user.”`;
+        return `The user action is ${userAction}; resolve it as ${outcome}. Then let the listed proactive NPC action happen naturally without treating triggersAggressionRoll:N as "not directed at the user."`;
     }
 
-    if (goal === 'IntimacyAdvancePhysical' || goal === 'IntimacyAdvanceVerbal') {
-        const allowed = resolution.IntimacyConsent === 'Y' || resolution.STAKES === 'N';
-        const chaosNote = chaosText !== 'none' ? ' while including the listed chaos beat without changing that gate result' : '';
-        return `The user action is ${userAction}; resolve it as ${outcome}. ${allowed ? `${npcName} may receive it according to the current gate and relationship state${chaosNote}.` : `${npcName} refuses or sets a boundary because the intimacy gate is not allowing it${chaosNote}.`}`;
+    if (isIntimacyAdvance) {
+        const gateText = intimacyAllowed
+            ? `${npcName} may receive it according to the current gate and relationship state`
+            : `${npcName} refuses or sets a boundary because the intimacy gate is not allowing it`;
+        return `The user action is ${userAction}; resolve it as ${outcome}. ${gateText}.${chaosNote}`;
     }
 
     if (resolution.STAKES === 'N') {
@@ -308,6 +331,24 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     return `The user action is ${userAction}; resolve it as ${outcome}. Narrate the NPC response according to ${state} and the listed targets.`;
+}
+
+function strongestIntimacyGate(handoff, resolution) {
+    const targets = toComparableSet(resolution?.ActionTargets);
+    const targetHandoffs = (handoff?.npcHandoffs ?? []).filter(h => targets.has(String(h?.NPC ?? '').toLowerCase()));
+    const relevantHandoffs = targetHandoffs.length ? targetHandoffs : (handoff?.npcHandoffs ?? []);
+    const gates = relevantHandoffs.map(h => h?.IntimacyGate);
+    if (gates.includes('DENY')) return 'DENY';
+    if (gates.includes('ALLOW')) return 'ALLOW';
+    return gates.find(Boolean) || 'SKIP';
+}
+
+function toComparableSet(value) {
+    const items = Array.isArray(value) ? value : [value];
+    return new Set(items
+        .map(item => String(item ?? '').trim())
+        .filter(item => !isNoneText(item))
+        .map(item => item.toLowerCase()));
 }
 
 function intimacyConsentSummary(resolution) {
