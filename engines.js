@@ -7,7 +7,7 @@ function ResolutionEngine(input) {
     STATS:
 'PHY = challenges that require physical effort, strength, agility, speed, coordination, endurance, stealth movement, combat skill, or bodily execution under risk. MND = challenges that require thought, memory, perception, focus, reasoning, knowledge, awareness, will, or deliberate mental/supernatural exertion. CHA = social challenges that require persuasion, deception, intimidation, negotiation, emotional influence, personal presence, or interpersonal skill. Core stat scale is 1 to 10.',
     STAKES:
-'Stakes are meaningful possible consequences tied to success or failure. Stakes include physical risk, harm, danger, detection, material gain or loss, social status shift, loss of autonomy, meaningful obstacle resolution or failure, or explicit goal advancement or failure for {{user}} or a specific living entity. If success or failure would not materially change the outcome, no roll is needed.'
+'Stakes are meaningful possible consequences tied to success or failure. Stakes include physical risk, harm, danger, detection, material gain or loss, significant social status/authority/trust shift, loss of autonomy or physical freedom, hostile restraint/immobilization/confinement, meaningful obstacle resolution or failure, or explicit goal advancement or failure for {{user}} or a specific living entity. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. If success or failure would not materially change the outcome, no roll is needed.'
   });
 
   identifyGoal(input):
@@ -15,6 +15,11 @@ function ResolutionEngine(input) {
     rule: return a short, plain description of the final goal/intent of {{user}}'s actions in the last input
     rule: if the goal is an explicit direct intimate advance toward a specific NPC, return IntimacyAdvancePhysical for physical contact or IntimacyAdvanceVerbal for verbal proposition
     rule: flirting, compliments, teasing, affectionate tone, or non-explicit romantic/social behavior do NOT count as intimacy advances
+
+  classifyHostilePhysicalIntent(input, goal, targets):
+    policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
+    rule: return true only if {{user}} explicitly uses physical force against a living entity as attack, assault, shove, grab, restraint, pin, immobilization, forced movement, physical domination, blocking escape, preventing casting/action, or other non-consensual bodily control
+    rule: return false for consensual/helpful touch, healing, examination, rescue, ordinary movement, environmental force, social pressure, or purely mental/social/magical actions with no explicit physical force by {{user}}'s body
 
   identifyTargets(input, goal, context):
     policy: LOCKED, EXPLICIT-ONLY
@@ -49,6 +54,8 @@ function ResolutionEngine(input) {
   mapStats(input, goal, targets, context):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
     rule: if the final goal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling action.
+    rule: if {{user}} uses deliberate mental/supernatural exertion to affect a living target's bodily functions or physical state (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding), USER=MND and OPP=PHY
+    rule: if magic or a substance creates a non-living environmental hazard/obstacle instead of directly contesting a living target, put the hazard/obstacle in OppTargets.ENV and use OPP=ENV unless a living target explicitly resists the effect
     rule: determine {{user}} stat by applying DEF.STATS to the explicit action-attempt that determines whether {{user}}'s goal succeeds or fails.
     rule: use final goal only if no distinct explicit means are present
     rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that entity's resistance to {{user}}'s explicit means or goal

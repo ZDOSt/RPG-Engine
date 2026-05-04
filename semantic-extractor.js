@@ -140,7 +140,7 @@ const SEMANTIC_LEDGER_TEMPLATE = `{
     "actionCount": ["a1"],
     "mapStats": {"USER": "PHY|MND|CHA", "OPP": "PHY|MND|CHA|ENV"},
     "primaryOppTarget": "name or (none)",
-    "hostilePhysicalIntent": false,
+    "classifyHostilePhysicalIntent": false,
     "genStats": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
   },
   "relationshipEngine": [
@@ -204,7 +204,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             role: 'system',
             content:
                 'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
-                'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyTargets, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine section using the plain function/key names shown in the template. ' +
+                'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, classifyHostilePhysicalIntent, identifyTargets, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine section using the plain function/key names shown in the template. ' +
                 'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your JSON. ' +
                 'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold overrideFlags, genStats. Copy those outputs into the RelationshipEngine entries using the plain function/key names shown in the template. ' +
                 'Then fill chaosSemantic, nameSemantic, and proactivitySemantic from their engine/contextual requirements. ' +
@@ -215,7 +215,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             role: 'user',
             content:
                 `Recent chat context, newest last:\n${chatContext}\n\n` +
-                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
+                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. classifyHostilePhysicalIntent is true for explicit non-consensual physical force against a living entity, including attacks, shoves, grabs, pins, restraint, immobilization, forced movement, blocking escape, or preventing casting/action; it is false for helpful/consensual touch, purely social pressure, ENV force, or purely mental/supernatural effects. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects/hazards/effects go only in OppTargets.ENV. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. A protected/rescued NPC is a BenefitedObserver unless {{user}} directly acts on that NPC. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, significant status/authority/trust, autonomy/physical freedom, hostile restraint/immobilization/confinement, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. For mapStats, body-affecting magic against a living target (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding) is USER=MND and OPP=PHY; non-living hazards/effects remain OppTargets.ENV and OPP=ENV unless a living target explicitly resists. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
                 STRICT_NAME_ANCHORED_FIELD_CONTRACT +
                 '\n\nMANDATORY OUTPUT CONTRACT: Return one complete JSON object with this exact shape and field names. Do not output anything before or after the JSON object.\n' +
                 SEMANTIC_LEDGER_TEMPLATE,
@@ -397,6 +397,7 @@ function validateRawLedgerContract(ledger, raw) {
     if (!Array.isArray(ledger?.resolutionEngine?.actionCount)) missing.push('resolutionEngine.actionCount');
     if (!ledger?.resolutionEngine?.mapStats?.USER) missing.push('resolutionEngine.mapStats.USER');
     if (!ledger?.resolutionEngine?.mapStats?.OPP) missing.push('resolutionEngine.mapStats.OPP');
+    if (typeof ledger?.resolutionEngine?.classifyHostilePhysicalIntent !== 'boolean') missing.push('resolutionEngine.classifyHostilePhysicalIntent:boolean');
     if (!Array.isArray(ledger?.relationshipEngine)) missing.push('relationshipEngine');
     if (!ledger?.chaosSemantic) missing.push('chaosSemantic');
     if (!ledger?.nameSemantic) missing.push('nameSemantic');
@@ -429,7 +430,11 @@ function normalizeLedger(ledger) {
     ledger.resolutionEngine.actionCount = normalizeActionMarkers(ledger.resolutionEngine.actionCount);
     ledger.resolutionEngine.mapStats = ledger.resolutionEngine.mapStats || {};
     ledger.resolutionEngine.hasStakes = toBoolean(ledger.resolutionEngine.hasStakes, false);
-    ledger.resolutionEngine.hostilePhysicalIntent = toBoolean(ledger.resolutionEngine.hostilePhysicalIntent, false);
+    ledger.resolutionEngine.classifyHostilePhysicalIntent = toBoolean(
+        ledger.resolutionEngine.classifyHostilePhysicalIntent ?? ledger.resolutionEngine.hostilePhysicalIntent,
+        false,
+    );
+    delete ledger.resolutionEngine.hostilePhysicalIntent;
     ledger.resolutionEngine.genStats = normalizeCore(ledger.resolutionEngine.genStats);
     ledger.relationshipEngine = Array.isArray(ledger.relationshipEngine) ? ledger.relationshipEngine : [];
     ledger.relationshipEngine.forEach(item => {
@@ -476,6 +481,7 @@ function validateNormalizedLedger(ledger, raw) {
     if (!Array.isArray(ledger.resolutionEngine?.actionCount)) missing.push('resolutionEngine.actionCount');
     if (!ledger.resolutionEngine?.mapStats?.USER) missing.push('resolutionEngine.mapStats.USER');
     if (!ledger.resolutionEngine?.mapStats?.OPP) missing.push('resolutionEngine.mapStats.OPP');
+    if (typeof ledger.resolutionEngine?.classifyHostilePhysicalIntent !== 'boolean') missing.push('resolutionEngine.classifyHostilePhysicalIntent:boolean');
     if (!Array.isArray(ledger.relationshipEngine)) missing.push('relationshipEngine');
     if (!ledger.chaosSemantic) missing.push('chaosSemantic');
     if (!ledger.nameSemantic) missing.push('nameSemantic');

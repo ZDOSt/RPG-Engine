@@ -149,8 +149,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         audit.push(`2.6b resolveOutcome=${compact(outcome)}`);
     } else {
         actions = normalizeActionMarkers(semantic.actionCount);
-        const userStat = normalizeStat(semantic.mapStats?.USER, 'PHY');
-        let oppStat = normalizeOppStat(semantic.mapStats?.OPP);
+        const semanticMapStats = normalizeMapStats(semantic.mapStats);
+        let { userStat, oppStat } = applyMapStatsHardRules(semantic, goal, targets, semanticMapStats, audit);
         const userCore = getUserCoreStats(ledger);
         let targetCore = null;
         const semanticPrimaryOppTarget = isReal(semantic.primaryOppTarget) && targetClassifier.isLiving(semantic.primaryOppTarget)
@@ -199,7 +199,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         const atkTot = atkDie + statValue(userCore, userStat);
         const defTot = oppStat === 'ENV' ? defDie : defDie + statValue(targetCore, oppStat);
         const margin = atkTot - defTot;
-        hostilePhysical = userStat === 'PHY' && bool(semantic.hostilePhysicalIntent);
+        const hostilePhysicalIntent = bool(semantic.classifyHostilePhysicalIntent ?? semantic.hostilePhysicalIntent);
+        hostilePhysical = userStat === 'PHY' && hostilePhysicalIntent;
 
         if (hostilePhysical) {
             outcome = hostilePhysicalOutcome(margin, actions.length);
@@ -207,7 +208,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
             outcome = nonHostileOutcome(margin);
         }
 
-        audit.push(`2.7o resolveOutcome=atkDie:${atkDie}, atkTot:${atkTot}, defDie:${defDie}, defTot:${defTot}, margin:${margin}, hostilePhysicalIntent:${hostilePhysical ? 'Y' : 'N'} -> ${compact(outcome)}`);
+        audit.push(`2.7o resolveOutcome=atkDie:${atkDie}, atkTot:${atkTot}, defDie:${defDie}, defTot:${defTot}, margin:${margin}, classifyHostilePhysicalIntent:${hostilePhysical ? 'Y' : 'N'} -> ${compact(outcome)}`);
         resultLine = `1d20(${atkDie}) + ${userStat}(${statValue(userCore, userStat)}) = ${atkTot} vs 1d20(${defDie})${oppStat === 'ENV' ? '' : ` + ${oppStat}(${statValue(targetCore, oppStat)})`} = ${defTot} -> ${outcome.OutcomeTier}`;
     }
 
@@ -220,7 +221,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         OutcomeTier: outcome.OutcomeTier,
         Outcome: outcome.Outcome,
         CounterPotential: outcome.CounterPotential,
-        HostilePhysicalIntent: hostilePhysical ? 'Y' : 'N',
+        classifyHostilePhysicalIntent: hostilePhysical ? 'Y' : 'N',
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
         BenefitedObservers: showNone(targets.BenefitedObservers),
@@ -559,7 +560,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     const counterAllowed = ['light', 'medium', 'severe'].includes(counterPotential);
     const counterBonus = counterBonusFromPotential(counterPotential);
     const criticalSuccess = resolutionPacket?.OutcomeTier === 'Critical_Success';
-    const retaliationAllowed = resolutionPacket?.HostilePhysicalIntent === 'Y';
+    const retaliationAllowed = resolutionPacket?.classifyHostilePhysicalIntent === 'Y';
     const attackType = criticalSuccess ? 'None' : counterAllowed ? 'CounterAttack' : retaliationAllowed ? 'Retaliation' : 'None';
     const proactiveAggressive = Object.entries(proactivityResults).filter(([, result]) =>
         attackType !== 'None'
@@ -748,7 +749,7 @@ function proactivityRefereeGuard(handoff, packet) {
     if (handoff.Target === 'Bond'
         && handoff.PressureMode === 'none'
         && !['FREEZE', 'TERROR', 'HATRED'].includes(handoff.Lock)
-        && packet.HostilePhysicalIntent !== 'Y'
+        && packet.classifyHostilePhysicalIntent !== 'Y'
         && !['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)) {
         return 'Bond-routed non-hostile interaction cannot become hostile proactivity without harm, opposition, lock, or pressure evidence';
     }
@@ -764,7 +765,7 @@ function updateRapport(currentRapport, target, rapportEncounterLock, mode = 'nor
 }
 
 function applyHostilePhysicalPressure(npc, packet, state) {
-    if (packet.HostilePhysicalIntent !== 'Y') return null;
+    if (packet.classifyHostilePhysicalIntent !== 'Y') return null;
     if (packet.STAKES !== 'Y') return null;
 
     const isDirect = includesName(packet.ActionTargets, npc);
@@ -1056,7 +1057,7 @@ function pickVector(ctx, i, index) {
 function classifyAction(packet) {
     if (packet.GOAL === 'IntimacyAdvancePhysical') return 'Intimacy_Physical';
     if (packet.GOAL === 'IntimacyAdvanceVerbal') return 'Intimacy_Verbal';
-    if (packet.HostilePhysicalIntent === 'Y') return 'Combat';
+    if (packet.classifyHostilePhysicalIntent === 'Y') return 'Combat';
     if (landedBool(packet.LandedActions)) return 'Combat';
     if (toRealArray(packet.ActionTargets).length >= 1 && packet.LandedActions === '(none)') return 'Social';
     if (toRealArray(packet.OppTargets?.ENV).length >= 1) return 'Skill';
@@ -1068,20 +1069,12 @@ function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'none', tar
     if (pressureMode === 'dominated') return 'FEAR';
     if (lock === 'HATRED') return 'ANGER';
     if (lock === 'TERROR') return 'FEAR';
-    if (target === 'Hostility') return 'ANGER';
-    if (target === 'Fear') return 'FEAR';
-    if (target === 'FearHostility') return fin.F > fin.H ? 'FEAR' : 'ANGER';
-    if (target === 'Bond') return 'BOND';
+    if (['Combat', 'Social'].includes(kind) && fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
+    if (kind === 'Social' && fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
     if (['Intimacy_Physical', 'Intimacy_Verbal'].includes(kind) && intimacyGate === 'DENY') return 'ANGER';
-    if (kind === 'Combat') return fin.F > fin.H ? 'FEAR' : 'ANGER';
-    if (kind === 'Social') {
-        if (fin.H > fin.F && fin.H > fin.B) return 'ANGER';
-        if (fin.F > fin.H && fin.F > fin.B) return 'FEAR';
-        return 'BOND';
-    }
     if (['Normal_Interaction', 'Skill'].includes(kind) && fin.B >= fin.H && fin.B >= fin.F) return 'BOND';
-    if (fin.H > fin.F && fin.H > fin.B) return 'ANGER';
-    if (fin.F > fin.H && fin.F > fin.B) return 'FEAR';
+    if (fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
+    if (fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
     return 'BOND';
 }
 
@@ -1157,7 +1150,7 @@ function buildPersistencePolicy() {
     return {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
         persistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportEncounterLock', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode'],
-        perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'CHAOS', 'proactivityResults', 'aggressionResults'],
+        perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
 }
 
@@ -1354,6 +1347,61 @@ function normalizeStat(value, fallback) {
 
 function normalizeOppStat(value) {
     return ['PHY', 'MND', 'CHA', 'ENV'].includes(value) ? value : 'ENV';
+}
+
+function normalizeMapStats(value) {
+    return {
+        userStat: normalizeStat(value?.USER, 'PHY'),
+        oppStat: normalizeOppStat(value?.OPP),
+    };
+}
+
+function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit) {
+    let { userStat, oppStat } = mapStats;
+    const evidence = [];
+
+    if (isBodyAffectingMagic(semantic, goal, targets)) {
+        if (userStat !== 'MND' || oppStat !== 'PHY') {
+            evidence.push({
+                hardRule: 'ResolutionEngine.mapStats: body-affecting magic against a living target is USER=MND and OPP=PHY',
+                from: { USER: userStat, OPP: oppStat },
+                to: { USER: 'MND', OPP: 'PHY' },
+            });
+        }
+        userStat = 'MND';
+        oppStat = 'PHY';
+    }
+
+    const hasLivingOpposition = toRealArray(targets.OppTargets?.NPC).length > 0 || isReal(semantic.primaryOppTarget);
+    if (!hasLivingOpposition && oppStat !== 'ENV') {
+        evidence.push({
+            hardRule: 'ResolutionEngine.mapStats: no living opposing target means OPP=ENV',
+            from: { USER: userStat, OPP: oppStat },
+            to: { USER: userStat, OPP: 'ENV' },
+        });
+        oppStat = 'ENV';
+    }
+
+    if (evidence.length) {
+        audit.push(`2.7c.1 deterministicMapStatsReferee=${compact(evidence)}`);
+    }
+
+    return { userStat, oppStat };
+}
+
+function isBodyAffectingMagic(semantic, goal, targets) {
+    if (!isReal(semantic.primaryOppTarget) && !firstReal(targets.OppTargets?.NPC) && !firstReal(targets.ActionTargets)) return false;
+    if (bool(semantic.classifyHostilePhysicalIntent ?? semantic.hostilePhysicalIntent)) return false;
+
+    const source = [
+        semantic.identifyGoal,
+        goal,
+        semantic.explicitMeans,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    const hasMagic = /\b(magic|magical|spell|arcane|hex|curse|supernatural|enchant|enchantment|sorcery|power)\b/.test(source);
+    const affectsBody = /\b(paraly[sz]e|paralysis|poison|venom|blind|blindness|deafen|numb|sleep|pain|muscle|blood|breath|choke|disease|sicken|transmut|petrif|bind|bodily|body|immobiliz|lock|freeze|stun)\b/.test(source);
+    return hasMagic && affectsBody;
 }
 
 function parseFinalState(value) {
