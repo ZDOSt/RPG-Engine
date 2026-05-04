@@ -76,6 +76,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         : intimacyAdvance === 'verbal'
             ? 'IntimacyAdvanceVerbal'
             : String(semantic.identifyGoal || 'Normal_Interaction');
+    semantic.primaryOppTarget = firstReal(targets.OppTargets.NPC) || NONE;
 
     const rollPool = [dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20()];
     audit.push('STEP 1: SILENT SEMANTIC PASS COMPLETE');
@@ -103,7 +104,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         })}`);
     }
 
-    const intimacyTarget = firstReal(targets.ActionTargets) || semantic.primaryOppTarget;
+    const intimacyTarget = firstReal(targets.ActionTargets);
     const targetState = trackerSnapshot[intimacyTarget] || null;
     const intimacyConsent = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)
         && targetState
@@ -153,10 +154,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         let { userStat, oppStat } = applyMapStatsHardRules(semantic, goal, targets, semanticMapStats, audit);
         const userCore = getUserCoreStats(ledger);
         let targetCore = null;
-        const semanticPrimaryOppTarget = isReal(semantic.primaryOppTarget) && targetClassifier.isLiving(semantic.primaryOppTarget)
-            ? semantic.primaryOppTarget
-            : null;
-        const primaryOppTarget = semanticPrimaryOppTarget || firstReal(targets.OppTargets.NPC);
+        const primaryOppTarget = firstReal(targets.OppTargets.NPC);
         const currentTargetCore = primaryOppTarget ? trackerSnapshot[primaryOppTarget]?.currentCoreStats : null;
         if (oppStat !== 'ENV' && !primaryOppTarget) {
             oppStat = 'ENV';
@@ -199,7 +197,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         const atkTot = atkDie + statValue(userCore, userStat);
         const defTot = oppStat === 'ENV' ? defDie : defDie + statValue(targetCore, oppStat);
         const margin = atkTot - defTot;
-        const hostilePhysicalIntent = bool(semantic.classifyHostilePhysicalIntent ?? semantic.hostilePhysicalIntent);
+        const hostilePhysicalIntent = bool(semantic.classifyHostilePhysicalIntent);
         hostilePhysical = userStat === 'PHY' && hostilePhysicalIntent;
 
         if (hostilePhysical) {
@@ -1055,6 +1053,7 @@ function pickVector(ctx, i, index) {
 }
 
 function classifyAction(packet) {
+    if (packet.STAKES === 'N') return 'Normal_Interaction';
     if (packet.GOAL === 'IntimacyAdvancePhysical') return 'Intimacy_Physical';
     if (packet.GOAL === 'IntimacyAdvanceVerbal') return 'Intimacy_Verbal';
     if (packet.classifyHostilePhysicalIntent === 'Y') return 'Combat';
@@ -1372,7 +1371,7 @@ function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit) {
         oppStat = 'PHY';
     }
 
-    const hasLivingOpposition = toRealArray(targets.OppTargets?.NPC).length > 0 || isReal(semantic.primaryOppTarget);
+    const hasLivingOpposition = toRealArray(targets.OppTargets?.NPC).length > 0;
     if (!hasLivingOpposition && oppStat !== 'ENV') {
         evidence.push({
             hardRule: 'ResolutionEngine.mapStats: no living opposing target means OPP=ENV',
@@ -1390,8 +1389,8 @@ function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit) {
 }
 
 function isBodyAffectingMagic(semantic, goal, targets) {
-    if (!isReal(semantic.primaryOppTarget) && !firstReal(targets.OppTargets?.NPC) && !firstReal(targets.ActionTargets)) return false;
-    if (bool(semantic.classifyHostilePhysicalIntent ?? semantic.hostilePhysicalIntent)) return false;
+    if (!firstReal(targets.OppTargets?.NPC) && !firstReal(targets.ActionTargets)) return false;
+    if (bool(semantic.classifyHostilePhysicalIntent)) return false;
 
     const source = [
         semantic.identifyGoal,

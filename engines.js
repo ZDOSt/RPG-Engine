@@ -59,6 +59,7 @@ function ResolutionEngine(input) {
     rule: determine {{user}} stat by applying DEF.STATS to the explicit action-attempt that determines whether {{user}}'s goal succeeds or fails.
     rule: use final goal only if no distinct explicit means are present
     rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that entity's resistance to {{user}}'s explicit means or goal
+    primaryOppTarget = first identifyTargets.OppTargets.NPC
     rule: if OppTargets.NPC=[(none)] and OppTargets.ENV contains an obstacle, OPP=ENV
     return {USER, OPP}
 
@@ -384,6 +385,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
   classifyAction(resolutionPacket):
     policy: EO, FYW
     g = resolutionPacket.GOAL
+    if resolutionPacket.STAKES=N -> Normal_Interaction
     if g=IntimacyAdvancePhysical -> Intimacy_Physical
     if g=IntimacyAdvanceVerbal -> Intimacy_Verbal
     if resolutionPacket.LandedActions > 0 -> Combat
