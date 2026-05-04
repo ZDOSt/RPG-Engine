@@ -59,27 +59,34 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
 
     return {
         auditLines: audit,
+        semanticLedger: ledger,
         finalNarrativeHandoff,
         trackerUpdate,
     };
 }
 
 function runResolution(ledger, trackerSnapshot, dice, audit, context) {
-    const semantic = ledger.resolutionSemantic || {};
+    const semantic = ledger.resolutionEngine || {};
     const targetClassifier = buildTargetClassifier(ledger, trackerSnapshot, context);
-    const rawTargets = normalizeTargets(semantic.targets);
+    const rawTargets = normalizeTargets(semantic.identifyTargets);
     const targets = sanitizeTargets(rawTargets, targetClassifier);
     const intimacyAdvance = String(semantic.intimacyAdvance || 'none').toLowerCase();
     const goal = intimacyAdvance === 'physical'
         ? 'IntimacyAdvancePhysical'
         : intimacyAdvance === 'verbal'
             ? 'IntimacyAdvanceVerbal'
-            : String(semantic.goal || 'Normal_Interaction');
+            : String(semantic.identifyGoal || 'Normal_Interaction');
 
     const rollPool = [dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20()];
     audit.push('STEP 1: SILENT SEMANTIC PASS COMPLETE');
     audit.push('SEMANTIC_LEDGER=');
     audit.push(stableStringify(ledger));
+    if (ledger.deterministicOverrides?.semanticLedgerExtraction) {
+        audit.push(`SEMANTIC_LEDGER_EXTRACTION=${compact(ledger.deterministicOverrides.semanticLedgerExtraction)}`);
+    }
+    if (ledger.deterministicOverrides?.semanticLedgerRepair) {
+        audit.push(`SEMANTIC_LEDGER_REPAIR=${compact(ledger.deterministicOverrides.semanticLedgerRepair)}`);
+    }
     if (ledger.deterministicOverrides?.userCoreStats) {
         audit.push(`DETERMINISTIC_OVERRIDE.userCoreStats=${compact(ledger.deterministicOverrides.userCoreStats)}`);
     }
@@ -105,12 +112,12 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         : 'N';
     audit.push(`2.3 checkIntimacyGate=${intimacyConsent}`);
 
-    const semanticHasStakes = bool(semantic.hasStakesCandidate) ? 'Y' : 'N';
+    const semanticHasStakes = bool(semantic.hasStakes) ? 'Y' : 'N';
     const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
     const stakesOverrideEvidence = getStakesOverrideEvidence(goal, intimacyTarget, targetState, semanticHasStakes, intimacyConsent);
     const hasStakes = stakesOverrideEvidence?.hasStakes || semanticHasStakes;
     const stakesRule = stakesOverrideEvidence?.rule || (isIntimacyAdvance ? 'semantic_final_intimacy_no_hard_override' : 'semantic_final');
-    audit.push(`2.4a semanticHasStakesCandidate=${semanticHasStakes}`);
+    audit.push(`2.4a semanticHasStakes=${semanticHasStakes}`);
     audit.push(`2.4b deterministicStakesRule=${stakesRule}`);
     if (stakesOverrideEvidence) {
         audit.push(`2.4c deterministicStakesEvidence=${compact(stakesOverrideEvidence.evidence)}`);
@@ -122,7 +129,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         ...targets.OppTargets.NPC,
         ...targets.BenefitedObservers,
         ...targets.HarmedObservers,
-        ...ledger.relationshipSemantic.map(x => x.NPC).filter(name => targetClassifier.isLiving(name)),
+        ...ledger.relationshipEngine.map(x => x.NPC).filter(name => targetClassifier.isLiving(name)),
     ].filter(name => isReal(name) && targetClassifier.isLiving(name)));
     audit.push(`2.5 NPCInScene=[${npcInScene.join(',') || NONE}]`);
 
@@ -141,10 +148,10 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
         audit.push('2.6a actions=[a1]');
         audit.push(`2.6b resolveOutcome=${compact(outcome)}`);
     } else {
-        actions = normalizeActionMarkers(semantic.actionMarkers);
-        const userStat = normalizeStat(semantic.userStat, 'PHY');
-        let oppStat = normalizeOppStat(semantic.oppStat);
-        const userCore = normalizeCore(ledger.userCoreStats, { PHY: 1, MND: 1, CHA: 1 });
+        actions = normalizeActionMarkers(semantic.actionCount);
+        const userStat = normalizeStat(semantic.mapStats?.USER, 'PHY');
+        let oppStat = normalizeOppStat(semantic.mapStats?.OPP);
+        const userCore = getUserCoreStats(ledger);
         let targetCore = null;
         const semanticPrimaryOppTarget = isReal(semantic.primaryOppTarget) && targetClassifier.isLiving(semantic.primaryOppTarget)
             ? semantic.primaryOppTarget
@@ -174,7 +181,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
                 targetCore = normalizeCore(generatedCoreSource.core, { PHY: 1, MND: 1, CHA: 1 });
                 audit.push(`2.7h getCurrentCoreStats(${primaryOppTarget || NONE})=missing`);
                 audit.push('2.7i missing -> genStats');
-                if (generatedCoreSource.source !== 'resolutionSemantic.genStatsIfNeeded') {
+                if (generatedCoreSource.source !== 'resolutionEngine.genStats') {
                     audit.push(`2.7i.1 genStats source=${generatedCoreSource.source}`);
                 }
                 audit.push(`2.7j genStats.Rank=${generatedCoreSource.core?.Rank || 'none'}`);
@@ -228,7 +235,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context) {
 }
 
 function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
-    const semanticMap = new Map((ledger.relationshipSemantic || []).filter(x => x?.NPC).map(x => [x.NPC, x]));
+    const semanticMap = new Map((ledger.relationshipEngine || []).filter(x => x?.NPC).map(x => [x.NPC, x]));
     const npcList = toRealArray(resolutionPacket.NPCInScene);
     const handoffs = [];
     const trackerUpdate = {};
@@ -372,10 +379,10 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit) {
         };
         handoffs.push(handoff);
 
-        const generatedCore = normalizeCore(sem.coreStatsIfNeeded, { PHY: 1, MND: 1, CHA: 1 });
+        const generatedCore = normalizeCore(sem.genStats, { PHY: 1, MND: 1, CHA: 1 });
         const coreStats = state.currentCoreStats || (isDefaultGeneratedCore(generatedCore) ? null : generatedCore);
         if (!state.currentCoreStats && !coreStats) {
-            audit.push(`3.7a currentCoreStats not persisted for ${npc}: semantic coreStatsIfNeeded was default 1/1/1`);
+            audit.push(`3.7a currentCoreStats not persisted for ${npc}: semantic genStats was default 1/1/1`);
         }
         trackerUpdate[npc] = {
             currentDisposition,
@@ -545,7 +552,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
 }
 
 function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResults, resolutionPacket, dice, audit) {
-    const userCore = normalizeCore(ledger.userCoreStats, { PHY: 1, MND: 1, CHA: 1 });
+    const userCore = getUserCoreStats(ledger);
     const counterPotential = resolutionPacket?.CounterPotential || 'none';
     const counterAllowed = ['light', 'medium', 'severe'].includes(counterPotential);
     const counterBonus = counterBonusFromPotential(counterPotential);
@@ -653,18 +660,18 @@ function aggressionReactionOutcome(margin) {
     return 'user_dominates';
 }
 
-function chooseGeneratedCore(ledger, resolutionSemantic, primaryOppTarget) {
-    const resolutionCore = resolutionSemantic?.genStatsIfNeeded;
+function chooseGeneratedCore(ledger, resolutionEngine, primaryOppTarget) {
+    const resolutionCore = resolutionEngine?.genStats;
     if (!isDefaultGeneratedCore(resolutionCore)) {
-        return { core: resolutionCore, source: 'resolutionSemantic.genStatsIfNeeded' };
+        return { core: resolutionCore, source: 'resolutionEngine.genStats' };
     }
 
-    const relationshipCore = (ledger.relationshipSemantic || [])
+    const relationshipCore = (ledger.relationshipEngine || [])
         .find(item => sameName(item?.NPC, primaryOppTarget))
-        ?.coreStatsIfNeeded;
+        ?.genStats;
 
     if (!isDefaultGeneratedCore(relationshipCore)) {
-        return { core: relationshipCore, source: `relationshipSemantic[${primaryOppTarget}].coreStatsIfNeeded` };
+        return { core: relationshipCore, source: `relationshipEngine[${primaryOppTarget}].genStats` };
     }
 
     return { core: { Rank: 'none', MainStat: 'none', PHY: 1, MND: 1, CHA: 1 }, source: 'engine default core fallback', defaultFallback: true };
@@ -1249,7 +1256,7 @@ function buildTargetClassifier(ledger, trackerSnapshot, context) {
     const livingNames = new Set();
 
     for (const name of Object.keys(trackerSnapshot || {})) addLivingName(livingNames, name);
-    for (const item of ledger.relationshipSemantic || []) addLivingName(livingNames, item?.NPC);
+    for (const item of ledger.relationshipEngine || []) addLivingName(livingNames, item?.NPC);
 
     try {
         const fields = typeof context?.getCharacterCardFields === 'function' ? context.getCharacterCardFields() : {};
@@ -1309,6 +1316,10 @@ function normalizeCore(value, fallback) {
         MND: clamp(Number(value?.MND ?? fallback.MND), 1, 10),
         CHA: clamp(Number(value?.CHA ?? fallback.CHA), 1, 10),
     };
+}
+
+function getUserCoreStats(ledger) {
+    return normalizeCore(ledger?.engineContext?.userCoreStats, { Rank: 'none', MainStat: 'none', PHY: 1, MND: 1, CHA: 1 });
 }
 
 function normalizeRank(value) {

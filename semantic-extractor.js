@@ -9,6 +9,7 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
     const raw = await generateSemanticRaw(context, prompt);
 
     let ledger;
+    let semanticLedgerRepair = null;
     try {
         ledger = parseJson(raw);
         validateRawLedgerContract(ledger, raw);
@@ -18,12 +19,9 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
         try {
             ledger = parseJson(repairRaw);
             validateRawLedgerContract(ledger, repairRaw);
-            ledger.deterministicOverrides = {
-                ...(ledger.deterministicOverrides || {}),
-                semanticLedgerRepair: {
-                    source: 'generateRawData repair pass',
-                    reason: error instanceof Error ? error.message : String(error),
-                },
+            semanticLedgerRepair = {
+                source: 'generateRawData jsonSchema repair pass',
+                reason: error instanceof Error ? error.message : String(error),
             };
         } catch (repairError) {
             throw new Error(`Semantic pass returned no valid ledger after repair. First error: ${error.message}. Repair error: ${repairError.message}`);
@@ -36,10 +34,21 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
 
     const normalized = normalizeLedger(ledger);
     validateNormalizedLedger(normalized, raw);
+    normalized.deterministicOverrides = {
+        ...(normalized.deterministicOverrides || {}),
+        semanticLedgerExtraction: {
+            source: 'SillyTavern generateRawData jsonSchema',
+            schema: SEMANTIC_LEDGER_JSON_SCHEMA.name,
+            strict: SEMANTIC_LEDGER_JSON_SCHEMA.strict,
+        },
+    };
+    if (semanticLedgerRepair) {
+        normalized.deterministicOverrides.semanticLedgerRepair = semanticLedgerRepair;
+    }
     const personaCoreStats = extractPersonaCoreStats(context);
     if (personaCoreStats) {
-        normalized.userCoreStats = {
-            ...normalized.userCoreStats,
+        normalized.engineContext.userCoreStats = {
+            ...normalized.engineContext.userCoreStats,
             ...personaCoreStats,
         };
         normalized.deterministicOverrides = {
@@ -58,7 +67,7 @@ async function generateSemanticRaw(context, prompt, responseLength = 2600) {
     return await context.generateRawData({
         prompt,
         responseLength,
-        prefill: '<semantic_ledger>\n{',
+        jsonSchema: SEMANTIC_LEDGER_JSON_SCHEMA,
     });
 }
 
@@ -71,7 +80,7 @@ function buildSemanticRepairPrompt(raw, error) {
             content:
                 'You repair a failed semantic ledger response for a SillyTavern rules extension. ' +
                 'The output contract is mandatory and non-negotiable. Any response that omits, renames, paraphrases, fences, or corrupts the required ledger is invalid. ' +
-                'Return exactly one complete valid JSON object wrapped in <semantic_ledger>...</semantic_ledger>. ' +
+                'Return exactly one complete valid JSON object matching the supplied JSON Schema. ' +
                 'No markdown, no prose, no narration, no dice, no calculations.',
         },
         {
@@ -79,15 +88,259 @@ function buildSemanticRepairPrompt(raw, error) {
             content:
                 `The previous response could not be parsed.\nERROR=${error instanceof Error ? error.message : String(error)}\n\n` +
                 `Previous raw text candidates:\n${clip(candidates, 6000)}\n\n` +
-                'Repair it into this exact object shape and field names. The assistant prefill is "<semantic_ledger>\\n{", so continue the object from its first property, close it with "}", then close </semantic_ledger>.\n' +
+                'Repair it into this exact object shape and field names. Return only the JSON object. Do not wrap it in tags or markdown.\n' +
                 SEMANTIC_LEDGER_TEMPLATE,
         },
     ];
 }
 
+const STAT_VALUE_ENUM = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const RANK_ENUM = ['Weak', 'Average', 'Trained', 'Elite', 'Boss', 'none'];
+const MAIN_STAT_ENUM = ['PHY', 'MND', 'CHA', 'Balanced', 'none'];
+const STAKE_CHANGE_ENUM = ['benefit', 'harm', 'none'];
+
+const stringArraySchema = () => ({
+    type: 'array',
+    items: { type: 'string' },
+});
+
+const coreStatsSchema = () => ({
+    type: 'object',
+    additionalProperties: false,
+    required: ['Rank', 'MainStat', 'PHY', 'MND', 'CHA'],
+    properties: {
+        Rank: { type: 'string', enum: RANK_ENUM },
+        MainStat: { type: 'string', enum: MAIN_STAT_ENUM },
+        PHY: { type: 'integer', enum: STAT_VALUE_ENUM },
+        MND: { type: 'integer', enum: STAT_VALUE_ENUM },
+        CHA: { type: 'integer', enum: STAT_VALUE_ENUM },
+    },
+});
+
+const SEMANTIC_LEDGER_JSON_SCHEMA = Object.freeze({
+    name: 'structured_preflight_semantic_ledger_v2',
+    description: 'Semantic/contextual ledger for the Structured Preflight Engines deterministic runner.',
+    strict: true,
+    value: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+            'engineContext',
+            'resolutionEngine',
+            'relationshipEngine',
+            'chaosSemantic',
+            'nameSemantic',
+            'proactivitySemantic',
+        ],
+        properties: {
+            engineContext: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['userCoreStats', 'trackerRelevantNPCs'],
+                properties: {
+                    userCoreStats: coreStatsSchema(),
+                    trackerRelevantNPCs: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: [
+                                'NPC',
+                                'currentDisposition',
+                                'currentRapport',
+                                'rapportEncounterLock',
+                                'intimacyGate',
+                                'currentCoreStats',
+                            ],
+                            properties: {
+                                NPC: { type: 'string' },
+                                currentDisposition: { type: ['string', 'null'] },
+                                currentRapport: { type: 'integer', enum: [0, 1, 2, 3, 4, 5] },
+                                rapportEncounterLock: { type: 'string', enum: ['Y', 'N'] },
+                                intimacyGate: { type: 'string', enum: ['ALLOW', 'DENY', 'SKIP'] },
+                                currentCoreStats: coreStatsSchema(),
+                            },
+                        },
+                    },
+                },
+            },
+            resolutionEngine: {
+                type: 'object',
+                additionalProperties: false,
+                required: [
+                    'identifyGoal',
+                    'intimacyAdvance',
+                    'explicitMeans',
+                    'identifyTargets',
+                    'hasStakes',
+                    'actionCount',
+                    'mapStats',
+                    'primaryOppTarget',
+                    'hostilePhysicalIntent',
+                    'genStats',
+                ],
+                properties: {
+                    identifyGoal: { type: 'string' },
+                    intimacyAdvance: { type: 'string', enum: ['none', 'physical', 'verbal'] },
+                    explicitMeans: { type: 'string' },
+                    identifyTargets: {
+                        type: 'object',
+                        additionalProperties: false,
+                        required: ['ActionTargets', 'OppTargets', 'BenefitedObservers', 'HarmedObservers'],
+                        properties: {
+                            ActionTargets: stringArraySchema(),
+                            OppTargets: {
+                                type: 'object',
+                                additionalProperties: false,
+                                required: ['NPC', 'ENV'],
+                                properties: {
+                                    NPC: stringArraySchema(),
+                                    ENV: stringArraySchema(),
+                                },
+                            },
+                            BenefitedObservers: stringArraySchema(),
+                            HarmedObservers: stringArraySchema(),
+                        },
+                    },
+                    hasStakes: { type: 'boolean' },
+                    actionCount: {
+                        type: 'array',
+                        items: { type: 'string', enum: ['a1', 'a2', 'a3'] },
+                    },
+                    mapStats: {
+                        type: 'object',
+                        additionalProperties: false,
+                        required: ['USER', 'OPP'],
+                        properties: {
+                            USER: { type: 'string', enum: ['PHY', 'MND', 'CHA'] },
+                            OPP: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'ENV'] },
+                        },
+                    },
+                    primaryOppTarget: { type: 'string' },
+                    hostilePhysicalIntent: { type: 'boolean' },
+                    genStats: coreStatsSchema(),
+                },
+            },
+            relationshipEngine: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: [
+                        'NPC',
+                        'relevant',
+                        'initFlags',
+                        'newEncounterExplicit',
+                        'explicitIntimidationOrCoercion',
+                        'stakeChangeByOutcome',
+                        'overrideFlags',
+                        'genStats',
+                    ],
+                    properties: {
+                        NPC: { type: 'string' },
+                        relevant: { type: 'boolean' },
+                        initFlags: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['romanticOpen', 'userBadRep', 'userGoodRep', 'userNonHuman', 'fearImmunity'],
+                            properties: {
+                                romanticOpen: { type: 'boolean' },
+                                userBadRep: { type: 'boolean' },
+                                userGoodRep: { type: 'boolean' },
+                                userNonHuman: { type: 'boolean' },
+                                fearImmunity: { type: 'boolean' },
+                            },
+                        },
+                        newEncounterExplicit: { type: 'boolean' },
+                        explicitIntimidationOrCoercion: { type: 'boolean' },
+                        stakeChangeByOutcome: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: [
+                                'no_roll',
+                                'success',
+                                'failure',
+                                'dominant_impact',
+                                'solid_impact',
+                                'light_impact',
+                                'struggle',
+                                'checked',
+                                'deflected',
+                                'avoided',
+                            ],
+                            properties: {
+                                no_roll: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                success: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                failure: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                dominant_impact: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                solid_impact: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                light_impact: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                struggle: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                checked: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                deflected: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                                avoided: { type: 'string', enum: STAKE_CHANGE_ENUM },
+                            },
+                        },
+                        overrideFlags: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['Exploitation', 'Hedonist', 'Transactional', 'Established'],
+                            properties: {
+                                Exploitation: { type: 'boolean' },
+                                Hedonist: { type: 'boolean' },
+                                Transactional: { type: 'boolean' },
+                                Established: { type: 'boolean' },
+                            },
+                        },
+                        genStats: coreStatsSchema(),
+                    },
+                },
+            },
+            chaosSemantic: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['sceneSummary'],
+                properties: {
+                    sceneSummary: { type: 'string' },
+                },
+            },
+            nameSemantic: {
+                type: 'object',
+                additionalProperties: false,
+                required: [
+                    'nameRequired',
+                    'explicitNameKnown',
+                    'isLocation',
+                    'seed',
+                    'normalizeSeed',
+                    'detectMode',
+                    'generatedName',
+                ],
+                properties: {
+                    nameRequired: { type: 'boolean' },
+                    explicitNameKnown: { type: 'boolean' },
+                    isLocation: { type: 'boolean' },
+                    seed: { type: 'string' },
+                    normalizeSeed: { type: 'string' },
+                    detectMode: { type: 'string', enum: ['none', 'PERSON', 'LOCATION'] },
+                    generatedName: { type: 'string' },
+                },
+            },
+            proactivitySemantic: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['cap'],
+                properties: {
+                    cap: { type: 'integer', enum: [1, 2, 3] },
+                },
+            },
+        },
+    },
+});
+
 const SEMANTIC_LEDGER_TEMPLATE = `{
   "engineContext": {
-    "userCoreStats": {"PHY": 1, "MND": 1, "CHA": 1},
+    "userCoreStats": {"Rank": "none", "MainStat": "none", "PHY": 1, "MND": 1, "CHA": 1},
     "trackerRelevantNPCs": [
       {
         "NPC": "name",
@@ -99,7 +352,7 @@ const SEMANTIC_LEDGER_TEMPLATE = `{
       }
     ]
   },
-  "resolutionSemantic": {
+  "resolutionEngine": {
     "identifyGoal": "plain final intent; use IntimacyAdvancePhysical/Verbal only for explicit direct intimate advances",
     "intimacyAdvance": "none|physical|verbal",
     "explicitMeans": "plain explicit means that determine success/failure",
@@ -109,14 +362,14 @@ const SEMANTIC_LEDGER_TEMPLATE = `{
       "BenefitedObservers": ["living NPC names or (none)"],
       "HarmedObservers": ["living NPC names or (none)"]
     },
-    "hasStakesCandidate": true,
+    "hasStakes": true,
     "actionCount": ["a1"],
     "mapStats": {"USER": "PHY|MND|CHA", "OPP": "PHY|MND|CHA|ENV"},
     "primaryOppTarget": "name or (none)",
     "hostilePhysicalIntent": false,
-    "genStatsIfNeeded": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
+    "genStats": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
   },
-  "relationshipSemantic": [
+  "relationshipEngine": [
     {
       "NPC": "living NPC name",
       "relevant": true,
@@ -125,7 +378,7 @@ const SEMANTIC_LEDGER_TEMPLATE = `{
       "explicitIntimidationOrCoercion": false,
       "stakeChangeByOutcome": {"no_roll": "none", "success": "benefit|harm|none", "failure": "benefit|harm|none", "dominant_impact": "benefit|harm|none", "solid_impact": "benefit|harm|none", "light_impact": "benefit|harm|none", "struggle": "benefit|harm|none", "checked": "benefit|harm|none", "deflected": "benefit|harm|none", "avoided": "benefit|harm|none"},
       "overrideFlags": {"Exploitation": false, "Hedonist": false, "Transactional": false, "Established": false},
-      "coreStatsIfNeeded": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
+      "genStats": {"Rank": "Weak|Average|Trained|Elite|Boss|none", "MainStat": "PHY|MND|CHA|Balanced|none", "PHY": 1, "MND": 1, "CHA": 1}
     }
   ],
   "chaosSemantic": {"sceneSummary": "short scene summary"},
@@ -144,16 +397,16 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             role: 'system',
             content:
                 'You are the semantic extraction pass for a SillyTavern roleplay rules extension. ' +
-                'The output contract is mandatory and non-negotiable: return exactly one complete, valid JSON object wrapped in <semantic_ledger>...</semantic_ledger>. ' +
-                'Any response that omits the tags, renames fields, returns prose, returns markdown fences, returns an empty object, or leaves required fields missing is completely invalid and will be discarded. ' +
+                'The output contract is mandatory and non-negotiable: return exactly one complete, valid JSON object matching the supplied JSON Schema. ' +
+                'Any response that renames fields, returns prose, returns markdown fences, returns an empty object, or leaves required fields missing is completely invalid and will be discarded. ' +
                 'Do not narrate. Do not roll dice. Do not calculate outcomes. ' +
                 'Classify only contextual/semantic predicates needed by the engines. Use EXPLICIT-ONLY and FIRST-YES-WINS from the engine reference. ' +
                 'The semantic/contextual fields you return are authoritative; the deterministic runner should not reinterpret them. ' +
-                'hasStakesCandidate is contextual and FINAL: return true only when success or failure would materially change stakes under DEF.STAKES; return false for truly no-stakes acts. ' +
-                'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, relationshipSemantic.NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
-                'Create one relationshipSemantic entry for each living NPC in ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, or otherwise directly interacted with or materially affected by the last user input. ' +
-                'For each living NPC in relationshipSemantic, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. ' +
-                'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into resolutionSemantic.genStatsIfNeeded and the matching relationshipSemantic.coreStatsIfNeeded. ' +
+                'hasStakes is contextual and FINAL: return true only when success or failure would materially change stakes under DEF.STAKES; return false for truly no-stakes acts. ' +
+                'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, relationshipEngine.NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
+                'Create one relationshipEngine entry for each living NPC in ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, or otherwise directly interacted with or materially affected by the last user input. ' +
+                'For each living NPC in relationshipEngine, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. ' +
+                'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into resolutionEngine.genStats and the matching relationshipEngine[].genStats. ' +
                 'Do not leave a named portrayed NPC as Rank none or 1/1/1 unless the card, scene, and tracker give no explicit portrayal at all.',
         },
         {
@@ -177,7 +430,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             content:
                 'Semantic extraction order mirrors the original engine dependency order. ' +
                 'First read engineContext/tracker/persona/card/chat. Then fill ResolutionEngine semantic fields in this order: identifyGoal, identifyTargets, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. ' +
-                'Then fill RelationshipEngine semantic fields in this order: relevant NPCs, current state context, init flags, new encounter flag, auditInteraction/stakeChangeByOutcome, route context flags, override flags, coreStatsIfNeeded. ' +
+                'Then fill RelationshipEngine semantic fields in this order: relevant NPCs, current state context, init flags, new encounter flag, auditInteraction/stakeChangeByOutcome, route context flags, override flags, genStats. ' +
                 'Then fill chaosSemantic, nameSemantic, and proactivitySemantic. ' +
                 'Tie rule override: exact roll ties are cinematic stalemates/struggles, not defender wins; include stakeChangeByOutcome.struggle accordingly. ' +
                 'Do not use deterministic outcomes, dice, or guesses to change semantic stakes.',
@@ -186,8 +439,8 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             role: 'user',
             content:
                 `Recent chat context, newest last:\n${chatContext}\n\n` +
-                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. For hasStakesCandidate, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
-                'MANDATORY OUTPUT CONTRACT: Return one complete JSON object with this exact shape and field names. The assistant prefill is "<semantic_ledger>\\n{", so continue the object from its first property, close it with "}", then close </semantic_ledger>. Do not output anything before or after the closing tag.\n' +
+                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
+                'MANDATORY OUTPUT CONTRACT: Return one complete JSON object with this exact shape and field names. Do not output anything before or after the JSON object.\n' +
                 SEMANTIC_LEDGER_TEMPLATE,
         },
     ];
@@ -276,26 +529,20 @@ function parseJson(raw) {
         }
     }
 
-    throw new Error(`Semantic pass did not return a valid mandatory <semantic_ledger> JSON block. Candidates=${candidates.length}. Errors=${errors.slice(0, 4).join(' | ')}`);
+    throw new Error(`Semantic pass did not return a valid mandatory JSON object. Candidates=${candidates.length}. Errors=${errors.slice(0, 4).join(' | ')}`);
 }
 
 function parseLedgerText(text) {
     const sourceText = String(text ?? '').trim();
     if (!sourceText) throw new Error('empty response text');
-
-    const tagged = sourceText.match(/<semantic_ledger>\s*([\s\S]*?)\s*<\/semantic_ledger>/i);
-    const prefilled = !tagged && sourceText.endsWith('</semantic_ledger>') && sourceText.startsWith('"');
-    if (!tagged && !prefilled) throw new Error('missing mandatory <semantic_ledger> contract or exact prefill continuation');
-
-    const inside = tagged
-        ? tagged[1].trim()
-        : `{${sourceText.slice(0, -'</semantic_ledger>'.length).trim()}`;
-    if (/```/.test(inside)) {
-        throw new Error('markdown fences inside semantic_ledger are invalid');
+    if (/```/.test(sourceText)) {
+        throw new Error('markdown fences in semantic ledger are invalid');
+    }
+    if (sourceText.startsWith('{')) {
+        return JSON.parse(extractJsonObject(sourceText));
     }
 
-    const candidate = extractJsonObject(restoreOpeningBrace(inside));
-    return JSON.parse(candidate);
+    throw new Error('missing mandatory JSON object');
 }
 
 function extractTextCandidates(raw) {
@@ -338,26 +585,27 @@ function extractTextCandidates(raw) {
 }
 
 function hasLedgerShape(value) {
-    return Boolean(value?.resolutionSemantic && value?.relationshipSemantic && value?.chaosSemantic && value?.nameSemantic && value?.proactivitySemantic);
+    return Boolean(value?.resolutionEngine && value?.relationshipEngine && value?.chaosSemantic && value?.nameSemantic && value?.proactivitySemantic);
 }
 
 function validateRawLedgerContract(ledger, raw) {
     const missing = [];
     if (!ledger?.engineContext) missing.push('engineContext');
     if (!ledger?.engineContext?.userCoreStats) missing.push('engineContext.userCoreStats');
-    if (!ledger?.resolutionSemantic) missing.push('resolutionSemantic');
-    if (!ledger?.resolutionSemantic?.identifyGoal) missing.push('resolutionSemantic.identifyGoal');
-    if (!ledger?.resolutionSemantic?.identifyTargets) missing.push('resolutionSemantic.identifyTargets');
-    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.ActionTargets)) missing.push('resolutionSemantic.identifyTargets.ActionTargets');
-    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.OppTargets?.NPC)) missing.push('resolutionSemantic.identifyTargets.OppTargets.NPC');
-    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.OppTargets?.ENV)) missing.push('resolutionSemantic.identifyTargets.OppTargets.ENV');
-    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.BenefitedObservers)) missing.push('resolutionSemantic.identifyTargets.BenefitedObservers');
-    if (!Array.isArray(ledger?.resolutionSemantic?.identifyTargets?.HarmedObservers)) missing.push('resolutionSemantic.identifyTargets.HarmedObservers');
-    if (typeof ledger?.resolutionSemantic?.hasStakesCandidate !== 'boolean') missing.push('resolutionSemantic.hasStakesCandidate:boolean');
-    if (!Array.isArray(ledger?.resolutionSemantic?.actionCount)) missing.push('resolutionSemantic.actionCount');
-    if (!ledger?.resolutionSemantic?.mapStats?.USER) missing.push('resolutionSemantic.mapStats.USER');
-    if (!ledger?.resolutionSemantic?.mapStats?.OPP) missing.push('resolutionSemantic.mapStats.OPP');
-    if (!Array.isArray(ledger?.relationshipSemantic)) missing.push('relationshipSemantic');
+    if (!Array.isArray(ledger?.engineContext?.trackerRelevantNPCs)) missing.push('engineContext.trackerRelevantNPCs');
+    if (!ledger?.resolutionEngine) missing.push('resolutionEngine');
+    if (!ledger?.resolutionEngine?.identifyGoal) missing.push('resolutionEngine.identifyGoal');
+    if (!ledger?.resolutionEngine?.identifyTargets) missing.push('resolutionEngine.identifyTargets');
+    if (!Array.isArray(ledger?.resolutionEngine?.identifyTargets?.ActionTargets)) missing.push('resolutionEngine.identifyTargets.ActionTargets');
+    if (!Array.isArray(ledger?.resolutionEngine?.identifyTargets?.OppTargets?.NPC)) missing.push('resolutionEngine.identifyTargets.OppTargets.NPC');
+    if (!Array.isArray(ledger?.resolutionEngine?.identifyTargets?.OppTargets?.ENV)) missing.push('resolutionEngine.identifyTargets.OppTargets.ENV');
+    if (!Array.isArray(ledger?.resolutionEngine?.identifyTargets?.BenefitedObservers)) missing.push('resolutionEngine.identifyTargets.BenefitedObservers');
+    if (!Array.isArray(ledger?.resolutionEngine?.identifyTargets?.HarmedObservers)) missing.push('resolutionEngine.identifyTargets.HarmedObservers');
+    if (typeof ledger?.resolutionEngine?.hasStakes !== 'boolean') missing.push('resolutionEngine.hasStakes:boolean');
+    if (!Array.isArray(ledger?.resolutionEngine?.actionCount)) missing.push('resolutionEngine.actionCount');
+    if (!ledger?.resolutionEngine?.mapStats?.USER) missing.push('resolutionEngine.mapStats.USER');
+    if (!ledger?.resolutionEngine?.mapStats?.OPP) missing.push('resolutionEngine.mapStats.OPP');
+    if (!Array.isArray(ledger?.relationshipEngine)) missing.push('relationshipEngine');
     if (!ledger?.chaosSemantic) missing.push('chaosSemantic');
     if (!ledger?.nameSemantic) missing.push('nameSemantic');
     if (!ledger?.proactivitySemantic) missing.push('proactivitySemantic');
@@ -365,13 +613,6 @@ function validateRawLedgerContract(ledger, raw) {
     if (missing.length) {
         throw new Error(`Mandatory semantic ledger contract failed; response invalid. Missing/invalid fields (${missing.join(', ')}): ${extractTextCandidates(raw).join('\n').slice(0, 240)}`);
     }
-}
-
-function restoreOpeningBrace(text) {
-    const value = String(text ?? '').trim();
-    if (value.startsWith('{')) return value;
-    if (value.startsWith('"')) return `{${value}`;
-    return value;
 }
 
 function extractJsonObject(text) {
@@ -384,28 +625,26 @@ function extractJsonObject(text) {
 }
 
 function normalizeLedger(ledger) {
-    if (ledger.engineContext && !ledger.userCoreStats) {
-        ledger.userCoreStats = ledger.engineContext.userCoreStats;
-    }
-    delete ledger.engineContext;
-    ledger.userCoreStats = normalizeCore(ledger.userCoreStats);
-    ledger.resolutionSemantic = ledger.resolutionSemantic || {};
-    ledger.resolutionSemantic.goal = ledger.resolutionSemantic.goal || ledger.resolutionSemantic.identifyGoal || 'Normal_Interaction';
-    ledger.resolutionSemantic.targets = ledger.resolutionSemantic.targets || ledger.resolutionSemantic.identifyTargets || {};
-    ledger.resolutionSemantic.targets.OppTargets = ledger.resolutionSemantic.targets.OppTargets || {};
-    ledger.resolutionSemantic.actionMarkers = normalizeActionMarkers(ledger.resolutionSemantic.actionMarkers || ledger.resolutionSemantic.actionCount);
-    const mappedStats = ledger.resolutionSemantic.mapStats || {};
-    ledger.resolutionSemantic.userStat = ledger.resolutionSemantic.userStat || mappedStats.USER || 'PHY';
-    ledger.resolutionSemantic.oppStat = ledger.resolutionSemantic.oppStat || mappedStats.OPP || 'ENV';
-    ledger.resolutionSemantic.hasStakesCandidate = toBoolean(ledger.resolutionSemantic.hasStakesCandidate, false);
-    ledger.resolutionSemantic.hostilePhysicalIntent = toBoolean(ledger.resolutionSemantic.hostilePhysicalIntent, false);
-    ledger.resolutionSemantic.genStatsIfNeeded = normalizeCore(ledger.resolutionSemantic.genStatsIfNeeded);
-    ledger.relationshipSemantic = Array.isArray(ledger.relationshipSemantic) ? ledger.relationshipSemantic : [];
-    ledger.relationshipSemantic.forEach(item => {
+    ledger.engineContext = ledger.engineContext || {};
+    ledger.engineContext.userCoreStats = normalizeCore(ledger.engineContext.userCoreStats);
+    ledger.engineContext.trackerRelevantNPCs = Array.isArray(ledger.engineContext.trackerRelevantNPCs)
+        ? ledger.engineContext.trackerRelevantNPCs
+        : [];
+    ledger.resolutionEngine = ledger.resolutionEngine || {};
+    ledger.resolutionEngine.identifyGoal = ledger.resolutionEngine.identifyGoal || 'Normal_Interaction';
+    ledger.resolutionEngine.identifyTargets = ledger.resolutionEngine.identifyTargets || {};
+    ledger.resolutionEngine.identifyTargets.OppTargets = ledger.resolutionEngine.identifyTargets.OppTargets || {};
+    ledger.resolutionEngine.actionCount = normalizeActionMarkers(ledger.resolutionEngine.actionCount);
+    ledger.resolutionEngine.mapStats = ledger.resolutionEngine.mapStats || {};
+    ledger.resolutionEngine.hasStakes = toBoolean(ledger.resolutionEngine.hasStakes, false);
+    ledger.resolutionEngine.hostilePhysicalIntent = toBoolean(ledger.resolutionEngine.hostilePhysicalIntent, false);
+    ledger.resolutionEngine.genStats = normalizeCore(ledger.resolutionEngine.genStats);
+    ledger.relationshipEngine = Array.isArray(ledger.relationshipEngine) ? ledger.relationshipEngine : [];
+    ledger.relationshipEngine.forEach(item => {
         item.initFlags = item.initFlags || {};
         item.stakeChangeByOutcome = item.stakeChangeByOutcome || {};
         item.overrideFlags = item.overrideFlags || {};
-        item.coreStatsIfNeeded = normalizeCore(item.coreStatsIfNeeded);
+        item.genStats = normalizeCore(item.genStats);
     });
     ledger.chaosSemantic = ledger.chaosSemantic || { sceneSummary: '' };
     ledger.nameSemantic = ledger.nameSemantic || {};
@@ -430,17 +669,22 @@ function normalizeActionMarkers(markers) {
 
 function validateNormalizedLedger(ledger, raw) {
     const missing = [];
-    if (!ledger.resolutionSemantic) missing.push('resolutionSemantic');
-    if (!ledger.resolutionSemantic?.goal) missing.push('resolutionSemantic.identifyGoal');
-    if (!ledger.resolutionSemantic?.targets) missing.push('resolutionSemantic.identifyTargets');
-    if (!Array.isArray(ledger.resolutionSemantic?.targets?.ActionTargets)) missing.push('resolutionSemantic.identifyTargets.ActionTargets');
-    if (!Array.isArray(ledger.resolutionSemantic?.targets?.OppTargets?.NPC)) missing.push('resolutionSemantic.identifyTargets.OppTargets.NPC');
-    if (!Array.isArray(ledger.resolutionSemantic?.targets?.OppTargets?.ENV)) missing.push('resolutionSemantic.identifyTargets.OppTargets.ENV');
-    if (!Array.isArray(ledger.resolutionSemantic?.targets?.BenefitedObservers)) missing.push('resolutionSemantic.identifyTargets.BenefitedObservers');
-    if (!Array.isArray(ledger.resolutionSemantic?.targets?.HarmedObservers)) missing.push('resolutionSemantic.identifyTargets.HarmedObservers');
-    if (typeof ledger.resolutionSemantic?.hasStakesCandidate !== 'boolean') missing.push('resolutionSemantic.hasStakesCandidate:boolean');
-    if (!Array.isArray(ledger.resolutionSemantic?.actionMarkers)) missing.push('resolutionSemantic.actionCount');
-    if (!Array.isArray(ledger.relationshipSemantic)) missing.push('relationshipSemantic');
+    if (!ledger.engineContext) missing.push('engineContext');
+    if (!ledger.engineContext?.userCoreStats) missing.push('engineContext.userCoreStats');
+    if (!Array.isArray(ledger.engineContext?.trackerRelevantNPCs)) missing.push('engineContext.trackerRelevantNPCs');
+    if (!ledger.resolutionEngine) missing.push('resolutionEngine');
+    if (!ledger.resolutionEngine?.identifyGoal) missing.push('resolutionEngine.identifyGoal');
+    if (!ledger.resolutionEngine?.identifyTargets) missing.push('resolutionEngine.identifyTargets');
+    if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.ActionTargets)) missing.push('resolutionEngine.identifyTargets.ActionTargets');
+    if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.OppTargets?.NPC)) missing.push('resolutionEngine.identifyTargets.OppTargets.NPC');
+    if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.OppTargets?.ENV)) missing.push('resolutionEngine.identifyTargets.OppTargets.ENV');
+    if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.BenefitedObservers)) missing.push('resolutionEngine.identifyTargets.BenefitedObservers');
+    if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.HarmedObservers)) missing.push('resolutionEngine.identifyTargets.HarmedObservers');
+    if (typeof ledger.resolutionEngine?.hasStakes !== 'boolean') missing.push('resolutionEngine.hasStakes:boolean');
+    if (!Array.isArray(ledger.resolutionEngine?.actionCount)) missing.push('resolutionEngine.actionCount');
+    if (!ledger.resolutionEngine?.mapStats?.USER) missing.push('resolutionEngine.mapStats.USER');
+    if (!ledger.resolutionEngine?.mapStats?.OPP) missing.push('resolutionEngine.mapStats.OPP');
+    if (!Array.isArray(ledger.relationshipEngine)) missing.push('relationshipEngine');
     if (!ledger.chaosSemantic) missing.push('chaosSemantic');
     if (!ledger.nameSemantic) missing.push('nameSemantic');
     if (!ledger.proactivitySemantic) missing.push('proactivitySemantic');

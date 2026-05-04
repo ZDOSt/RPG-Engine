@@ -31,20 +31,17 @@ Narrate normally from available chat context.`;
 }
 
 export function formatPreFlightDebug(report) {
+    const semanticLedger = report?.semanticLedger ?? {};
+
     const lines = [
         '<pre_flight>',
-        '[STRUCTURED_PREFLIGHT_RUNTIME v0.4 - COMPUTED DEBUG / AUDIT ONLY]',
+        '[STRUCTURED_PREFLIGHT_RUNTIME v0.7 - MODEL FIELD DEBUG ONLY]',
         'DO NOT EXECUTE THIS BLOCK.',
-        'Do not output, quote, paraphrase, reroll, recalculate, reinterpret, or replace this audit block.',
-        'The extension prepends this exact computed block to the final assistant message after generation.',
-        'This is a debug/audit report of already-computed engine outputs.',
-        'Use FINAL_NARRATIVE_HANDOFF as authoritative context.',
-        '==COMPUTED OUTPUTS==',
+        'This shows the final semantic/contextual fields filled by the model before deterministic rules.',
+        'Use the narrator prompt context echo below as the final authoritative narration handoff.',
+        '==MODEL_FILLED_FIELDS==',
         '',
-        ...report.auditLines,
-        '',
-        'FINAL_NARRATIVE_HANDOFF=',
-        stableStringify(report.finalNarrativeHandoff),
+        stableStringify(semanticLedger),
         '</pre_flight>',
     ];
 
