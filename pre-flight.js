@@ -32,16 +32,21 @@ Narrate normally from available chat context.`;
 
 export function formatPreFlightDebug(report) {
     const semanticLedger = buildReadableSemanticDebug(report?.semanticLedger ?? {});
+    const deterministic = buildReadableDeterministicDebug(report?.finalNarrativeHandoff ?? {});
 
     const lines = [
         '<pre_flight>',
-        '[STRUCTURED_PREFLIGHT_RUNTIME v0.8 - SIMPLE MODEL FIELD DEBUG]',
+        '[STRUCTURED_PREFLIGHT_RUNTIME v0.9 - SIMPLE DEBUG]',
         'DO NOT EXECUTE THIS BLOCK.',
-        'This shows the simplified semantic/contextual fields filled by the model before deterministic rules.',
+        'This shows model-filled semantic fields, then deterministic engine decisions.',
         'Use the narrator prompt context echo below as the final authoritative narration handoff.',
         '==MODEL_FILLED_FIELDS==',
         '',
         ...semanticLedger,
+        '',
+        '==DETERMINISTIC_ENGINE_OUTPUT==',
+        '',
+        ...deterministic,
         '</pre_flight>',
     ];
 
@@ -74,32 +79,36 @@ function buildReadableSemanticDebug(ledger) {
             `gate:${npc.intimacyGate ?? 'SKIP'}`,
         ].join('/')).join('; ') || 'none'),
         '',
-        'resolutionEngine.identifyGoal=' + valueOrNone(resolution.identifyGoal),
-        'resolutionEngine.intimacyAdvance=' + valueOrNone(resolution.intimacyAdvance),
-        'resolutionEngine.explicitMeans=' + valueOrNone(resolution.explicitMeans),
-        'resolutionEngine.identifyTargets.ActionTargets=' + list(targets.ActionTargets),
-        'resolutionEngine.identifyTargets.OppTargets.NPC=' + list(oppTargets.NPC),
-        'resolutionEngine.identifyTargets.OppTargets.ENV=' + list(oppTargets.ENV),
-        'resolutionEngine.identifyTargets.BenefitedObservers=' + list(targets.BenefitedObservers),
-        'resolutionEngine.identifyTargets.HarmedObservers=' + list(targets.HarmedObservers),
-        'resolutionEngine.hasStakes=' + String(Boolean(resolution.hasStakes)),
-        'resolutionEngine.actionCount=' + list(resolution.actionCount),
-        'resolutionEngine.mapStats=' + inline(resolution.mapStats ?? {}),
-        'resolutionEngine.primaryOppTarget=' + valueOrNone(resolution.primaryOppTarget),
-        'resolutionEngine.hostilePhysicalIntent=' + String(Boolean(resolution.hostilePhysicalIntent)),
-        'resolutionEngine.genStats=' + coreLine(resolution.genStats),
+        'ResolutionEngine:',
+        'identifyGoal=' + valueOrNone(resolution.identifyGoal),
+        'intimacyAdvance=' + valueOrNone(resolution.intimacyAdvance),
+        'explicitMeans=' + valueOrNone(resolution.explicitMeans),
+        'identifyTargets:',
+        'ActionTargets=' + list(targets.ActionTargets),
+        'OppTargets.NPC=' + list(oppTargets.NPC),
+        'OppTargets.ENV=' + list(oppTargets.ENV),
+        'BenefitedObservers=' + list(targets.BenefitedObservers),
+        'HarmedObservers=' + list(targets.HarmedObservers),
+        'hasStakes=' + String(Boolean(resolution.hasStakes)),
+        'actionCount=' + list(resolution.actionCount),
+        'mapStats=' + inline(resolution.mapStats ?? {}),
+        'primaryOppTarget=' + valueOrNone(resolution.primaryOppTarget),
+        'hostilePhysicalIntent=' + String(Boolean(resolution.hostilePhysicalIntent)),
+        'genStats=' + coreLine(resolution.genStats),
         '',
-        'relationshipEngine=' + (relationships.length ? '' : 'none'),
-        ...relationships.map(item => [
-            `- ${valueOrNone(item.NPC)}`,
-            `relevant:${Boolean(item.relevant)}`,
-            `init:${inline(item.initFlags ?? {})}`,
-            `newEncounter:${Boolean(item.newEncounterExplicit)}`,
-            `intimidation:${Boolean(item.explicitIntimidationOrCoercion)}`,
-            `stakes:${inline(item.stakeChangeByOutcome ?? {})}`,
-            `override:${inline(item.overrideFlags ?? {})}`,
-            `genStats:${coreLine(item.genStats)}`,
-        ].join(' | ')),
+        'RelationshipEngine:',
+        relationships.length ? '' : 'none',
+        ...relationships.flatMap((item, index) => [
+            `NPC[${index}]=${valueOrNone(item.NPC)}`,
+            `relevant=${Boolean(item.relevant)}`,
+            `initFlags=${inline(item.initFlags ?? {})}`,
+            `newEncounterExplicit=${Boolean(item.newEncounterExplicit)}`,
+            `explicitIntimidationOrCoercion=${Boolean(item.explicitIntimidationOrCoercion)}`,
+            `stakeChangeByOutcome=${inline(item.stakeChangeByOutcome ?? {})}`,
+            `overrideFlags=${inline(item.overrideFlags ?? {})}`,
+            `genStats=${coreLine(item.genStats)}`,
+            '',
+        ]),
         '',
         'chaosSemantic.sceneSummary=' + valueOrNone(chaos.sceneSummary),
         'nameSemantic=' + inline(name),
@@ -107,6 +116,57 @@ function buildReadableSemanticDebug(ledger) {
     ];
 
     return lines;
+}
+
+function buildReadableDeterministicDebug(handoff) {
+    const resolution = handoff?.resolutionPacket ?? {};
+    const npcs = Array.isArray(handoff?.npcHandoffs) ? handoff.npcHandoffs : [];
+    const chaos = handoff?.chaosHandoff?.CHAOS ?? {};
+    const proactivity = handoff?.proactivityResults ?? {};
+    const aggression = handoff?.aggressionResults ?? {};
+
+    return [
+        'resolutionPacket.GOAL=' + valueOrNone(resolution.GOAL),
+        'resolutionPacket.IntimacyConsent=' + valueOrNone(resolution.IntimacyConsent),
+        'resolutionPacket.STAKES=' + valueOrNone(resolution.STAKES),
+        'resolutionPacket.actions=' + list(resolution.actions),
+        'resolutionPacket.OutcomeTier=' + valueOrNone(resolution.OutcomeTier),
+        'resolutionPacket.Outcome=' + valueOrNone(resolution.Outcome),
+        'resolutionPacket.LandedActions=' + valueOrNone(resolution.LandedActions),
+        'resolutionPacket.CounterPotential=' + valueOrNone(resolution.CounterPotential),
+        'resolutionPacket.HostilePhysicalIntent=' + valueOrNone(resolution.HostilePhysicalIntent),
+        'resolutionPacket.ActionTargets=' + list(resolution.ActionTargets),
+        'resolutionPacket.OppTargets.NPC=' + list(resolution.OppTargets?.NPC),
+        'resolutionPacket.OppTargets.ENV=' + list(resolution.OppTargets?.ENV),
+        'resolutionPacket.BenefitedObservers=' + list(resolution.BenefitedObservers),
+        'resolutionPacket.HarmedObservers=' + list(resolution.HarmedObservers),
+        'resolutionPacket.NPCInScene=' + list(resolution.NPCInScene),
+        'resultLine=' + valueOrNone(handoff?.resultLine),
+        '',
+        'npcHandoffs=' + (npcs.length ? '' : 'none'),
+        ...npcs.flatMap((npc, index) => [
+            `npcHandoffs[${index}].NPC=${valueOrNone(npc.NPC)}`,
+            `npcHandoffs[${index}].FinalState=${valueOrNone(npc.FinalState)}`,
+            `npcHandoffs[${index}].Lock=${valueOrNone(npc.Lock)}`,
+            `npcHandoffs[${index}].Behavior=${valueOrNone(npc.Behavior)}`,
+            `npcHandoffs[${index}].Target=${valueOrNone(npc.Target)}`,
+            `npcHandoffs[${index}].NPC_STAKES=${valueOrNone(npc.NPC_STAKES)}`,
+            `npcHandoffs[${index}].IntimacyGate=${valueOrNone(npc.IntimacyGate)}`,
+            `npcHandoffs[${index}].RelationToUserAction=${valueOrNone(npc.RelationToUserAction)}`,
+            `npcHandoffs[${index}].PressureMode=${valueOrNone(npc.PressureMode)}`,
+        ]),
+        '',
+        'chaosHandoff=' + inline({
+            triggered: Boolean(chaos.triggered),
+            band: chaos.band ?? 'None',
+            magnitude: chaos.magnitude ?? 'None',
+            anchor: chaos.anchor ?? 'None',
+            vector: chaos.vector ?? 'None',
+        }),
+        'proactivityResults=' + inline(proactivity),
+        'aggressionResults=' + inline(aggression),
+        'trackerUpdate=' + inline(handoff?.sceneTrackerUpdate ?? {}),
+    ];
 }
 
 export function formatNarratorPromptContext(report) {

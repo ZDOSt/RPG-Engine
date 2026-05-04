@@ -1221,8 +1221,8 @@ function sanitizeTargets(targets, classifier) {
     const actionTargets = [];
     const oppNpc = [];
     const oppEnv = [...targets.OppTargets.ENV];
-    const benefited = [];
-    const harmed = [];
+    const benefitedCandidates = [];
+    const harmedCandidates = [];
 
     for (const name of targets.ActionTargets) {
         if (classifier.isLiving(name)) actionTargets.push(name);
@@ -1233,13 +1233,17 @@ function sanitizeTargets(targets, classifier) {
         else oppEnv.push(name);
     }
     for (const name of targets.BenefitedObservers) {
-        if (classifier.isLiving(name)) benefited.push(name);
+        if (classifier.isLiving(name)) benefitedCandidates.push(name);
         else oppEnv.push(name);
     }
     for (const name of targets.HarmedObservers) {
-        if (classifier.isLiving(name)) harmed.push(name);
+        if (classifier.isLiving(name)) harmedCandidates.push(name);
         else oppEnv.push(name);
     }
+
+    const directOrOpposed = new Set([...actionTargets, ...oppNpc].map(normalizeNameKey));
+    const benefited = benefitedCandidates.filter(name => !directOrOpposed.has(normalizeNameKey(name)));
+    const harmed = harmedCandidates.filter(name => !directOrOpposed.has(normalizeNameKey(name)));
 
     return {
         ActionTargets: unique(actionTargets),

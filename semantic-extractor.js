@@ -101,10 +101,12 @@ const STRICT_NAME_ANCHORED_FIELD_CONTRACT = [
     'STRICT NAME-ANCHORED FIELD CONTRACT:',
     '- Output exactly one JSON object. No markdown. No prose. No comments. No tags. No trailing explanation.',
     '- The JSON object must start with engineContext, resolutionEngine, relationshipEngine, chaosSemantic, nameSemantic, proactivitySemantic.',
-    '- Field names are literal engine anchors. Do not rename, paraphrase, flatten, omit, or add fields.',
+    '- The schema is only a form. The Engine reference is the rule source. Read and execute the semantic/contextual engine functions first, then fill this form from those outputs.',
+    '- Field names are literal engine anchors. Do not rename, paraphrase, flatten, omit, add fields, or output fully-qualified dot-path keys.',
+    '- Use plain function/key names inside the correct engine section: identifyTargets -> ActionTargets, OppTargets.NPC, OppTargets.ENV, BenefitedObservers, HarmedObservers.',
     '- Use booleans true/false, numbers for numeric fields, arrays for list fields, and strings only where the template uses strings.',
     '- Use "(none)" only inside string/list values when the engine result is none. Do not use null except engineContext.trackerRelevantNPCs[].currentDisposition may be null.',
-    '- All relationshipEngine[].stakeChangeByOutcome values must be exactly "benefit", "harm", or "none".',
+    '- Inside each RelationshipEngine entry, every stakeChangeByOutcome value must be exactly "benefit", "harm", or "none".',
     '- All genStats blocks must include Rank, MainStat, PHY, MND, CHA.',
     '- All mapStats blocks must include USER and OPP.',
     '- If you cannot find explicit evidence, use the engine default for that field; never invent missing facts.',
@@ -175,10 +177,11 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
                 'Classify only contextual/semantic predicates needed by the engines. Use EXPLICIT-ONLY and FIRST-YES-WINS from the engine reference. ' +
                 'The semantic/contextual fields you return are authoritative; the deterministic runner should not reinterpret them. ' +
                 'hasStakes is contextual and FINAL: return true only when success or failure would materially change stakes under DEF.STAKES; return false for truly no-stakes acts. ' +
-                'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, relationshipEngine.NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
+                'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, RelationshipEngine NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
+                'BenefitedObservers and HarmedObservers are living entities present in scene who are NOT already in ActionTargets or OppTargets.NPC. Do not put a direct target or opposing NPC in observer lists. ' +
                 'Create one relationshipEngine entry for each living NPC in ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, or otherwise directly interacted with or materially affected by the last user input. ' +
                 'For each living NPC in relationshipEngine, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. ' +
-                'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into resolutionEngine.genStats and the matching relationshipEngine[].genStats. ' +
+                'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into ResolutionEngine genStats and the matching RelationshipEngine genStats. ' +
                 'Do not leave a named portrayed NPC as Rank none or 1/1/1 unless the card, scene, and tracker give no explicit portrayal at all.',
         },
         {
@@ -200,10 +203,11 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
         {
             role: 'system',
             content:
-                'Semantic extraction order mirrors the original engine dependency order. ' +
-                'First read engineContext/tracker/persona/card/chat. Then fill ResolutionEngine semantic fields in this order: identifyGoal, identifyTargets, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. ' +
-                'Then fill RelationshipEngine semantic fields in this order: relevant NPCs, current state context, init flags, new encounter flag, auditInteraction/stakeChangeByOutcome, route context flags, override flags, genStats. ' +
-                'Then fill chaosSemantic, nameSemantic, and proactivitySemantic. ' +
+                'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
+                'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyTargets, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine section using the plain function/key names shown in the template. ' +
+                'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your JSON. ' +
+                'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold overrideFlags, genStats. Copy those outputs into the RelationshipEngine entries using the plain function/key names shown in the template. ' +
+                'Then fill chaosSemantic, nameSemantic, and proactivitySemantic from their engine/contextual requirements. ' +
                 'Tie rule override: exact roll ties are cinematic stalemates/struggles, not defender wins; include stakeChangeByOutcome.struggle accordingly. ' +
                 'Do not use deterministic outcomes, dice, or guesses to change semantic stakes.',
         },
@@ -211,7 +215,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
             role: 'user',
             content:
                 `Recent chat context, newest last:\n${chatContext}\n\n` +
-                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
+                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. For intimacy advances toward a named NPC, primaryOppTarget must be that NPC, even if OppTargets.NPC is (none). ActionTargets and observers must be living entities only; non-living obstacles/objects go only in OppTargets.ENV. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure materially affects safety, harm, danger, detection, material gain/loss, status, autonomy, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit if that outcome materially improves their stakes, harm if it materially worsens their stakes, otherwise none, regardless of whether the NPC is a direct target, observer, or affected through an environmental obstacle.\n\n' +
                 STRICT_NAME_ANCHORED_FIELD_CONTRACT +
                 '\n\nMANDATORY OUTPUT CONTRACT: Return one complete JSON object with this exact shape and field names. Do not output anything before or after the JSON object.\n' +
                 SEMANTIC_LEDGER_TEMPLATE,
