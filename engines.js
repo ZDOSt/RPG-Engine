@@ -23,13 +23,14 @@ function ResolutionEngine(input) {
 
   identifyTargets(input, goal, context):
     policy: LOCKED, EXPLICIT-ONLY
-    ActionTargets = LIVING entities targeted by {{user}}'s actions
+    ActionTargets = LIVING entities {{user}} directly tries to affect as the main resolution target
     OppTargets.NPC = LIVING entities whose stakes are at risk and who actively or passively oppose, contest, or resist {{user}}'s actions
     OppTargets.ENV = NON-LIVING environmental or terrain feature, hazard, object, or other obstacle directly obstructing {{user}}'s actions
-    BenefitedObservers = LIVING entities present in scene not in ActionTargets or OppTargets.NPC whose stakes improve as a result of {{user}}'s actions, as per DEF.STAKES
-    HarmedObservers = LIVING entities present in scene not in ActionTargets or OppTargets.NPC whose stakes worsen as a result of {{user}}'s actions, as per DEF.STAKES
+    BenefitedObservers = THIRD-PARTY LIVING entities present in scene, not ActionTargets and not OppTargets.NPC, whose stakes materially improve as a result of {{user}}'s actions, as per DEF.STAKES. Protective/rescue contact with an ally, shielding them, pulling/pushing them out of danger, or standing between them and harm makes them BenefitedObservers when {{user}} is not contesting their will, harming them, restraining them, or making them the main opposed challenge. Example: {{user}} pushes a woman out of danger and stands between her and a harasser. Harasser = ActionTargets and OppTargets.NPC; woman = BenefitedObservers.
+    HarmedObservers = THIRD-PARTY LIVING entities present in scene, not ActionTargets and not OppTargets.NPC, whose stakes materially worsen as a result of {{user}}'s actions, as per DEF.STAKES. This requires an explicit material stake, relationship, duty, protection role, authority role, or similar; mere witnessing alone is not enough. Example: {{user}} hurts an NPC while that NPC's father witnesses it. Hurt NPC = ActionTargets and OppTargets.NPC; witnessing father = HarmedObservers.
     rule: if hasStakes=N, OppTargets.NPC must be [(none)] unless a hard intimacy gate rule forces stakes
     rule: a direct ActionTarget can also be OppTargets.NPC only when that target's stakes are meaningfully contested or resisted
+    rule: protective/rescue movement of an ally does not make that ally ActionTargets unless {{user}} contests their will, harms them, restrains them, or makes them the main opposed challenge
     rule: ActionTargets, OppTargets.NPC, BenefitedObservers, and HarmedObservers are mutually exclusive observer categories except that direct ActionTargets may also be OppTargets.NPC when they are the resisting/opposing party
     rule: if any target list is not present, return [(none)]
     return {ActionTargets, OppTargets, BenefitedObservers, HarmedObservers}
@@ -207,6 +208,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: for each possible resolution outcome, return benefit if that outcome materially improves this NPC's stakes as per DEF.STAKES
     rule: return harm if that outcome materially worsens this NPC's stakes as per DEF.STAKES
     rule: return none if that outcome does not materially change this NPC's stakes
+    rule: if resolutionPacket.GOAL in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal], IntimacyConsent=N, and this NPC is the direct/opposing intimacy target, successful or landed outcomes [success, dominant_impact, solid_impact, light_impact] worsen this NPC's boundary/autonomy/trust stakes; return harm, not none
     rule: NPC_STAKES=Y when the actual outcome's stakeChangeByOutcome is benefit or harm
     rule: NPC_STAKES=N when the actual outcome's stakeChangeByOutcome is none
 
@@ -818,7 +820,7 @@ export function hardStakeChangeFromTargetRole(npc, packet) {
     if (relation.isBenefited && !relation.isDirect && !relation.isOpp) return 'benefit';
     if (relation.isHarmed && !relation.isDirect && !relation.isOpp) return 'harm';
     if ((relation.isDirect || relation.isOpp) && packet.classifyHostilePhysicalIntent === 'Y' && landed) return 'harm';
-    if (relation.isDirect
+    if ((relation.isDirect || relation.isOpp)
         && ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)
         && packet.IntimacyConsent !== 'Y'
         && positiveOutcome) {
