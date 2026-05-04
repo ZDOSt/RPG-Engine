@@ -644,3 +644,987 @@ function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSn
       ReactionOutcome = aggressionReactionOutcome(margin)
       return AGGRESSION_RESULT {AttackType, AttackIntent, CounterPotential, CounterBonus, ReactionOutcome, Margin}
 }`;
+
+// Executable engine rules are the deterministic source of truth used by deterministic-runner.js.
+const NONE = '(none)';
+
+export function createDice() {
+    return {
+        d20() {
+            return Math.floor(Math.random() * 20) + 1;
+        },
+    };
+}
+
+export function hostilePhysicalOutcome(margin, actionLength) {
+    let outcome;
+    if (margin >= 8) outcome = { OutcomeTier: 'Critical_Success', LandedActions: 3, Outcome: 'dominant_impact', CounterPotential: 'none' };
+    else if (margin >= 5) outcome = { OutcomeTier: 'Moderate_Success', LandedActions: 2, Outcome: 'solid_impact', CounterPotential: 'none' };
+    else if (margin >= 1) outcome = { OutcomeTier: 'Minor_Success', LandedActions: 1, Outcome: 'light_impact', CounterPotential: 'none' };
+    else if (margin === 0) outcome = { OutcomeTier: 'Stalemate', LandedActions: 0, Outcome: 'struggle', CounterPotential: 'none' };
+    else if (margin >= -3) outcome = { OutcomeTier: 'Minor_Failure', LandedActions: 0, Outcome: 'checked', CounterPotential: 'light' };
+    else if (margin >= -7) outcome = { OutcomeTier: 'Moderate_Failure', LandedActions: 0, Outcome: 'deflected', CounterPotential: 'medium' };
+    else outcome = { OutcomeTier: 'Critical_Failure', LandedActions: 0, Outcome: 'avoided', CounterPotential: 'severe' };
+    outcome.LandedActions = Math.min(outcome.LandedActions, actionLength);
+    return outcome;
+}
+
+export function nonHostileOutcome(margin) {
+    if (margin >= 1) return { OutcomeTier: 'Success', LandedActions: '(none)', Outcome: 'success', CounterPotential: 'none' };
+    if (margin === 0) return { OutcomeTier: 'Stalemate', LandedActions: '(none)', Outcome: 'struggle', CounterPotential: 'none' };
+    return { OutcomeTier: 'Failure', LandedActions: '(none)', Outcome: 'failure', CounterPotential: 'none' };
+}
+
+export function counterBonusFromPotential(counterPotential) {
+    if (counterPotential === 'light') return 2;
+    if (counterPotential === 'medium') return 4;
+    if (counterPotential === 'severe') return 6;
+    return 0;
+}
+
+export function aggressionReactionOutcome(margin) {
+    if (margin >= 5) return 'npc_overpowers';
+    if (margin >= 1) return 'npc_succeeds';
+    if (margin === 0) return 'stalemate';
+    if (margin >= -3) return 'user_resists';
+    return 'user_dominates';
+}
+
+export function classifyUserNonHuman(text) {
+    const source = String(text ?? '');
+    if (!source.trim()) return { value: null, source: 'no persona text', evidence: null };
+
+    const raceEvidence = explicitRaceEvidence(source);
+    if (raceEvidence) {
+        const raceClassification = classifyRaceText(raceEvidence);
+        if (raceClassification.value != null) {
+            return {
+                ...raceClassification,
+                source: 'explicit Race/Species/Ancestry/Lineage field',
+                evidence: snippet(raceEvidence),
+            };
+        }
+    }
+
+    const visibleMonster = source.match(/\b(visibly|obviously|clearly|appears?|looks?)\b.{0,80}\b(demonic|demon|monstrous|monster|undead|eldritch|bestial|construct-like|inhuman)\b/i)
+        || source.match(/\b(demonic|demon|monstrous|monster|undead|eldritch|bestial|construct-like|inhuman)\b.{0,80}\b(visibly|obviously|clearly|appears?|looks?)\b/i);
+    if (visibleMonster) {
+        return {
+            value: true,
+            source: 'explicit visible monstrous/inhuman description',
+            evidence: snippet(visibleMonster[0]),
+        };
+    }
+
+    return { value: null, source: 'no deterministic race/species evidence', evidence: null };
+}
+
+export function explicitRaceEvidence(text) {
+    const matches = [...String(text).matchAll(/^\s*(?:[-*]\s*)?(?:Race|Species|Ancestry|Lineage|Heritage)\s*[:=]\s*(.+)$/gim)]
+        .map(match => match[1])
+        .filter(Boolean);
+    return matches.length ? matches.join('; ') : null;
+}
+
+export function classifyRaceText(text) {
+    const source = String(text ?? '').toLowerCase();
+    const monsterRace = /\b(half[-\s]?demon|demon|demonic|devil|fiend|cambion|monster|monstrous|orc|ogre|goblin|hobgoblin|bugbear|troll|undead|vampire|dhampir|lich|wraith|ghoul|zombie|skeleton|werewolf|lycanthrope|eldritch|aberration|construct|golem|beastfolk|lizardfolk|kobold|minotaur|oni)\b/.test(source);
+    if (monsterRace) return { value: true };
+
+    const typicalRace = /\b(human|mortal|elf|elven|half[-\s]?elf|dwarf|dwarven|halfling|hobbit|gnome|fairy|fae|pixie|aasimar)\b/.test(source);
+    if (typicalRace) return { value: false };
+
+    return { value: null };
+}
+
+export function isDefaultGeneratedCore(core) {
+    if (!core) return true;
+    const rank = String(core.Rank || 'none');
+    const mainStat = String(core.MainStat || 'none');
+    return rank === 'none'
+        && mainStat === 'none'
+        && Number(core.PHY ?? 1) === 1
+        && Number(core.MND ?? 1) === 1
+        && Number(core.CHA ?? 1) === 1;
+}
+
+export function initPreset(flags) {
+    if (bool(flags.romanticOpen)) return { label: 'romanticOpen', disposition: { B: 4, F: 1, H: 1 } };
+    if (bool(flags.userBadRep)) return { label: 'userBadRep', disposition: { B: 1, F: 2, H: 3 } };
+    if (bool(flags.userGoodRep)) return { label: 'userGoodRep', disposition: { B: 3, F: 1, H: 2 } };
+    if (bool(flags.userNonHuman) && !bool(flags.fearImmunity)) return { label: 'userNonHuman', disposition: { B: 1, F: 3, H: 2 } };
+    return { label: 'neutralDefault', disposition: { B: 2, F: 2, H: 2 } };
+}
+
+export function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem) {
+    const isDirect = includesName(packet.ActionTargets, npc);
+    const isOpp = includesName(packet.OppTargets?.NPC, npc);
+    const isBenefited = includesName(packet.BenefitedObservers, npc);
+    const isHarmed = includesName(packet.HarmedObservers, npc);
+    const landed = landedBool(packet.LandedActions);
+    const g = packet.GOAL;
+    const out = packet.Outcome;
+    const hasStakes = packet.STAKES === 'Y';
+
+    if (!isDirect && !isOpp && !isBenefited && !isHarmed) return 'No Change';
+    if (!hasStakes) {
+        if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g) && isAllowed === 'Y') return 'Bond';
+        return 'No Change';
+    }
+    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g)) {
+        if (isAllowed === 'Y') return 'Bond';
+        if (g === 'IntimacyAdvancePhysical') return 'FearHostility';
+        return 'Hostility';
+    }
+    if (auditInteraction === 'Y' && !isHarmed) return 'Bond';
+    if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
+    if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
+    if (bool(sem.explicitIntimidationOrCoercion)) return 'Fear';
+    if (landed && (isDirect || isOpp || isHarmed)) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
+    if (auditInteraction === 'Y') return 'Bond';
+    return 'No Change';
+}
+
+export function resolveStakeChangeByOutcome(npc, sem, packet) {
+    const outcomeKey = String(packet.Outcome || 'no_roll');
+    const semanticValue = normalizeStakeChange(sem.stakeChangeByOutcome?.[outcomeKey]);
+    if (packet.STAKES !== 'Y') return { value: semanticValue };
+
+    const hardValue = hardStakeChangeFromTargetRole(npc, packet);
+    if (!hardValue || semanticValue === hardValue) return { value: semanticValue };
+
+    return {
+        value: hardValue,
+        referee: {
+            hardRule: 'RelationshipEngine.stakeChangeByOutcome: target category plus actual successful outcome determines impossible benefit/harm contradiction',
+            outcome: outcomeKey,
+            from: semanticValue,
+            to: hardValue,
+            relation: relationToUserAction(npc, packet),
+        },
+    };
+}
+
+export function normalizeStakeChange(value) {
+    return ['benefit', 'harm', 'none'].includes(value) ? value : 'none';
+}
+
+export function hardStakeChangeFromTargetRole(npc, packet) {
+    const relation = relationToUserAction(npc, packet);
+    const positiveOutcome = ['success', 'dominant_impact', 'solid_impact', 'light_impact'].includes(packet.Outcome);
+    const landed = landedBool(packet.LandedActions);
+    if (!positiveOutcome && !landed) return null;
+
+    if (relation.isBenefited && !relation.isDirect && !relation.isOpp) return 'benefit';
+    if (relation.isHarmed && !relation.isDirect && !relation.isOpp) return 'harm';
+    if ((relation.isDirect || relation.isOpp) && packet.classifyHostilePhysicalIntent === 'Y' && landed) return 'harm';
+    if (relation.isDirect
+        && ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)
+        && packet.IntimacyConsent !== 'Y'
+        && positiveOutcome) {
+        return 'harm';
+    }
+
+    return null;
+}
+
+export function relationToUserAction(npc, packet) {
+    return {
+        isDirect: includesName(packet.ActionTargets, npc),
+        isOpp: includesName(packet.OppTargets?.NPC, npc),
+        isBenefited: includesName(packet.BenefitedObservers, npc),
+        isHarmed: includesName(packet.HarmedObservers, npc),
+    };
+}
+
+export function proactivityRefereeGuard(handoff, packet) {
+    const relation = handoff.RelationToUserAction || relationToUserAction(handoff.NPC, packet);
+    if (relation.isDirect || relation.isOpp || relation.isHarmed) return null;
+    if (relation.isBenefited && handoff.Target === 'Bond') {
+        return 'benefited observer cannot target user with aggression unless also direct/opposing/harmed';
+    }
+    if (handoff.NPC_STAKES === 'Y' && handoff.Target === 'Bond' && handoff.Landed === 'Y') {
+        return 'positive-stakes observer cannot convert benefit into user-targeting aggression';
+    }
+    if (handoff.Target === 'Bond'
+        && handoff.PressureMode === 'none'
+        && !['FREEZE', 'TERROR', 'HATRED'].includes(handoff.Lock)
+        && packet.classifyHostilePhysicalIntent !== 'Y'
+        && !['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)) {
+        return 'Bond-routed non-hostile interaction cannot become hostile proactivity without harm, opposition, lock, or pressure evidence';
+    }
+    return null;
+}
+
+export function updateRapport(currentRapport, target, rapportEncounterLock, mode = 'normal') {
+    if (rapportEncounterLock === 'Y') return { currentRapport, rapportEncounterLock: 'Y' };
+    if (mode === 'hostilePressure' && target === 'No Change') return { currentRapport, rapportEncounterLock: 'Y' };
+    if (['Bond', 'No Change'].includes(target)) return { currentRapport: Math.min(5, currentRapport + 1), rapportEncounterLock: 'Y' };
+    if (['Hostility', 'Fear', 'FearHostility'].includes(target)) return { currentRapport: Math.max(0, currentRapport - 1), rapportEncounterLock: 'Y' };
+    return { currentRapport, rapportEncounterLock };
+}
+
+export function applyHostilePhysicalPressure(npc, packet, state) {
+    if (packet.classifyHostilePhysicalIntent !== 'Y') return null;
+    if (packet.STAKES !== 'Y') return null;
+
+    const isDirect = includesName(packet.ActionTargets, npc);
+    const isOpp = includesName(packet.OppTargets?.NPC, npc);
+    const isHarmed = includesName(packet.HarmedObservers, npc);
+    if (!isDirect && !isOpp && !isHarmed) return null;
+
+    const landed = landedBool(packet.LandedActions);
+    const severity = hostilePressureSeverity(packet.Outcome);
+    const hostilePressure = clamp(state.hostilePressure + Math.max(1, severity), 0, 20);
+    const hostileLandedPressure = landed
+        ? clamp(state.hostileLandedPressure + Math.max(1, severity), 0, 20)
+        : state.hostileLandedPressure;
+
+    const pressureState = {
+        disposition: state.currentDisposition,
+        dominantLock: state.dominantLock,
+        pressureMode: state.pressureMode,
+    };
+
+    let deltas = { b: 0, f: 0, h: 0 };
+    let dominatedFearBreak = false;
+
+    if (!landed) {
+        if (hostilePressure >= 2) {
+            deltas = addDispositionPressure(pressureState, 1, 'failed');
+        }
+    } else if (packet.Outcome === 'light_impact') {
+        deltas = addDispositionPressure(pressureState, 1, 'landed');
+    } else if (['solid_impact', 'dominant_impact'].includes(packet.Outcome)) {
+        deltas = addDispositionPressure(pressureState, severity, 'dominance');
+        dominatedFearBreak = pressureState.pressureMode === 'dominated';
+    }
+
+    const target = targetFromDeltas(deltas);
+
+    return {
+        target,
+        deltas,
+        hostilePressure,
+        hostileLandedPressure,
+        dominantLock: pressureState.dominantLock,
+        pressureMode: pressureState.pressureMode,
+        dominatedFearBreak,
+    };
+}
+
+export function hostilePressureSeverity(outcome) {
+    if (outcome === 'dominant_impact') return 2;
+    if (outcome === 'solid_impact') return 2;
+    return 1;
+}
+
+export function addDispositionPressure(state, amount, mode) {
+    const disposition = state.disposition;
+    let deltas;
+
+    if (mode === 'failed') {
+        deltas = disposition.H > disposition.F
+            ? addHostilityPressure(state, amount)
+            : addFearPressure(state, amount);
+    } else if (mode === 'landed') {
+        deltas = disposition.F > disposition.H
+            ? addFearPressure(state, amount)
+            : addHostilityPressure(state, amount);
+    } else if (state.dominantLock === 'HOSTILITY' || disposition.H >= 4) {
+        state.pressureMode = 'dominated';
+        deltas = addFearPressure(state, amount, { noCorneredOverflow: true });
+    } else if (disposition.F > disposition.H) {
+        deltas = addFearPressure(state, amount);
+    } else if (disposition.H > disposition.F) {
+        deltas = addHostilityPressure(state, amount);
+    } else {
+        deltas = { b: -1, f: 1, h: 1 };
+    }
+
+    const projected = updateDisposition(disposition, deltas);
+    updatePressureLockState(state, disposition, projected);
+    return deltas;
+}
+
+export function addFearPressure(state, amount, options = {}) {
+    const room = Math.max(0, 4 - state.disposition.F);
+    const f = Math.min(amount, room);
+    const overflow = Math.max(0, amount - f);
+    const h = options.noCorneredOverflow ? 0 : overflow;
+
+    if (overflow > 0 && !options.noCorneredOverflow) {
+        state.pressureMode = 'cornered';
+        if (state.dominantLock === 'None') state.dominantLock = 'FEAR';
+    }
+
+    return { b: f || h ? -1 : 0, f, h };
+}
+
+export function addHostilityPressure(state, amount) {
+    return { b: -1, f: 0, h: amount };
+}
+
+export function updatePressureLockState(state, before, after) {
+    if (state.dominantLock !== 'None') return;
+
+    const fearHit = before.F < 4 && after.F >= 4;
+    const hostilityHit = before.H < 4 && after.H >= 4;
+
+    if (fearHit && !hostilityHit) state.dominantLock = 'FEAR';
+    else if (hostilityHit && !fearHit) state.dominantLock = 'HOSTILITY';
+    else if (fearHit && hostilityHit) state.dominantLock = state.pressureMode === 'cornered' ? 'FEAR' : 'HOSTILITY';
+}
+
+export function targetFromDeltas(deltas) {
+    if ((deltas.f || 0) > 0 && (deltas.h || 0) > 0) return 'FearHostility';
+    if ((deltas.f || 0) > 0) return 'Fear';
+    if ((deltas.h || 0) > 0) return 'Hostility';
+    return 'No Change';
+}
+
+export function deriveDirection(target, currentDisposition, currentRapport, auditInteraction) {
+    if (target === 'No Change') return { b: 0, f: 0, h: 0 };
+    if (target === 'Hostility') return { b: -1, f: 0, h: 1 };
+    if (target === 'Fear') return { b: -1, f: 1, h: 0 };
+    if (target === 'FearHostility') return { b: -1, f: 1, h: 1 };
+    if (currentDisposition.F === 4 || currentDisposition.H === 4) {
+        if (currentRapport >= 5 && ['Bond', 'No Change'].includes(target)) {
+            return { b: 0, f: currentDisposition.F === 4 ? -1 : 0, h: currentDisposition.H === 4 ? -1 : 0, rapportReset: 'Y' };
+        }
+        return { b: 0, f: 0, h: 0 };
+    }
+    if (currentDisposition.F === 3 || currentDisposition.H === 3) {
+        if (currentRapport >= 5 && ['Bond', 'No Change'].includes(target)) {
+            return { b: 0, f: currentDisposition.F === 3 ? -1 : 0, h: currentDisposition.H === 3 ? -1 : 0 };
+        }
+        return { b: 0, f: 0, h: 0 };
+    }
+    if (target === 'Bond') {
+        if (currentDisposition.B === 1) return currentRapport >= 1 ? { b: 1, f: 0, h: 0 } : { b: 0, f: 0, h: 0 };
+        if (currentDisposition.B === 2) return currentRapport >= 3 ? { b: 1, f: 0, h: 0 } : { b: 0, f: 0, h: 0 };
+        if (currentDisposition.B === 3) return currentRapport >= 5 && auditInteraction === 'Y' ? { b: 1, f: 0, h: 0 } : { b: 0, f: 0, h: 0 };
+    }
+    return { b: 0, f: 0, h: 0 };
+}
+
+export function updateDisposition(disposition, deltas) {
+    const next = {
+        B: clamp(disposition.B + (deltas.b || 0), 1, 4),
+        F: clamp(disposition.F + (deltas.f || 0), 1, 4),
+        H: clamp(disposition.H + (deltas.h || 0), 1, 4),
+    };
+    if (next.F >= 3 || next.H >= 3) next.B = 1;
+    return next;
+}
+
+export function classifyDisposition(disposition) {
+    const lock = disposition.F === 4 ? 'TERROR' : disposition.H === 4 ? 'HATRED' : (disposition.F === 3 || disposition.H === 3) ? 'FREEZE' : 'None';
+    const behavior = lock !== 'None' ? lock : disposition.B === 4 ? 'CLOSE' : disposition.B === 3 ? 'FRIENDLY' : disposition.B === 2 ? 'NEUTRAL' : 'BROKEN';
+    return { lock, behavior };
+}
+
+export function checkThreshold(disposition, flags) {
+    const LockActive = disposition.F >= 3 || disposition.H >= 3 ? 'Y' : 'N';
+    let Override = 'NONE';
+    if (disposition.B < 4) {
+        if (bool(flags.Exploitation)) Override = 'Exploitation';
+        else if (bool(flags.Hedonist)) Override = 'Hedonist';
+        else if (bool(flags.Transactional)) Override = 'Transactional';
+        else if (bool(flags.Established)) Override = 'Established';
+    }
+    return { LockActive, OverrideActive: Override !== 'NONE' ? 'Y' : 'N', Override };
+}
+
+export function currentIntimacyGateAllows(state, disposition = state?.currentDisposition || null, threshold = null) {
+    if (disposition?.F >= 3 || disposition?.H >= 3) {
+        return { allows: false, source: 'LOCK', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
+    }
+
+    if (state?.intimacyGate === 'ALLOW') {
+        if (state?.intimacyGateSource === 'B4' && disposition?.B < 4) {
+            return { allows: false, source: 'B4_EXPIRED', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
+        }
+        return { allows: true, source: state?.intimacyGateSource || 'PRIOR_ALLOW', evidence: { priorIntimacyGate: state?.intimacyGate || 'ALLOW' } };
+    }
+
+    if (threshold?.OverrideActive === 'Y') {
+        return { allows: true, source: `OVERRIDE:${threshold.Override}`, evidence: threshold };
+    }
+
+    if (disposition?.B >= 4) {
+        return { allows: true, source: 'B4', evidence: { currentDisposition: formatDisposition(disposition) } };
+    }
+
+    return { allows: false, source: 'NONE', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
+}
+
+export function getStakesOverrideEvidence(goal, intimacyTarget, targetState, preliminaryDisposition, preliminaryThreshold, intimacyAllowance, semanticHasStakes, intimacyConsent) {
+    if (!['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) return null;
+
+    const disposition = targetState?.currentDisposition || preliminaryDisposition || null;
+    const evidence = {
+        target: intimacyTarget || NONE,
+        currentDisposition: disposition ? formatDisposition(disposition) : null,
+        priorIntimacyGate: targetState?.intimacyGate || 'SKIP',
+        priorIntimacyGateSource: targetState?.intimacyGateSource || 'NONE',
+        checkThreshold: preliminaryThreshold,
+        allowanceSource: intimacyAllowance?.source || 'NONE',
+        intimacyConsent,
+    };
+
+    if (semanticHasStakes === 'Y' && intimacyConsent === 'Y' && intimacyAllowance?.source && intimacyAllowance.source !== 'NONE') {
+        return {
+            hasStakes: 'N',
+            rule: `hard_override_allowed_intimacy_${intimacyAllowance.source}`,
+            evidence: {
+                ...evidence,
+                hardRule: 'ResolutionEngine.hasStakes: allowed intimacy advance returns N',
+            },
+        };
+    }
+
+    if (semanticHasStakes === 'N' && intimacyConsent === 'N') {
+        return {
+            hasStakes: 'Y',
+            rule: 'hard_override_denied_intimacy_no_allow',
+            evidence: {
+                ...evidence,
+                hardRule: 'ResolutionEngine.hasStakes: denied intimacy advance returns Y',
+            },
+        };
+    }
+
+    return null;
+}
+
+export function resolveIntimacyGate(previousState, threshold, disposition, isAllowed, goal = '') {
+    const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
+
+    if (threshold.LockActive === 'Y') {
+        return { IntimacyGate: 'DENY', IntimacyGateSource: 'LOCK' };
+    }
+
+    if (isAllowed === 'Y') {
+        if (threshold.OverrideActive === 'Y') {
+            return { IntimacyGate: 'ALLOW', IntimacyGateSource: `OVERRIDE:${threshold.Override}` };
+        }
+        if (disposition.B >= 4) {
+            return { IntimacyGate: 'ALLOW', IntimacyGateSource: 'B4' };
+        }
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
+    }
+
+    if (threshold.OverrideActive === 'Y') {
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: `OVERRIDE:${threshold.Override}` };
+    }
+
+    if (disposition.B >= 4) {
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: 'B4' };
+    }
+
+    if (previousState.intimacyGate === 'ALLOW') {
+        if (previousState.intimacyGateSource === 'B4' && disposition.B < 4) {
+            return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
+        }
+        return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
+    }
+
+    if (previousState.intimacyGate === 'DENY') {
+        return { IntimacyGate: 'DENY', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_DENY' };
+    }
+
+    if (isIntimacyAdvance && isAllowed !== 'Y') {
+        return { IntimacyGate: 'DENY', IntimacyGateSource: 'CURRENT_DENIED' };
+    }
+
+    return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
+}
+
+export function getChaosContext(handoffs, sceneSummary) {
+    if (handoffs.length >= 2) return 'PUBLIC';
+    if (/\b(public|crowd|open|market|tavern|street|square)\b/i.test(sceneSummary)) return 'PUBLIC';
+    return 'ISOLATED';
+}
+
+export function classifyBand(o) {
+    if (o <= 5) return 'HOSTILE';
+    if (o <= 14) return 'COMPLICATION';
+    return 'BENEFICIAL';
+}
+
+export function classifyMagnitude(o) {
+    if (o === 1 || o === 20) return 'EXTREME';
+    if (o <= 2 || o >= 19) return 'MAJOR';
+    if (o <= 4 || o >= 17) return 'MODERATE';
+    return 'MINOR';
+}
+
+export function pickAnchor(index) {
+    return ['GOAL', 'ENVIRONMENT', 'KNOWN_NPC', 'RESOURCE', 'CLUE'][index % 5];
+}
+
+export function pickVector(ctx, i, index) {
+    const values = ctx === 'PUBLIC'
+        ? ['NPC', 'CROWD', 'AUTHORITY', 'ENVIRONMENT', 'SYSTEM']
+        : i >= 17
+            ? ['ENVIRONMENT', 'SYSTEM', 'ENTITY']
+            : ['ENVIRONMENT', 'SYSTEM'];
+    return values[index % values.length];
+}
+
+export function classifyAction(packet) {
+    if (packet.STAKES === 'N') return 'Normal_Interaction';
+    if (packet.GOAL === 'IntimacyAdvancePhysical') return 'Intimacy_Physical';
+    if (packet.GOAL === 'IntimacyAdvanceVerbal') return 'Intimacy_Verbal';
+    if (packet.classifyHostilePhysicalIntent === 'Y') return 'Combat';
+    if (landedBool(packet.LandedActions)) return 'Combat';
+    if (toRealArray(packet.ActionTargets).length >= 1 && packet.LandedActions === '(none)') return 'Social';
+    if (toRealArray(packet.OppTargets?.ENV).length >= 1) return 'Skill';
+    return 'Normal_Interaction';
+}
+
+export function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'none', target = 'No Change') {
+    if (pressureMode === 'cornered') return 'ANGER';
+    if (pressureMode === 'dominated') return 'FEAR';
+    if (lock === 'HATRED') return 'ANGER';
+    if (lock === 'TERROR') return 'FEAR';
+    if (target === 'Bond') return 'BOND';
+    if (target === 'Hostility') return 'ANGER';
+    if (target === 'Fear') return 'FEAR';
+    if (target === 'FearHostility') return fin.F > fin.H ? 'FEAR' : 'ANGER';
+    if (['Combat', 'Social'].includes(kind) && fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
+    if (kind === 'Social' && fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
+    if (['Intimacy_Physical', 'Intimacy_Verbal'].includes(kind) && intimacyGate === 'DENY') return 'ANGER';
+    if (['Normal_Interaction', 'Skill'].includes(kind) && fin.B >= fin.H && fin.B >= fin.F) return 'BOND';
+    if (fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
+    if (fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
+    return 'BOND';
+}
+
+export function classifyProactivityTier(handoff, chaosBand, counterPotential, lock, fin) {
+    const NPC_STAKES = handoff.NPC_STAKES || 'N';
+    const Target = handoff.Target || 'No Change';
+    const Landed = handoff.Landed || 'N';
+    if (['light', 'medium', 'severe'].includes(counterPotential) && ['HATRED', 'FREEZE'].includes(lock)) return 'FORCED';
+    if (NPC_STAKES === 'N' && Target === 'No Change' && chaosBand === 'None') {
+        if (fin.B >= 3 || fin.H >= 3) return 'MEDIUM';
+        return 'DORMANT';
+    }
+    if (lock !== 'None' && (Target !== 'No Change' || Landed === 'Y')) return 'HIGH';
+    if (NPC_STAKES === 'Y' && (Target !== 'No Change' || Landed === 'Y')) return 'HIGH';
+    if (lock !== 'None' && chaosBand !== 'None') return 'HIGH';
+    if (lock !== 'None') return 'MEDIUM';
+    if (NPC_STAKES === 'Y') return 'MEDIUM';
+    if (Target !== 'No Change' || Landed === 'Y') return 'MEDIUM';
+    if (chaosBand !== 'None') return 'LOW';
+    return 'DORMANT';
+}
+
+export function thresholdFromTier(tier) {
+    if (tier === 'FORCED') return 'AUTO';
+    if (tier === 'HIGH') return 8;
+    if (tier === 'MEDIUM') return 10;
+    if (tier === 'LOW') return 13;
+    return 16;
+}
+
+export function selectIntent(impulse, kind, fin, intimacyGate, override, pressureMode = 'none') {
+    if (pressureMode === 'cornered') {
+        return fin.H >= 4 ? 'ESCALATE_VIOLENCE' : 'BOUNDARY_PHYSICAL';
+    }
+
+    if (pressureMode === 'dominated') {
+        return fin.F >= 4 ? 'CALL_HELP_OR_AUTHORITY' : 'WITHDRAW_OR_BOUNDARY';
+    }
+
+    if (impulse === 'ANGER') {
+        if (kind === 'Intimacy_Physical' && intimacyGate === 'DENY') return 'BOUNDARY_PHYSICAL';
+        if (kind === 'Combat' || fin.H >= 4) return 'ESCALATE_VIOLENCE';
+        return 'THREAT_OR_POSTURE';
+    }
+    if (impulse === 'FEAR') {
+        if (fin.F >= 4) return 'CALL_HELP_OR_AUTHORITY';
+        return 'WITHDRAW_OR_BOUNDARY';
+    }
+    if ((intimacyGate === 'ALLOW' || override !== 'NONE') && fin.B >= 3) return 'INTIMACY_OR_FLIRT';
+    if (['Skill', 'Social'].includes(kind)) return 'SUPPORT_ACT';
+    return 'PLAN_OR_BANTER';
+}
+
+export function targetsUserFromIntent(intent) {
+    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(intent) ? 'Y' : 'N';
+}
+
+export function isImmediateAttackIntent(intent) {
+    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(intent);
+}
+
+export function buildNarrationGuidance(resolution, handoffs, chaos, proactivity, aggression) {
+    return {
+        resolution: `${resolution.OutcomeTier}/${resolution.Outcome}`,
+        relationshipStates: handoffs.map(h => `${h.NPC}:${h.FinalState}:${h.Behavior}:${h.IntimacyGate}`),
+        chaos: chaos.CHAOS,
+        proactivity,
+        aggression,
+        instruction: 'Narrate according to these computed outcomes. Do not expose mechanics unless the user asks OOC.',
+    };
+}
+
+export function buildPersistencePolicy() {
+    return {
+        staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
+        persistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportEncounterLock', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode'],
+        perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'CHAOS', 'proactivityResults', 'aggressionResults'],
+    };
+}
+
+export function trackerSummary(trackerUpdate) {
+    const npcs = Object.entries(trackerUpdate?.npcs || {});
+    if (!npcs.length) return 'N';
+
+    return npcs.map(([name, value]) => {
+        const disposition = value?.currentDisposition ? formatDisposition(value.currentDisposition) : 'UNINITIALIZED';
+        const stats = value?.currentCoreStats
+            ? `stats:${value.currentCoreStats.PHY}/${value.currentCoreStats.MND}/${value.currentCoreStats.CHA}`
+            : 'stats:none';
+        return [
+            name,
+            disposition,
+            `rapport:${value?.currentRapport ?? 0}`,
+            `gate:${value?.intimacyGate ?? 'SKIP'}`,
+            stats,
+            `pressure:${value?.hostilePressure ?? 0}/${value?.hostileLandedPressure ?? 0}/${value?.dominantLock ?? 'None'}/${value?.pressureMode ?? 'none'}`,
+        ].join('/');
+    }).join(';');
+}
+
+export function normalizeTrackerEntry(value) {
+    return {
+        currentDisposition: normalizeDisposition(value?.currentDisposition),
+        currentRapport: clamp(Number(value?.currentRapport ?? 0), 0, 5),
+        rapportEncounterLock: value?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
+        intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(value?.intimacyGate) ? value.intimacyGate : 'SKIP',
+        intimacyGateSource: normalizeIntimacyGateSource(value?.intimacyGateSource),
+        currentCoreStats: value?.currentCoreStats ? normalizeCore(value.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 }) : null,
+        hostilePressure: clamp(Number(value?.hostilePressure ?? 0), 0, 20),
+        hostileLandedPressure: clamp(Number(value?.hostileLandedPressure ?? 0), 0, 20),
+        dominantLock: ['FEAR', 'HOSTILITY'].includes(value?.dominantLock) ? value.dominantLock : 'None',
+        pressureMode: ['none', 'cornered', 'dominated'].includes(value?.pressureMode) ? value.pressureMode : 'none',
+    };
+}
+
+export function normalizeIntimacyGateSource(value) {
+    const text = String(value ?? 'NONE');
+    if (text === 'B4' || text === 'LOCK' || text === 'NONE' || text === 'PRIOR_ALLOW' || text === 'PRIOR_DENY' || text === 'CURRENT_DENIED') return text;
+    if (text.startsWith('OVERRIDE:')) return text;
+    return 'NONE';
+}
+
+export function normalizeDisposition(value) {
+    if (!value) return null;
+    if (typeof value === 'string') {
+        const match = value.match(/B(\d+)\/F(\d+)\/H(\d+)/i);
+        if (match) return { B: Number(match[1]), F: Number(match[2]), H: Number(match[3]) };
+    }
+    if (typeof value === 'object' && value.B && value.F && value.H) {
+        return { B: clamp(Number(value.B), 1, 4), F: clamp(Number(value.F), 1, 4), H: clamp(Number(value.H), 1, 4) };
+    }
+    return null;
+}
+
+export function normalizeTargets(value) {
+    return {
+        ActionTargets: toRealArray(value?.ActionTargets),
+        OppTargets: {
+            NPC: toRealArray(value?.OppTargets?.NPC),
+            ENV: toRealArray(value?.OppTargets?.ENV),
+        },
+        BenefitedObservers: toRealArray(value?.BenefitedObservers),
+        HarmedObservers: toRealArray(value?.HarmedObservers),
+    };
+}
+
+export function sanitizeTargets(targets, classifier, options = {}) {
+    const actionTargets = [];
+    const oppNpc = [];
+    const oppEnv = [...targets.OppTargets.ENV];
+    const benefitedCandidates = [];
+    const harmedCandidates = [];
+
+    for (const name of targets.ActionTargets) {
+        if (classifier.isLiving(name)) actionTargets.push(name);
+        else oppEnv.push(name);
+    }
+    for (const name of targets.OppTargets.NPC) {
+        if (classifier.isLiving(name)) {
+            if (options.hasStakes === 'N') actionTargets.push(name);
+            else oppNpc.push(name);
+        }
+        else oppEnv.push(name);
+    }
+    for (const name of targets.BenefitedObservers) {
+        if (classifier.isLiving(name)) benefitedCandidates.push(name);
+        else oppEnv.push(name);
+    }
+    for (const name of targets.HarmedObservers) {
+        if (classifier.isLiving(name)) harmedCandidates.push(name);
+        else oppEnv.push(name);
+    }
+
+    const directOrOpposed = new Set([...actionTargets, ...oppNpc].map(normalizeNameKey));
+    const benefited = benefitedCandidates.filter(name => !directOrOpposed.has(normalizeNameKey(name)));
+    const harmed = harmedCandidates.filter(name => !directOrOpposed.has(normalizeNameKey(name)));
+
+    return {
+        ActionTargets: unique(actionTargets),
+        OppTargets: {
+            NPC: unique(oppNpc),
+            ENV: unique(oppEnv.filter(isReal)),
+        },
+        BenefitedObservers: unique(benefited),
+        HarmedObservers: unique(harmed),
+    };
+}
+
+export function sameTargets(a, b) {
+    return JSON.stringify(targetSummary(a)) === JSON.stringify(targetSummary(b));
+}
+
+export function targetSummary(targets) {
+    return {
+        ActionTargets: showNone(targets.ActionTargets),
+        OppTargets: {
+            NPC: showNone(targets.OppTargets?.NPC),
+            ENV: showNone(targets.OppTargets?.ENV),
+        },
+        BenefitedObservers: showNone(targets.BenefitedObservers),
+        HarmedObservers: showNone(targets.HarmedObservers),
+    };
+}
+
+export function normalizeNameKey(name) {
+    const text = String(name ?? '').trim().toLowerCase();
+    return isReal(text) ? text : '';
+}
+
+export function normalizeActionMarkers(markers) {
+    if (!Array.isArray(markers) || markers.length === 0) return ['a1'];
+    return markers.slice(0, 3).map((_, index) => `a${index + 1}`);
+}
+
+export function normalizeCore(value, fallback) {
+    return {
+        Rank: normalizeRank(value?.Rank ?? fallback.Rank),
+        MainStat: normalizeMainStat(value?.MainStat ?? fallback.MainStat),
+        PHY: clamp(Number(value?.PHY ?? fallback.PHY), 1, 10),
+        MND: clamp(Number(value?.MND ?? fallback.MND), 1, 10),
+        CHA: clamp(Number(value?.CHA ?? fallback.CHA), 1, 10),
+    };
+}
+
+export function getUserCoreStats(ledger) {
+    return normalizeCore(ledger?.engineContext?.userCoreStats, { Rank: 'none', MainStat: 'none', PHY: 1, MND: 1, CHA: 1 });
+}
+
+export function normalizeRank(value) {
+    return ['Weak', 'Average', 'Trained', 'Elite', 'Boss', 'none'].includes(value) ? value : 'none';
+}
+
+export function normalizeMainStat(value) {
+    return ['PHY', 'MND', 'CHA', 'Balanced', 'none'].includes(value) ? value : 'none';
+}
+
+export function statValue(core, stat) {
+    return normalizeCore(core, { PHY: 1, MND: 1, CHA: 1 })[stat] || 1;
+}
+
+export function normalizeStat(value, fallback) {
+    return ['PHY', 'MND', 'CHA'].includes(value) ? value : fallback;
+}
+
+export function normalizeOppStat(value) {
+    return ['PHY', 'MND', 'CHA', 'ENV'].includes(value) ? value : 'ENV';
+}
+
+export function normalizeMapStats(value) {
+    return {
+        userStat: normalizeStat(value?.USER, 'PHY'),
+        oppStat: normalizeOppStat(value?.OPP),
+    };
+}
+
+export function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit) {
+    let { userStat, oppStat } = mapStats;
+    const evidence = [];
+
+    if (isBodyAffectingMagic(semantic, goal, targets)) {
+        if (userStat !== 'MND' || oppStat !== 'PHY') {
+            evidence.push({
+                hardRule: 'ResolutionEngine.mapStats: body-affecting magic against a living target is USER=MND and OPP=PHY',
+                from: { USER: userStat, OPP: oppStat },
+                to: { USER: 'MND', OPP: 'PHY' },
+            });
+        }
+        userStat = 'MND';
+        oppStat = 'PHY';
+    }
+
+    const socialRule = classifySocialMapStatsRule(semantic, targets);
+    if (socialRule) {
+        if (userStat !== 'CHA' || oppStat !== socialRule.oppStat) {
+            evidence.push({
+                hardRule: socialRule.hardRule,
+                from: { USER: userStat, OPP: oppStat },
+                to: { USER: 'CHA', OPP: socialRule.oppStat },
+            });
+        }
+        userStat = 'CHA';
+        oppStat = socialRule.oppStat;
+    }
+
+    const hasLivingOpposition = toRealArray(targets.OppTargets?.NPC).length > 0;
+    if (!hasLivingOpposition && oppStat !== 'ENV') {
+        evidence.push({
+            hardRule: 'ResolutionEngine.mapStats: no living opposing target means OPP=ENV',
+            from: { USER: userStat, OPP: oppStat },
+            to: { USER: userStat, OPP: 'ENV' },
+        });
+        oppStat = 'ENV';
+    }
+
+    if (evidence.length) {
+        audit.push(`2.7c.1 deterministicMapStatsReferee=${compact(evidence)}`);
+    }
+
+    return { userStat, oppStat };
+}
+
+export function classifySocialMapStatsRule(semantic, targets) {
+    if (!firstReal(targets.OppTargets?.NPC)) return null;
+    if (bool(semantic.classifyHostilePhysicalIntent)) return null;
+    if (isBodyAffectingMagic(semantic, semantic.identifyGoal, targets)) return null;
+
+    const source = [
+        semantic.identifyGoal,
+        semantic.explicitMeans,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    const negative = /\b(bluff|lie|lying|deceiv|deception|trick|mislead|intimidat|coerc|threat|blackmail|manipulat|interrogat|humiliat|terroriz|menac|force(?:d)? submission|forced submission)\b/.test(source);
+    if (negative) {
+        return {
+            oppStat: 'MND',
+            hardRule: 'ResolutionEngine.mapStats: negative social opposition is USER=CHA and OPP=MND',
+        };
+    }
+
+    const positive = /\b(persuad|persuasion|negotiat|negotiation|diplomac|diplomacy|bargain|reassur|reconciliation|reconcile|good-faith|appeal|convince|reason with|mediate)\b/.test(source);
+    if (positive) {
+        return {
+            oppStat: 'CHA',
+            hardRule: 'ResolutionEngine.mapStats: positive social opposition is USER=CHA and OPP=CHA',
+        };
+    }
+
+    return null;
+}
+
+export function isBodyAffectingMagic(semantic, goal, targets) {
+    if (!firstReal(targets.OppTargets?.NPC) && !firstReal(targets.ActionTargets)) return false;
+    if (bool(semantic.classifyHostilePhysicalIntent)) return false;
+
+    const source = [
+        semantic.identifyGoal,
+        goal,
+        semantic.explicitMeans,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    const hasMagic = /\b(magic|magical|spell|arcane|hex|curse|supernatural|enchant|enchantment|sorcery|power)\b/.test(source);
+    const affectsBody = /\b(paraly[sz]e|paralysis|poison|venom|blind|blindness|deafen|numb|sleep|pain|muscle|blood|breath|choke|disease|sicken|transmut|petrif|bind|bodily|body|immobiliz|lock|freeze|stun)\b/.test(source);
+    return hasMagic && affectsBody;
+}
+
+export function parseFinalState(value) {
+    return normalizeDisposition(value) || { B: 2, F: 2, H: 2 };
+}
+
+export function deriveLock(fin) {
+    if (fin.F === 4) return 'TERROR';
+    if (fin.H === 4) return 'HATRED';
+    if (fin.F === 3 || fin.H === 3) return 'FREEZE';
+    return 'None';
+}
+
+export function landedBool(value) {
+    return Number(value) > 0;
+}
+
+export function includesName(list, name) {
+    return toRealArray(list).some(x => String(x).toLowerCase() === String(name).toLowerCase());
+}
+
+export function sameName(a, b) {
+    return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+export function toRealArray(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(x => String(x).trim()).filter(isReal);
+}
+
+export function showNone(value) {
+    const array = Array.isArray(value) ? value.filter(isReal) : [];
+    return array.length ? array : [NONE];
+}
+
+export function firstReal(value) {
+    return toRealArray(value)[0] || null;
+}
+
+export function isReal(value) {
+    const text = String(value ?? '').trim();
+    return text && text !== NONE && text.toLowerCase() !== 'none' && text.toLowerCase() !== 'null';
+}
+
+export function bool(value) {
+    return value === true || value === 'Y' || value === 'y' || value === 'true';
+}
+
+export function yn(value) {
+    return bool(value) ? 'Y' : 'N';
+}
+
+export function unique(values) {
+    return [...new Set(values)];
+}
+
+export function clamp(value, min, max) {
+    if (!Number.isFinite(value)) return min;
+    return Math.max(min, Math.min(max, value));
+}
+
+export function formatTargets(targets) {
+    return compact({
+        ActionTargets: showNone(targets.ActionTargets),
+        OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
+        BenefitedObservers: showNone(targets.BenefitedObservers),
+        HarmedObservers: showNone(targets.HarmedObservers),
+    });
+}
+
+export function formatDisposition(disposition) {
+    return `B${disposition.B}/F${disposition.F}/H${disposition.H}`;
+}
+
+export function compact(value) {
+    return JSON.stringify(value);
+}
+
+export function snippet(value, maxLength = 180) {
+    const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+    return text.length <= maxLength ? text : `${text.slice(0, maxLength)}...`;
+}
+
+export function stableStringify(value) {
+    return JSON.stringify(value, null, 2);
+}
