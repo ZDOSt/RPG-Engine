@@ -1,11 +1,13 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
 
-export async function extractSemanticLedger(context, coreChat, type, trackerSnapshot) {
+export async function extractSemanticLedger(context, promptContext, type, trackerSnapshot, options = {}) {
     if (!context?.generateRawData) {
         throw new Error('SillyTavern generateRawData API is unavailable.');
     }
 
-    const prompt = buildSemanticPrompt(context, coreChat, type, trackerSnapshot);
+    const prompt = options?.assembledPrompt
+        ? buildSemanticPromptFromAssembledChat(context, promptContext, type, trackerSnapshot)
+        : buildSemanticPrompt(context, promptContext, type, trackerSnapshot);
     const raw = await generateSemanticRaw(context, prompt);
 
     let ledger;
@@ -49,11 +51,12 @@ export async function extractSemanticLedger(context, coreChat, type, trackerSnap
     return normalized;
 }
 
-async function generateSemanticRaw(context, prompt, responseLength = 1800) {
-    return await context.generateRawData({
-        prompt,
-        responseLength,
-    });
+async function generateSemanticRaw(context, prompt, responseLength = null) {
+    const options = { prompt };
+    if (Number.isFinite(responseLength) && responseLength > 0) {
+        options.responseLength = responseLength;
+    }
+    return await context.generateRawData(options);
 }
 
 const COMPACT_LEDGER_CONTRACT = [
@@ -146,25 +149,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
     return [
         {
             role: 'system',
-            content:
-                'You are the semantic extraction pass for a SillyTavern roleplay rules extension. ' +
-                'The output contract is mandatory and non-negotiable: return exactly one compact preflight ledger block matching the supplied engine-name-anchored lines. ' +
-                'Any response that renames fields, returns JSON, returns prose, returns markdown fences, returns an empty block, or leaves required lines missing is completely invalid and will be discarded. ' +
-                'Do not narrate. Do not roll dice. Do not calculate outcomes. ' +
-                'Classify only contextual/semantic predicates needed by the engines. Use EXPLICIT-ONLY and FIRST-YES-WINS from the engine reference. ' +
-                'The semantic/contextual fields you return are authoritative; the deterministic runner should not reinterpret them. ' +
-                'hasStakes is contextual and FINAL: return true only when success or failure would materially change stakes under DEF.STAKES; return false for truly no-stakes acts. ' +
-                'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, RelationshipEngine NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
-                'OppTargets.NPC is only for stakes-bearing living opposition/resistance/contest. If hasStakes=false, OppTargets.NPC must be ["(none)"] unless a hard intimacy gate rule makes stakes true. If a living ActionTarget meaningfully resists/opposes a stakes-bearing action, that same NPC may also appear in OppTargets.NPC. ' +
-                'BenefitedObservers and HarmedObservers are living entities present in scene who are NOT already in ActionTargets or OppTargets.NPC. Do not put a direct target or opposing NPC in observer lists. ' +
-                'Create one relationshipEngine entry for each living NPC in ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, or otherwise directly interacted with or materially affected by the last user input. ' +
-                'For each living NPC in relationshipEngine, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. For denied intimacy advances toward a direct/opposing NPC target, successful or landed outcomes worsen that NPC boundary/autonomy/trust stakes, so use harm and not none. ' +
-                'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into ResolutionEngine genStats and the matching RelationshipEngine genStats. ' +
-                'Do not leave a named portrayed NPC as Rank none or 1/1/1 unless the card, scene, and tracker give no explicit portrayal at all.',
-        },
-        {
-            role: 'system',
-            content: `Active names: user=${userName}, character=${charName}\nGeneration type=${type || 'normal'}\nTracker snapshot JSON:\n${JSON.stringify(trackerSnapshot, null, 2)}`,
+            content: `Engine reference:\n${ENGINE_PROMPT_TEXT}`,
         },
         {
             role: 'system',
@@ -176,29 +161,117 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
         },
         {
             role: 'system',
+            content:
+                `Recent chat context, newest last:\n${chatContext}`,
+        },
+        {
+            role: 'system',
+            content:
+                buildSemanticContractText(userName, charName, type, trackerSnapshot),
+        },
+        {
+            role: 'user',
+            content:
+                'MANDATORY OUTPUT CONTRACT: Return one compact ledger block with these exact field names. Do not output anything before BEGIN_SEMANTIC_PREFLIGHT or after END_SEMANTIC_PREFLIGHT. Your first visible output token must be BEGIN_SEMANTIC_PREFLIGHT.\n' +
+                COMPACT_LEDGER_TEMPLATE,
+        },
+    ];
+}
+
+function buildSemanticPromptFromAssembledChat(context, assembledChat, type, trackerSnapshot) {
+    const userName = context.name1 || 'User';
+    const charName = context.name2 || 'Assistant';
+    const assembledMessages = normalizeAssembledPromptMessages(assembledChat);
+
+    return [
+        {
+            role: 'system',
             content: `Engine reference:\n${ENGINE_PROMPT_TEXT}`,
         },
         {
             role: 'system',
             content:
-                'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
-                'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
-                'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your ledger. ' +
-                'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
-                'Then fill CHAOS_INTERRUPT.sceneSummary, NameGenerationEngine lines, and NPCProactivityEngine.cap from their engine/contextual requirements. ' +
-                'Tie rule override: exact roll ties are cinematic stalemates/struggles, not defender wins; include stakeChangeByOutcome.struggle accordingly. ' +
-                'Do not use deterministic outcomes, dice, or guesses to change semantic stakes.',
+                'The following messages are the fully assembled SillyTavern prompt for the pending narration pass. ' +
+                'They include the active preset, character card, persona, scenario, lore/world info, depth prompts, and visible chat history that fit the current ST context budget. ' +
+                'Use them only as context for semantic extraction. Do not answer, continue, or narrate these messages.',
+        },
+        ...assembledMessages,
+        {
+            role: 'system',
+            content: buildSemanticContractText(userName, charName, type, trackerSnapshot),
         },
         {
             role: 'user',
             content:
-                `Recent chat context, newest last:\n${chatContext}\n\n` +
-                'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. identifyChallenge is the explicit stakes-bearing action/challenge; ignore incidental gestures, setup, delivery method, movement, or flavor unless that act itself carries stakes. classifyHostilePhysicalIntent is true for explicit non-consensual physical force against a living entity, including attacks, shoves, grabs, pins, restraint, immobilization, forced movement, blocking escape, or preventing casting/action; it is false for helpful/consensual touch, purely social pressure, ENV force, or purely mental/supernatural effects. For intimacy advances toward a named NPC, put that NPC in ActionTargets; if they resist, contest, oppose, or consent-gate the advance, also put that same NPC in OppTargets.NPC. If IntimacyConsent=false/IntimacyGate=DENY, successful or landed intimacy outcomes for that target worsen boundary/autonomy/trust stakes; stakeChangeByOutcome for success/dominant_impact/solid_impact/light_impact must be harm, not none. ActionTargets and observers must be living entities only; non-living obstacles/objects/hazards/effects go only in OppTargets.ENV. OppTargets.NPC requires stakes-bearing living opposition; no-stakes social attention, casual banter, compliments, or flavor actions should keep the NPC as ActionTarget only. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. A protected/rescued NPC is a BenefitedObserver unless {{user}} directly acts on that NPC. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure of the final goal or explicit challenge materially affects safety, harm, danger, detection, material gain/loss, significant status/authority/trust, autonomy/physical freedom, hostile restraint/immobilization/confinement, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. For mapStats, map the stat from the final goal or explicit challenge that carries stakes, not incidental gestures, flavor, delivery method, or setup. Denied/opposed IntimacyAdvancePhysical is USER=PHY and OPP=PHY even when the approach includes romantic, seductive, verbal, or social framing. Positive social opposition such as persuasion, negotiation, diplomacy, bargaining, reassurance, reconciliation, or good-faith appeal against a living opposing target is USER=CHA and OPP=CHA; negative social opposition such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target is USER=CHA and OPP=MND. Body-affecting magic against a living target (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding) is USER=MND and OPP=PHY; non-living hazards/effects remain OppTargets.ENV and OPP=ENV unless a living target explicitly resists. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit only if that outcome significantly and concretely improves their stakes; harm if it materially worsens their stakes; otherwise none. Do not mark benefit for compliments, flirting, mood improvement, politeness, ordinary conversation, user self-advancement, successful negotiation for the user, choosing not to harm the NPC, failing to harm the NPC, de-escalation without a concrete NPC gain, or the NPC merely surviving/remaining safe.\n\n' +
-                COMPACT_LEDGER_CONTRACT +
-                '\n\nMANDATORY OUTPUT CONTRACT: Return one compact ledger block with these exact field names. Do not output anything before BEGIN_SEMANTIC_PREFLIGHT or after END_SEMANTIC_PREFLIGHT.\n' +
+                'MANDATORY OUTPUT CONTRACT: Return one compact ledger block with these exact field names. Do not output anything before BEGIN_SEMANTIC_PREFLIGHT or after END_SEMANTIC_PREFLIGHT. Your first visible output token must be BEGIN_SEMANTIC_PREFLIGHT.\n' +
                 COMPACT_LEDGER_TEMPLATE,
         },
     ];
+}
+
+function buildSemanticContractText(userName, charName, type, trackerSnapshot) {
+    return `Active names: user=${userName}, character=${charName}\nGeneration type=${type || 'normal'}\nTracker snapshot JSON:\n${JSON.stringify(trackerSnapshot, null, 2)}\n\n` +
+        'You are the semantic extraction pass for a SillyTavern roleplay rules extension. ' +
+        'The output contract is mandatory and non-negotiable: return exactly one compact preflight ledger block matching the supplied engine-name-anchored lines. ' +
+        'Any response that renames fields, returns JSON, returns prose, returns markdown fences, returns an empty block, or leaves required lines missing is completely invalid and will be discarded. ' +
+        'Do not narrate. Do not roll dice. Do not calculate outcomes. ' +
+        'Classify only contextual/semantic predicates needed by the engines. Use EXPLICIT-ONLY and FIRST-YES-WINS from the engine reference. ' +
+        'The semantic/contextual fields you return are authoritative; the deterministic runner should not reinterpret them. ' +
+        'hasStakes is contextual and FINAL: return true only when success or failure would materially change stakes under DEF.STAKES; return false for truly no-stakes acts. ' +
+        'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, RelationshipEngine NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
+        'OppTargets.NPC is only for stakes-bearing living opposition/resistance/contest. If hasStakes=false, OppTargets.NPC must be ["(none)"] unless a hard intimacy gate rule makes stakes true. If a living ActionTarget meaningfully resists/opposes a stakes-bearing action, that same NPC may also appear in OppTargets.NPC. ' +
+        'BenefitedObservers and HarmedObservers are living entities present in scene who are NOT already in ActionTargets or OppTargets.NPC. Do not put a direct target or opposing NPC in observer lists. ' +
+        'Create one relationshipEngine entry for each living NPC in ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, or otherwise directly interacted with or materially affected by the last user input. ' +
+        'For each living NPC in relationshipEngine, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. For denied intimacy advances toward a direct/opposing NPC target, successful or landed outcomes worsen that NPC boundary/autonomy/trust stakes, so use harm and not none. ' +
+        'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into ResolutionEngine genStats and the matching RelationshipEngine genStats. ' +
+        'Do not leave a named portrayed NPC as Rank none or 1/1/1 unless the card, scene, and tracker give no explicit portrayal at all. ' +
+        'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
+        'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
+        'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your ledger. ' +
+        'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
+        'Then fill CHAOS_INTERRUPT.sceneSummary, NameGenerationEngine lines, and NPCProactivityEngine.cap from their engine/contextual requirements. ' +
+        'Tie rule override: exact roll ties are cinematic stalemates/struggles, not defender wins; include stakeChangeByOutcome.struggle accordingly. ' +
+        'Do not use deterministic outcomes, dice, or guesses to change semantic stakes. ' +
+        'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. identifyChallenge is the explicit stakes-bearing action/challenge; ignore incidental gestures, setup, delivery method, movement, or flavor unless that act itself carries stakes. classifyHostilePhysicalIntent is true for explicit non-consensual physical force against a living entity, including attacks, shoves, grabs, pins, restraint, immobilization, forced movement, blocking escape, or preventing casting/action; it is false for helpful/consensual touch, purely social pressure, ENV force, or purely mental/supernatural effects. For intimacy advances toward a named NPC, put that NPC in ActionTargets; if they resist, contest, oppose, or consent-gate the advance, also put that same NPC in OppTargets.NPC. If IntimacyConsent=false/IntimacyGate=DENY, successful or landed intimacy outcomes for that target worsen boundary/autonomy/trust stakes; stakeChangeByOutcome for success/dominant_impact/solid_impact/light_impact must be harm, not none. ActionTargets and observers must be living entities only; non-living obstacles/objects/hazards/effects go only in OppTargets.ENV. OppTargets.NPC requires stakes-bearing living opposition; no-stakes social attention, casual banter, compliments, or flavor actions should keep the NPC as ActionTarget only. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. A protected/rescued NPC is a BenefitedObserver unless {{user}} directly acts on that NPC. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure of the final goal or explicit challenge materially affects safety, harm, danger, detection, material gain/loss, significant status/authority/trust, autonomy/physical freedom, hostile restraint/immobilization/confinement, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. For mapStats, map the stat from the final goal or explicit challenge that carries stakes, not incidental gestures, flavor, delivery method, or setup. Denied/opposed IntimacyAdvancePhysical is USER=PHY and OPP=PHY even when the approach includes romantic, seductive, verbal, or social framing. Positive social opposition such as persuasion, negotiation, diplomacy, bargaining, reassurance, reconciliation, or good-faith appeal against a living opposing target is USER=CHA and OPP=CHA; negative social opposition such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target is USER=CHA and OPP=MND. Body-affecting magic against a living target (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding) is USER=MND and OPP=PHY; non-living hazards/effects remain OppTargets.ENV and OPP=ENV unless a living target explicitly resists. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit only if that outcome significantly and concretely improves their stakes; harm if it materially worsens their stakes; otherwise none. Do not mark benefit for compliments, flirting, mood improvement, politeness, ordinary conversation, user self-advancement, successful negotiation for the user, choosing not to harm the NPC, failing to harm the NPC, de-escalation without a concrete NPC gain, or the NPC merely surviving/remaining safe.\n\n' +
+        COMPACT_LEDGER_CONTRACT;
+}
+
+function normalizeAssembledPromptMessages(assembledChat) {
+    const rows = Array.isArray(assembledChat) ? assembledChat : [];
+    return rows
+        .map(message => {
+            const role = ['system', 'user', 'assistant', 'tool'].includes(message?.role) ? message.role : 'system';
+            const content = sanitizeAssembledContent(message?.content);
+            if (isEmptyContent(content)) return null;
+            return {
+                role,
+                content,
+                ...(message?.name ? { name: message.name } : {}),
+            };
+        })
+        .filter(Boolean);
+}
+
+function sanitizeAssembledContent(content) {
+    if (typeof content === 'string') {
+        return stripStructuredDebug(content).trim();
+    }
+    if (Array.isArray(content)) {
+        return content.map(part => {
+            if (part && typeof part === 'object' && typeof part.text === 'string') {
+                return { ...part, text: stripStructuredDebug(part.text).trim() };
+            }
+            return part;
+        }).filter(part => !isEmptyContent(part?.text ?? part));
+    }
+    return content;
+}
+
+function isEmptyContent(content) {
+    if (content == null) return true;
+    if (typeof content === 'string') return !content.trim();
+    if (Array.isArray(content)) return content.length === 0;
+    return false;
 }
 
 function formatCardContext(context) {

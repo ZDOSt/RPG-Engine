@@ -29,12 +29,15 @@ console.info(`[${EXTENSION_NAME}] module import started`);
 
 const state = {
     runningSemanticPass: false,
+    bypassPromptReady: false,
     activeRunId: null,
     lastDebugPrefix: '',
     lastDebugKey: null,
     pendingRun: null,
     chatSignature: [],
     subscribed: false,
+    pendingGeneration: null,
+    progressToast: null,
 };
 
 function getContext() {
@@ -52,20 +55,6 @@ function injectRuntimeSentinel() {
         ENGINE_PROMPT_KEY,
         ENGINE_RUNTIME_SENTINEL,
         EXTENSION_PROMPT_TYPES.IN_PROMPT,
-        0,
-        false,
-        EXTENSION_PROMPT_ROLES.SYSTEM,
-    );
-}
-
-function injectNarratorContext(value) {
-    const context = getContext();
-    if (!context?.setExtensionPrompt) return;
-
-    context.setExtensionPrompt(
-        NARRATOR_PROMPT_KEY,
-        value,
-        EXTENSION_PROMPT_TYPES.IN_CHAT,
         0,
         false,
         EXTENSION_PROMPT_ROLES.SYSTEM,
@@ -286,6 +275,9 @@ function handleChatChanged() {
 }
 
 function handleGenerationLifecycleEnd() {
+    clearProgress(state.progressToast);
+    state.progressToast = null;
+    state.pendingGeneration = null;
     clearRuntimePrompts();
 }
 
@@ -302,6 +294,7 @@ function subscribeMessageHandler() {
     if (context.eventTypes.CHAT_CREATED) context.eventSource.on(context.eventTypes.CHAT_CREATED, handleChatChanged);
     if (context.eventTypes.GENERATION_ENDED) context.eventSource.on(context.eventTypes.GENERATION_ENDED, handleGenerationLifecycleEnd);
     if (context.eventTypes.GENERATION_STOPPED) context.eventSource.on(context.eventTypes.GENERATION_STOPPED, handleGenerationLifecycleEnd);
+    if (context.eventTypes.CHAT_COMPLETION_PROMPT_READY) context.eventSource.on(context.eventTypes.CHAT_COMPLETION_PROMPT_READY, handleChatCompletionPromptReady);
     state.subscribed = true;
 }
 
@@ -325,40 +318,110 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
 
     state.chatSignature = captureChatSignature(context);
     restoreTrackerForRegeneration(type);
+    state.pendingGeneration = {
+        type: type || 'normal',
+        trackerSnapshot: buildTrackerSnapshot(context),
+        contextSize,
+        createdAt: Date.now(),
+    };
+    state.activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    state.progressToast = showProgress('Computing structured pre-flight...');
 
-    let progressToast = null;
+    return false;
+};
+
+async function handleChatCompletionPromptReady(eventData) {
+    if (state.bypassPromptReady || state.runningSemanticPass) return;
+    if (!eventData || eventData.dryRun || !Array.isArray(eventData.chat)) return;
+    if (!state.pendingGeneration) return;
+
+    const context = getContext();
+    if (!context) return;
+
     try {
         state.runningSemanticPass = true;
-        state.activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        progressToast = showProgress('Computing structured pre-flight...');
-        const trackerSnapshot = buildTrackerSnapshot(context);
-        const semanticLedger = await extractSemanticLedger(context, coreChat, type, trackerSnapshot);
-        const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, type);
+        const trackerSnapshot = state.pendingGeneration.trackerSnapshot || buildTrackerSnapshot(context);
+        const semanticLedger = await runSemanticPassWithPromptReadyBypass(
+            context,
+            eventData.chat,
+            state.pendingGeneration.type,
+            trackerSnapshot,
+        );
+        const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, state.pendingGeneration.type);
         await saveTrackerUpdate(context, report.trackerUpdate);
+
         const audit = formatPreFlightDebug(report);
         const narratorContext = formatNarratorPromptContext(report);
         state.pendingRun = {
-            type: type || 'normal',
+            type: state.pendingGeneration.type || 'normal',
             trackerBefore: trackerSnapshot,
             trackerAfter: report.trackerUpdate?.npcs || {},
         };
         state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
-        injectRuntimeSentinel();
-        injectNarratorContext(narratorContext);
+
+        appendEngineSentinelToPrompt(eventData.chat);
+        appendNarratorContextToPrompt(eventData.chat, narratorContext);
+        clearProgress(state.progressToast);
+        state.progressToast = null;
     } catch (error) {
         state.lastDebugPrefix = '';
         state.pendingRun = null;
         clearRuntimePrompts();
         showBlockingError(error);
-        if (typeof abort === 'function') abort(true);
+        abortGenerationAfterPromptReady(context);
+        replacePromptWithAbortNotice(eventData.chat, error);
     } finally {
-        clearProgress(progressToast);
         state.runningSemanticPass = false;
         state.activeRunId = null;
+        state.pendingGeneration = null;
     }
+}
 
-    return false;
-};
+async function runSemanticPassWithPromptReadyBypass(context, assembledChat, type, trackerSnapshot) {
+    state.bypassPromptReady = true;
+    try {
+        return await extractSemanticLedger(context, assembledChat, type, trackerSnapshot, { assembledPrompt: true });
+    } finally {
+        state.bypassPromptReady = false;
+    }
+}
+
+function appendNarratorContextToPrompt(chat, narratorContext) {
+    chat.push({
+        role: 'system',
+        content: narratorContext,
+    });
+}
+
+function appendEngineSentinelToPrompt(chat) {
+    chat.push({
+        role: 'system',
+        content: ENGINE_RUNTIME_SENTINEL,
+    });
+}
+
+function replacePromptWithAbortNotice(chat, error) {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    chat.splice(0, chat.length, {
+        role: 'system',
+        content:
+            '[STRUCTURED_PREFLIGHT_ABORT]\n' +
+            'The structured semantic preflight failed. Do not narrate. Return exactly: Structured preflight failed; generation aborted.\n' +
+            `ERROR=${message}`,
+    });
+}
+
+function abortGenerationAfterPromptReady(context) {
+    try {
+        if (typeof context?.stopGeneration === 'function') {
+            context.stopGeneration();
+        } else if (context?.eventSource?.emit && context?.eventTypes?.GENERATION_STOPPED) {
+            context.eventSource.emit(context.eventTypes.GENERATION_STOPPED);
+        }
+    } catch {
+        // The prompt is also replaced with an abort notice as a fallback.
+    }
+}
 
 export function onDisable() {
     const context = getContext();
@@ -374,6 +437,7 @@ export function onDisable() {
         if (context.eventTypes.CHAT_CREATED) removeEventHandler(context, context.eventTypes.CHAT_CREATED, handleChatChanged);
         if (context.eventTypes.GENERATION_ENDED) removeEventHandler(context, context.eventTypes.GENERATION_ENDED, handleGenerationLifecycleEnd);
         if (context.eventTypes.GENERATION_STOPPED) removeEventHandler(context, context.eventTypes.GENERATION_STOPPED, handleGenerationLifecycleEnd);
+        if (context.eventTypes.CHAT_COMPLETION_PROMPT_READY) removeEventHandler(context, context.eventTypes.CHAT_COMPLETION_PROMPT_READY, handleChatCompletionPromptReady);
         state.subscribed = false;
     }
 }
