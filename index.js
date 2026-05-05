@@ -38,6 +38,7 @@ const state = {
     subscribed: false,
     pendingGeneration: null,
     progressToast: null,
+    pendingRunCleanupTimer: null,
 };
 
 function getContext() {
@@ -87,6 +88,13 @@ function clearProgress(toast) {
         }
     } catch {
         // Non-fatal.
+    }
+}
+
+function clearPendingRunCleanupTimer() {
+    if (state.pendingRunCleanupTimer) {
+        clearTimeout(state.pendingRunCleanupTimer);
+        state.pendingRunCleanupTimer = null;
     }
 }
 
@@ -142,10 +150,110 @@ function firstChangedIndex(before, after) {
 }
 
 function stripComputedDebugPrefix(text) {
+    return stripStructuredArtifacts(text).trimStart();
+}
+
+function stripStructuredArtifacts(text) {
     return String(text ?? '')
-        .replace(/^````text\s*\n&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*````\s*\n+/i, '')
-        .replace(/^````text\s*\n<pre_flight>[\s\S]*?<\/pre_flight>\s*````\s*\n+/i, '')
-        .replace(/^````text\s*\n<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*````\s*\n+/i, '');
+        .replace(/````text\s*\n?&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*````\s*/gi, '')
+        .replace(/````text\s*\n?<pre_flight>[\s\S]*?<\/pre_flight>\s*````\s*/gi, '')
+        .replace(/````text\s*\n?<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*````\s*/gi, '')
+        .replace(/&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*/gi, '')
+        .replace(/<pre_flight>[\s\S]*?<\/pre_flight>\s*/gi, '')
+        .replace(/<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*/gi, '')
+        .replace(/BEGIN_FINAL_NARRATION\s*/gi, '')
+        .replace(/\s*END_FINAL_NARRATION/gi, '');
+}
+
+function sanitizeAssistantNarration(text) {
+    const original = String(text ?? '').trim();
+    if (!original) return original;
+
+    const tagged = original.match(/BEGIN_FINAL_NARRATION\s*([\s\S]*?)\s*END_FINAL_NARRATION/i);
+    const source = tagged ? tagged[1].trim() : stripNarratorMetaPrefix(original);
+    const cleaned = stripStructuredArtifacts(source).trim();
+    return cleaned || original;
+}
+
+function stripNarratorMetaPrefix(text) {
+    const source = String(text ?? '').trim();
+    if (!source) return source;
+
+    const lengthTarget = source.match(/(?:^|\n)\s*Length target:\s*[^\n]*\n+/i);
+    if (lengthTarget && lengthTarget.index < 2500) {
+        return source.slice(lengthTarget.index + lengthTarget[0].length).trim();
+    }
+
+    const finalWritingCue = source.match(/(?:^|\n)\s*Let me write this[^\n]*\n+/i);
+    if (finalWritingCue && finalWritingCue.index < 2500) {
+        return source.slice(finalWritingCue.index + finalWritingCue[0].length).trim();
+    }
+
+    const prefix = source.slice(0, 2500);
+    if (!/\b(preflight|mechanics|NPC State|Proactivity|Chaos|GUIDE|narrator prompt|formatting rules)\b/i.test(prefix)) {
+        return source;
+    }
+
+    const lines = source.split(/\r?\n/);
+    let cut = 0;
+    for (let index = 0; index < Math.min(lines.length, 40); index += 1) {
+        const line = lines[index].trim();
+        if (
+            !line
+            || /^[-*]\s+/.test(line)
+            || /^(The user|User Actions|Result|Action Count|Stakes|Intimacy Consent|Targets|Counter Potential|NPC State|Chaos|Proactivity|Aggression|Aggression Guide|GUIDE)\b/i.test(line)
+            || /\b(preflight|mechanics|formatting rules|Length target|should be|Let me)\b/i.test(line)
+        ) {
+            cut = index + 1;
+            continue;
+        }
+        break;
+    }
+
+    return cut > 0 ? lines.slice(cut).join('\n').trim() : source;
+}
+
+function sanitizeFinalPromptHistory(chat) {
+    if (!Array.isArray(chat)) return;
+
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+        const message = chat[index];
+        if (!message) continue;
+
+        if (typeof message.content === 'string') {
+            message.content = stripStructuredArtifacts(message.content).trim();
+            if (message.role === 'assistant') {
+                message.content = stripNarratorMetaPrefix(message.content).trim();
+            }
+        } else if (Array.isArray(message.content)) {
+            message.content = message.content
+                .map(part => {
+                    if (part && typeof part === 'object' && typeof part.text === 'string') {
+                        const text = stripStructuredArtifacts(part.text).trim();
+                        return {
+                            ...part,
+                            text: message.role === 'assistant' ? stripNarratorMetaPrefix(text).trim() : text,
+                        };
+                    }
+                    return part;
+                })
+                .filter(part => {
+                    if (part && typeof part === 'object' && 'text' in part) return Boolean(String(part.text ?? '').trim());
+                    return part != null;
+                });
+        }
+
+        if (isPromptContentEmpty(message.content)) {
+            chat.splice(index, 1);
+        }
+    }
+}
+
+function isPromptContentEmpty(content) {
+    if (content == null) return true;
+    if (typeof content === 'string') return !content.trim();
+    if (Array.isArray(content)) return content.length === 0;
+    return false;
 }
 
 function restoreTrackerForRegeneration(type) {
@@ -190,14 +298,18 @@ async function prependComputedDebug(messageId, type) {
         return;
     }
 
+    clearPendingRunCleanupTimer();
+
     message.extra = message.extra || {};
 
     const currentText = String(message.mes ?? '');
     const displayText = message.extra.display_text == null ? null : String(message.extra.display_text);
     const visibleText = stripComputedDebugPrefix(displayText ?? currentText);
+    const narrationText = sanitizeAssistantNarration(visibleText);
 
     const root = getTrackerRoot(context);
     if (root && state.pendingRun) {
+        await saveTrackerUpdate(context, { npcs: state.pendingRun.trackerAfter });
         root.snapshots[messageKey] = {
             before: clone(state.pendingRun.trackerBefore),
             after: clone(state.pendingRun.trackerAfter),
@@ -205,9 +317,11 @@ async function prependComputedDebug(messageId, type) {
             savedAt: Date.now(),
         };
         await persistMetadata(context);
+        state.pendingRun = null;
     }
 
-    message.extra.display_text = `${state.lastDebugPrefix}\n\n${visibleText}`;
+    message.mes = narrationText;
+    message.extra.display_text = `${state.lastDebugPrefix}\n\n${narrationText}`;
     state.lastDebugKey = messageKey;
     state.lastDebugPrefix = '';
 
@@ -267,6 +381,7 @@ function handleMessageSwiped() {
 }
 
 function handleChatChanged() {
+    clearPendingRunCleanupTimer();
     state.lastDebugKey = null;
     state.lastDebugPrefix = '';
     state.pendingRun = null;
@@ -279,6 +394,17 @@ function handleGenerationLifecycleEnd() {
     state.progressToast = null;
     state.pendingGeneration = null;
     clearRuntimePrompts();
+
+    if (state.pendingRun && !state.pendingRunCleanupTimer) {
+        state.pendingRunCleanupTimer = setTimeout(() => {
+            state.pendingRunCleanupTimer = null;
+            if (!state.pendingRun) return;
+            state.pendingRun = null;
+            state.lastDebugPrefix = '';
+            state.lastDebugKey = null;
+            console.warn(`[${EXTENSION_NAME}] cleared pending pre-flight handoff because no assistant message was received after generation ended.`);
+        }, 5000);
+    }
 }
 
 function subscribeMessageHandler() {
@@ -348,7 +474,6 @@ async function handleChatCompletionPromptReady(eventData) {
             trackerSnapshot,
         );
         const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, state.pendingGeneration.type);
-        await saveTrackerUpdate(context, report.trackerUpdate);
 
         const audit = formatPreFlightDebug(report);
         const narratorContext = formatNarratorPromptContext(report);
@@ -359,6 +484,7 @@ async function handleChatCompletionPromptReady(eventData) {
         };
         state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
 
+        sanitizeFinalPromptHistory(eventData.chat);
         appendEngineSentinelToPrompt(eventData.chat);
         appendNarratorContextToPrompt(eventData.chat, narratorContext);
         clearProgress(state.progressToast);

@@ -1,5 +1,7 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
 
+const SEMANTIC_RESPONSE_LENGTH = 1500;
+
 export async function extractSemanticLedger(context, promptContext, type, trackerSnapshot, options = {}) {
     if (!context?.generateRawData) {
         throw new Error('SillyTavern generateRawData API is unavailable.');
@@ -51,7 +53,7 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
     return normalized;
 }
 
-async function generateSemanticRaw(context, prompt, responseLength = null) {
+async function generateSemanticRaw(context, prompt, responseLength = SEMANTIC_RESPONSE_LENGTH) {
     const options = { prompt };
     if (Number.isFinite(responseLength) && responseLength > 0) {
         options.responseLength = responseLength;

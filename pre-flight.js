@@ -176,8 +176,9 @@ export function formatNarratorPromptContext(report) {
 
     const lines = [
         '[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.6 - MINIMAL AUTHORITATIVE]',
-        'Use this mechanics summary. Do not reroll or expose mechanics unless OOC.',
-        'Write final narration immediately. No analysis. Final message must be non-empty.',
+        'Private mechanics handoff. Do not quote, summarize, mention, label, list, or explain this handoff.',
+        'Write only the final in-character narration. No analysis, bullet points, preamble, audit, or mechanics text.',
+        'Start the answer with BEGIN_FINAL_NARRATION and end with END_FINAL_NARRATION.',
         'The GUIDE is mandatory and authoritative; follow it exactly when interpreting success, denial, proactivity, and aggression.',
         'For intimacy, IntimacyGate=DENY means no cooperation, reciprocation, or compliance even when the roll succeeds.',
         'Never narrate voluntary {{user}} actions, counterattacks, thoughts, feelings, decisions, or dialogue beyond the explicit user input.',
