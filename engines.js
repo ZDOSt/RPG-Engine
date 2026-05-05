@@ -72,7 +72,7 @@ function ResolutionEngine(input) {
     rule: if the final goal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling challenge
     rule: if {{user}} uses deliberate mental/supernatural exertion to affect a living target's bodily functions or physical state (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding), USER=MND and OPP=PHY
     rule: if magic or a substance creates a non-living environmental hazard/obstacle instead of directly contesting a living target, put the hazard/obstacle in OppTargets.ENV and use OPP=ENV unless a living target explicitly resists the effect
-    rule: if goal=IntimacyAdvancePhysical and the explicit challenge is physical contact/positioning against a living opposing target, USER=PHY and OPP=PHY
+    rule: if goal=IntimacyAdvancePhysical and IntimacyConsent=N, USER=PHY and OPP=PHY. This rule is absolute for denied/opposed physical intimacy, including kissing or attempted intimate contact, even if the approach includes romantic, seductive, verbal, or social framing
     rule: if explicit means is positive social interaction such as persuasion, negotiation, diplomacy, bargaining, reconciliation, reassurance, or good-faith appeal against a living opposing target, USER=CHA and OPP=CHA
     rule: if explicit means is negative social interaction such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target, USER=CHA and OPP=MND
     rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that first OppTargets.NPC entity's resistance to {{user}}'s explicit means or goal
@@ -209,16 +209,18 @@ function RelationshipEngine(npc, resolutionPacket) {
 
   auditInteraction(npc, resolutionPacket):
     policy: EO, FYW
-    rule: return Y only if {{user}}'s act substantially and concretely improves this NPC's stakes: safety, resources, status, autonomy, or explicit goal advancement
-    rule: flirting, compliments, tone, shallow approval, or conversation alone do NOT count as meaningful benefit
-    if scene facts show substantial concrete benefit to this NPC -> Y
+    rule: return Y only if {{user}}'s act clearly, substantially, and concretely improves this NPC's stakes: rescue from independent danger, protection from an independent threat, meaningful resources, restored autonomy, significant status/standing improvement, prevention of real harm/loss, or explicit goal advancement for that NPC
+    rule: the benefit must be significant. Trivial help, minor convenience, mood improvement, making the NPC smile, politeness, approval, ordinary cooperation, or weak preference shifts do NOT count
+    rule: flirting, compliments, tone, shallow approval, enjoyable conversation, successful self-advancement by {{user}}, successful negotiation for {{user}}'s own goal, choosing not to harm them, failing to harm them, or the NPC merely surviving/remaining safe do NOT count as meaningful benefit
+    if scene facts show significant concrete benefit to this NPC -> Y
     else -> N
 
   stakeChangeByOutcome(npc, resolutionPacket):
     policy: EO, FYW
-    rule: for each possible resolution outcome, return benefit if that outcome materially improves this NPC's stakes as per DEF.STAKES
+    rule: for each possible resolution outcome, return benefit only if that outcome significantly and concretely improves this NPC's stakes as per DEF.STAKES
     rule: return harm if that outcome materially worsens this NPC's stakes as per DEF.STAKES
     rule: return none if that outcome does not materially change this NPC's stakes
+    rule: do NOT return benefit merely because {{user}} succeeds at {{user}}'s own goal, negotiates successfully for {{user}}, chooses not to harm the NPC, fails to harm the NPC, de-escalates without giving the NPC a concrete gain, or because the NPC remains unharmed/safe
     rule: if resolutionPacket.GOAL in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal], IntimacyConsent=N, and this NPC is the direct/opposing intimacy target, successful or landed outcomes [success, dominant_impact, solid_impact, light_impact] worsen this NPC's boundary/autonomy/trust stakes; return harm, not none
     rule: NPC_STAKES=Y when the actual outcome's stakeChangeByOutcome is benefit or harm
     rule: NPC_STAKES=N when the actual outcome's stakeChangeByOutcome is none
@@ -262,8 +264,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     hostileLandedPressure = landed ? clamp(state.hostileLandedPressure + max(1,severity), 0, 20) : state.hostileLandedPressure
     pressureState = {disposition:state.currentDisposition, dominantLock:state.dominantLock, pressureMode:state.pressureMode}
     if !landed:
-      if hostilePressure>=2 -> deltas = addDispositionPressure(pressureState, 1, failed)
-      else -> deltas = {b:0,f:0,h:0}
+      if hostilePressure>=1 -> deltas = addDispositionPressure(pressureState, 1, failed)
     else if resolutionPacket.Outcome=light_impact -> deltas = addDispositionPressure(pressureState, 1, landed)
     else if resolutionPacket.Outcome in [solid_impact, dominant_impact] -> deltas = addDispositionPressure(pressureState, severity, dominance)
     target = targetFromDeltas(deltas)
@@ -843,6 +844,37 @@ export function hardStakeChangeFromTargetRole(npc, packet) {
     return null;
 }
 
+export function applyMeaningfulBenefitReferee(npc, packet, stakeChange, sem = {}) {
+    if (stakeChange !== 'benefit') return { value: stakeChange };
+
+    const relation = relationToUserAction(npc, packet);
+    if (relation.isBenefited && !relation.isDirect && !relation.isOpp) return { value: stakeChange };
+
+    const source = [
+        sem?.auditInteraction,
+        sem?.identifyGoal,
+        sem?.identifyChallenge,
+        sem?.explicitMeans,
+        packet?.GOAL,
+        packet?.Outcome,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    const strongBenefit = /\b(rescu\w*|protect\w*|shield\w*|save[sd]?|free[sd]?|liberat\w*|restore\w* autonomy|grant\w* autonomy|give[sn]?|donat\w*|pay\w*|reward\w*|heal\w*|cure\w*|stabiliz\w*|prevent\w* (?:harm|injury|death|loss)|stop\w* (?:harm|injury|attack|assault)|advance\w* .*goal|status|standing|reputation|resource\w*)\b/.test(source);
+    const falseBenefit = /\b(compliment\w*|flirt\w*|smil\w*|polite|conversation|talk\w* down|de-?escalat\w*|negotiate\w*|persuad\w*|convinc\w*|fail\w*|miss(?:ed)?|surviv\w*|safe|unharmed|choose\w* not to harm|not harm|spare[sd]?|own goal|self-advancement)\b/.test(source);
+
+    if (strongBenefit && !falseBenefit) return { value: stakeChange };
+
+    return {
+        value: 'none',
+        referee: {
+            hardRule: 'RelationshipEngine.auditInteraction: benefit requires significant concrete stakes improvement; survival, compliments, no-harm, failed harm, de-escalation, or user self-advancement are not benefit',
+            from: stakeChange,
+            to: 'none',
+            relation,
+        },
+    };
+}
+
 export function relationToUserAction(npc, packet) {
     return {
         isDirect: includesName(packet.ActionTargets, npc),
@@ -905,9 +937,7 @@ export function applyHostilePhysicalPressure(npc, packet, state) {
     let dominatedFearBreak = false;
 
     if (!landed) {
-        if (hostilePressure >= 2) {
-            deltas = addDispositionPressure(pressureState, 1, 'failed');
-        }
+        deltas = addDispositionPressure(pressureState, 1, 'failed');
     } else if (packet.Outcome === 'light_impact') {
         deltas = addDispositionPressure(pressureState, 1, 'landed');
     } else if (['solid_impact', 'dominant_impact'].includes(packet.Outcome)) {
@@ -1390,6 +1420,14 @@ export function sanitizeTargets(targets, classifier, options = {}) {
         else oppEnv.push(name);
     }
 
+    if (options.goal === 'IntimacyAdvancePhysical' && options.intimacyConsent !== 'Y') {
+        for (const name of actionTargets) {
+            if (!oppNpc.some(existing => sameName(existing, name))) {
+                oppNpc.push(name);
+            }
+        }
+    }
+
     const directOrOpposed = new Set([...actionTargets, ...oppNpc].map(normalizeNameKey));
     const benefited = benefitedCandidates.filter(name => !directOrOpposed.has(normalizeNameKey(name)));
     const harmed = harmedCandidates.filter(name => !directOrOpposed.has(normalizeNameKey(name)));
@@ -1472,7 +1510,7 @@ export function normalizeMapStats(value) {
     };
 }
 
-export function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit) {
+export function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit, options = {}) {
     let { userStat, oppStat } = mapStats;
     const evidence = [];
 
@@ -1488,10 +1526,10 @@ export function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit)
         oppStat = 'PHY';
     }
 
-    if (isPhysicalIntimacyChallenge(semantic, goal, targets)) {
+    if (isDeniedPhysicalIntimacyChallenge(semantic, goal, options.intimacyConsent)) {
         if (userStat !== 'PHY' || oppStat !== 'PHY') {
             evidence.push({
-                hardRule: 'ResolutionEngine.mapStats: physical intimacy/contact challenge against a living opposing target is USER=PHY and OPP=PHY',
+                hardRule: 'ResolutionEngine.mapStats: denied/opposed physical intimacy is USER=PHY and OPP=PHY',
                 from: { USER: userStat, OPP: oppStat },
                 to: { USER: 'PHY', OPP: 'PHY' },
             });
@@ -1534,7 +1572,7 @@ export function classifySocialMapStatsRule(semantic, targets) {
     if (!firstReal(targets.OppTargets?.NPC)) return null;
     if (bool(semantic.classifyHostilePhysicalIntent)) return null;
     if (isBodyAffectingMagic(semantic, semantic.identifyGoal, targets)) return null;
-    if (isPhysicalIntimacyChallenge(semantic, semantic.identifyGoal, targets)) return null;
+    if (isDeniedPhysicalIntimacyChallenge(semantic, semantic.identifyGoal, semantic.IntimacyConsent)) return null;
 
     const source = [
         semantic.identifyGoal,
@@ -1575,6 +1613,10 @@ export function isBodyAffectingMagic(semantic, goal, targets) {
     const hasMagic = /\b(magic|magical|spell|arcane|hex|curse|supernatural|enchant|enchantment|sorcery|power)\b/.test(source);
     const affectsBody = /\b(paraly[sz]e|paralysis|poison|venom|blind|blindness|deafen|numb|sleep|pain|muscle|blood|breath|choke|disease|sicken|transmut|petrif|bind|bodily|body|immobiliz|lock|freeze|stun)\b/.test(source);
     return hasMagic && affectsBody;
+}
+
+export function isDeniedPhysicalIntimacyChallenge(semantic, goal, intimacyConsent = 'N') {
+    return goal === 'IntimacyAdvancePhysical' && intimacyConsent !== 'Y';
 }
 
 export function isPhysicalIntimacyChallenge(semantic, goal, targets) {

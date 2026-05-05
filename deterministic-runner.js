@@ -9,6 +9,7 @@ import {
     initPreset,
     routeDispositionTarget,
     resolveStakeChangeByOutcome,
+    applyMeaningfulBenefitReferee,
     relationToUserAction,
     proactivityRefereeGuard,
     updateRapport,
@@ -144,7 +145,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
             ? 'IntimacyAdvanceVerbal'
             : String(semantic.identifyGoal || 'Normal_Interaction');
     const semanticHasStakes = bool(semantic.hasStakes) ? 'Y' : 'N';
-    const preliminaryTargets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes: 'Y' });
+    const preliminaryTargets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes: 'Y', goal, intimacyConsent: 'N' });
 
     const rollPool = [dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20()];
     audit.push('STEP 1: SILENT SEMANTIC PASS COMPLETE');
@@ -194,7 +195,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     }
     audit.push(`2.4 hasStakes=${hasStakes}`);
 
-    const targets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes });
+    const targets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes, goal, intimacyConsent });
     audit.push(`2.4d identifyTargets.final=${formatTargets(targets)}`);
     if (!sameTargets(rawTargets, targets)) {
         audit.push(`2.4e deterministicTargetSanitizer=${compact({
@@ -232,7 +233,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     } else {
         actions = normalizeActionMarkers(semantic.actionCount);
         const semanticMapStats = normalizeMapStats(semantic.mapStats);
-        let { userStat, oppStat } = applyMapStatsHardRules(semantic, goal, targets, semanticMapStats, audit);
+        let { userStat, oppStat } = applyMapStatsHardRules(semantic, goal, targets, semanticMapStats, audit, { intimacyConsent });
         const userCore = getUserCoreStats(ledger);
         let targetCore = null;
         const oppTargetsNpcFirst = firstReal(targets.OppTargets.NPC);
@@ -315,6 +316,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
 }
 
 function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refereeContext) {
+    const resolutionSemantic = ledger.resolutionEngine || {};
     const semanticMap = new Map((ledger.relationshipEngine || []).filter(x => x?.NPC).map(x => [x.NPC, x]));
     const npcList = toRealArray(resolutionPacket.NPCInScene);
     const handoffs = [];
@@ -380,7 +382,13 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         const isAllowed = resolutionPacket.IntimacyConsent;
         const outcomeKey = String(resolutionPacket.Outcome || 'no_roll');
         const stakeReferee = resolveStakeChangeByOutcome(npc, sem, resolutionPacket);
-        const stakeChange = stakeReferee.value;
+        const benefitReferee = applyMeaningfulBenefitReferee(npc, resolutionPacket, stakeReferee.value, {
+            ...sem,
+            identifyGoal: resolutionSemantic.identifyGoal,
+            identifyChallenge: resolutionSemantic.identifyChallenge,
+            explicitMeans: resolutionSemantic.explicitMeans,
+        });
+        const stakeChange = benefitReferee.value;
         const npcStakes = resolutionPacket.STAKES === 'Y' && ['benefit', 'harm'].includes(stakeChange) ? 'Y' : 'N';
         const auditInteraction = npcStakes === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
         const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem);
@@ -404,6 +412,9 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         audit.push(`3.4a auditInteraction=stakeChangeByOutcome[${outcomeKey}]=${stakeChange} -> ${auditInteraction}`);
         if (stakeReferee.referee) {
             audit.push(`3.4a.1 deterministicStakeChangeReferee=${compact(stakeReferee.referee)}`);
+        }
+        if (benefitReferee.referee) {
+            audit.push(`3.4a.2 deterministicBenefitReferee=${compact(benefitReferee.referee)}`);
         }
         audit.push(`3.4b NPC_STAKES=${npcStakes}`);
         audit.push(`3.4c routeDispositionTarget=${routedTarget}`);
@@ -845,10 +856,6 @@ function addLivingName(set, name) {
     const normalized = normalizeNameKey(name);
     if (normalized) set.add(normalized);
 }
-
-
-
-
 
 
 
