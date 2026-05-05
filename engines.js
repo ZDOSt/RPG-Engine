@@ -5,7 +5,7 @@ function ResolutionEngine(input) {
     UNIVERSAL:
 'EXPLICIT-ONLY. MUST be stated in Character Card / Lore / Scene text / tracker. NO invention. Uncertain = N or default. FIRST-YES-WINS = first matching explicit rule becomes final. No reconsideration. NEVER invent stats, targets, actions, obstacles, or outcomes. MAX 3 ACTIONS. TIE = STALEMATE / STRUGGLE. ROLLS = 1d20 + relevant stat vs opposing 1d20 + relevant stat, or vs plain Environment 1d20.',
     STATS:
-'PHY = challenges that require physical effort, strength, agility, speed, coordination, endurance, stealth movement, combat skill, or bodily execution under risk. MND = challenges that require thought, memory, perception, focus, reasoning, knowledge, awareness, will, or deliberate mental/supernatural exertion. CHA = social challenges that require persuasion, deception, intimidation, negotiation, emotional influence, personal presence, or interpersonal skill. Core stat scale is 1 to 10.',
+'PHY = challenges that require physical effort, strength, agility, speed, coordination, endurance, stealth movement, combat skill, or bodily execution under risk. MND = challenges that require thought, memory, perception, focus, reasoning, knowledge, awareness, will, or deliberate mental/supernatural exertion. CHA = social challenges that require persuasion, deception, intimidation, negotiation, emotional influence, personal presence, or interpersonal skill. Map the stat from the final goal or explicit challenge that carries stakes, not from incidental gestures, flavor, delivery method, or setup. Core stat scale is 1 to 10.',
     STAKES:
 'Stakes are meaningful possible consequences tied to success or failure. Stakes include physical risk, harm, danger, detection, material gain or loss, significant social status/authority/trust shift, loss of autonomy or physical freedom, hostile restraint/immobilization/confinement, meaningful obstacle resolution or failure, or explicit goal advancement or failure for {{user}} or a specific living entity. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. If success or failure would not materially change the outcome, no roll is needed.'
   });
@@ -13,15 +13,24 @@ function ResolutionEngine(input) {
   identifyGoal(input):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
     rule: return a short, plain description of the final goal/intent of {{user}}'s actions in the last input
-    rule: if the goal is an explicit direct intimate advance toward a specific NPC, return IntimacyAdvancePhysical for physical contact or IntimacyAdvanceVerbal for verbal proposition
+    rule: ignore setup, movement, intermediary steps, and post-action flavor unless they are themselves separate consequential actions
+    rule: if the final goal/intent is an explicit direct physical sexual or intimate advance toward a specific NPC, including kissing or other physical sexual/intimate contact, return IntimacyAdvancePhysical
+    rule: if the final goal/intent is an explicit direct verbal sexual or intimate proposition toward a specific NPC, return IntimacyAdvanceVerbal
     rule: flirting, compliments, teasing, affectionate tone, or non-explicit romantic/social behavior do NOT count as intimacy advances
+
+  identifyChallenge(input, goal, context):
+    policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
+    rule: return the explicit action within {{user}}'s input that carries risk, uncertainty, resistance, or stakes for {{user}}'s final goal
+    rule: copy the concrete action or challenge from {{user}}'s input when possible
+    rule: ignore incidental gestures, flavor, delivery method, setup, movement, or positioning unless that act itself carries stakes or resistance
+    rule: if no distinct stakes-bearing challenge exists, return goal
 
   classifyHostilePhysicalIntent(input, goal, targets):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
     rule: return true only if {{user}} explicitly uses physical force against a living entity as attack, assault, shove, grab, restraint, pin, immobilization, forced movement, physical domination, blocking escape, preventing casting/action, or other non-consensual bodily control
     rule: return false for consensual/helpful touch, healing, examination, rescue, ordinary movement, environmental force, social pressure, or purely mental/social/magical actions with no explicit physical force by {{user}}'s body
 
-  identifyTargets(input, goal, context):
+  identifyTargets(input, challenge, goal, context):
     policy: LOCKED, EXPLICIT-ONLY
     ActionTargets = LIVING entities {{user}} directly tries to affect as the main resolution target
     OppTargets.NPC = LIVING entities whose stakes are at risk and who actively or passively oppose, contest, or resist {{user}}'s actions
@@ -42,29 +51,30 @@ function ResolutionEngine(input) {
     rule: return Y if current explicit RelationshipEngine checkThreshold would produce OverrideActive=Y and no F/H lock blocks it
     else -> N
 
-  hasStakes(input, goal, targets, IntimacyConsent, context):
+  hasStakes(input, goal, challenge, targets, IntimacyConsent, context):
     policy: LOCKED, EXPLICIT-ONLY
     rule: if goal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal] and IntimacyConsent=N, return Y
     rule: if goal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal], return N
-    rule: return Y if success or failure of the explicit means used in input to pursue the goal could affect {{user}} or NPC's stakes, as per DEF.STAKES
+    rule: return Y if success or failure of the final goal or explicit challenge could affect {{user}} or NPC's stakes, as per DEF.STAKES
     else -> N
 
-  actionCount(input, goal):
+  actionCount(input, challenge):
     policy: LOCKED, EXPLICIT-ONLY, MAX 3 ACTIONS
     rule: only applies to explicit hostile/combat attack sequences
     rule: do not count setup, movement, repositioning, defense, recovery, or non-attack flavor as additional actions
     rule: each individual attack within a sequence counts as one action
     rule: return one action marker per attack: [a1], [a1,a2], or [a1,a2,a3]
 
-  mapStats(input, goal, targets, context):
+  mapStats(input, goal, challenge, targets, context):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
-    rule: if the final goal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling action.
+    rule: determine USER stat by applying DEF.STATS to identifyChallenge when identifyChallenge is distinct from goal
+    rule: use final goal only if no distinct stakes-bearing challenge exists
+    rule: if the final goal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling challenge
     rule: if {{user}} uses deliberate mental/supernatural exertion to affect a living target's bodily functions or physical state (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding), USER=MND and OPP=PHY
     rule: if magic or a substance creates a non-living environmental hazard/obstacle instead of directly contesting a living target, put the hazard/obstacle in OppTargets.ENV and use OPP=ENV unless a living target explicitly resists the effect
+    rule: if goal=IntimacyAdvancePhysical and the explicit challenge is physical contact/positioning against a living opposing target, USER=PHY and OPP=PHY
     rule: if explicit means is positive social interaction such as persuasion, negotiation, diplomacy, bargaining, reconciliation, reassurance, or good-faith appeal against a living opposing target, USER=CHA and OPP=CHA
     rule: if explicit means is negative social interaction such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target, USER=CHA and OPP=MND
-    rule: determine {{user}} stat by applying DEF.STATS to the explicit action-attempt that determines whether {{user}}'s goal succeeds or fails.
-    rule: use final goal only if no distinct explicit means are present
     rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that first OppTargets.NPC entity's resistance to {{user}}'s explicit means or goal
     rule: if OppTargets.NPC=[(none)] and OppTargets.ENV contains an obstacle, OPP=ENV
     return {USER, OPP}
@@ -141,14 +151,15 @@ function ResolutionEngine(input) {
 
   execution:
     goal = identifyGoal(input)
-    targets = identifyTargets(input, goal, context)
+    challenge = identifyChallenge(input, goal, context)
+    targets = identifyTargets(input, challenge, goal, context)
     IntimacyConsent = checkIntimacyGate(goal, targets, context)
-    STAKES = hasStakes(input, goal, targets, IntimacyConsent, context)
-    actions = actionCount(input, goal)
+    STAKES = hasStakes(input, goal, challenge, targets, IntimacyConsent, context)
+    actions = actionCount(input, challenge)
     if STAKES=N:
       outcome = {OutcomeTier:NONE, LandedActions:(none), Outcome:no_roll, CounterPotential:none}
     else:
-      stats = mapStats(input, goal, targets, context)
+      stats = mapStats(input, goal, challenge, targets, context)
       userCore = getUserCoreStats()
       if stats.OPP!=ENV:
         targetCore = getCurrentCoreStats(first OppTargets.NPC)
@@ -189,8 +200,8 @@ function RelationshipEngine(npc, resolutionPacket) {
     policy: EO, FYW
     rule: use only if currentDisposition is missing
     rule: NPC has explicit fear immunity only if same or superior kind/nature, superior being, or explicit natural fear/mental immunity
-    rule: title, rank, bravado, posturing, composure, or pretending to be fearless do NOT count as fear immunity
-    if NPC is already romantically/intimately involved with {{user}}, willing toward {{user}}, or in love -> {Label:romanticOpen,B:4,F:1,H:1}
+    rule: title, rank, bravado, posturing, composure, masking fear, saving face, acting brave, or pretending to be fearless do NOT count as fear immunity
+    if NPC is already romantically/intimately involved with {{user}}, willing/open toward {{user}}, or in love -> {Label:romanticOpen,B:4,F:1,H:1}
     if {{user}} is hated, distrusted, wanted, or bad-reputation -> {Label:userBadRep,B:1,F:2,H:3}
     if {{user}} is admired, trusted, praised, good-reputation, or already known favorably -> {Label:userGoodRep,B:3,F:1,H:2}
     if {{user}} is explicitly visibly inhuman, demonic, monstrous, undead, bestial, eldritch, or construct-like AND NPC lacks explicit fear immunity -> {Label:userNonHuman,B:1,F:3,H:2}
@@ -198,9 +209,9 @@ function RelationshipEngine(npc, resolutionPacket) {
 
   auditInteraction(npc, resolutionPacket):
     policy: EO, FYW
-    rule: return Y only if {{user}}'s act materially improves this NPC's stakes: safety, resources, status, autonomy, or explicit goal advancement
-    rule: flirting, compliments, tone, or conversation alone do NOT count
-    if scene facts show such benefit -> Y
+    rule: return Y only if {{user}}'s act substantially and concretely improves this NPC's stakes: safety, resources, status, autonomy, or explicit goal advancement
+    rule: flirting, compliments, tone, shallow approval, or conversation alone do NOT count as meaningful benefit
+    if scene facts show substantial concrete benefit to this NPC -> Y
     else -> N
 
   stakeChangeByOutcome(npc, resolutionPacket):
@@ -314,6 +325,8 @@ function RelationshipEngine(npc, resolutionPacket) {
     else -> N
 
   updateRapport(currentRapport, target, rapportEncounterLock):
+    rule: positive encounter = target in [Bond,No Change]
+    rule: negative encounter = target in [Hostility,Fear,FearHostility]
     if rapportEncounterLock=Y -> return {currentRapport:currentRapport,rapportEncounterLock:Y}
     if target in [Bond,No Change] -> return {currentRapport:min(5,currentRapport+1),rapportEncounterLock:Y}
     if target in [Hostility,Fear,FearHostility] -> return {currentRapport:max(0,currentRapport-1),rapportEncounterLock:Y}
@@ -326,7 +339,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     if target=FearHostility -> {b:-1,f:1,h:1}
 
     if currentDisposition.F=4 || currentDisposition.H=4:
-      if currentRapport>=5 && target in [Bond,No Change]:
+      if currentRapport>=5 && target in [Bond,No Change] && audit=Y && !(landed>0) && resolutionPacket.GOAL not in [IntimacyAdvancePhysical,IntimacyAdvanceVerbal]:
         return {b:0,f:(currentDisposition.F=4?-1:0),h:(currentDisposition.H=4?-1:0),rapportReset:Y}
       else:
         return {b:0,f:0,h:0}
@@ -985,13 +998,16 @@ export function targetFromDeltas(deltas) {
     return 'No Change';
 }
 
-export function deriveDirection(target, currentDisposition, currentRapport, auditInteraction) {
+export function deriveDirection(target, currentDisposition, currentRapport, auditInteraction, packet = {}) {
+    const landed = landedBool(packet.LandedActions);
+    const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL);
+
     if (target === 'No Change') return { b: 0, f: 0, h: 0 };
     if (target === 'Hostility') return { b: -1, f: 0, h: 1 };
     if (target === 'Fear') return { b: -1, f: 1, h: 0 };
     if (target === 'FearHostility') return { b: -1, f: 1, h: 1 };
     if (currentDisposition.F === 4 || currentDisposition.H === 4) {
-        if (currentRapport >= 5 && ['Bond', 'No Change'].includes(target)) {
+        if (currentRapport >= 5 && ['Bond', 'No Change'].includes(target) && auditInteraction === 'Y' && !landed && !isIntimacyAdvance) {
             return { b: 0, f: currentDisposition.F === 4 ? -1 : 0, h: currentDisposition.H === 4 ? -1 : 0, rapportReset: 'Y' };
         }
         return { b: 0, f: 0, h: 0 };
@@ -1472,6 +1488,18 @@ export function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit)
         oppStat = 'PHY';
     }
 
+    if (isPhysicalIntimacyChallenge(semantic, goal, targets)) {
+        if (userStat !== 'PHY' || oppStat !== 'PHY') {
+            evidence.push({
+                hardRule: 'ResolutionEngine.mapStats: physical intimacy/contact challenge against a living opposing target is USER=PHY and OPP=PHY',
+                from: { USER: userStat, OPP: oppStat },
+                to: { USER: 'PHY', OPP: 'PHY' },
+            });
+        }
+        userStat = 'PHY';
+        oppStat = 'PHY';
+    }
+
     const socialRule = classifySocialMapStatsRule(semantic, targets);
     if (socialRule) {
         if (userStat !== 'CHA' || oppStat !== socialRule.oppStat) {
@@ -1506,13 +1534,15 @@ export function classifySocialMapStatsRule(semantic, targets) {
     if (!firstReal(targets.OppTargets?.NPC)) return null;
     if (bool(semantic.classifyHostilePhysicalIntent)) return null;
     if (isBodyAffectingMagic(semantic, semantic.identifyGoal, targets)) return null;
+    if (isPhysicalIntimacyChallenge(semantic, semantic.identifyGoal, targets)) return null;
 
     const source = [
         semantic.identifyGoal,
+        semantic.identifyChallenge,
         semantic.explicitMeans,
     ].filter(Boolean).join(' ').toLowerCase();
 
-    const negative = /\b(bluff|lie|lying|deceiv|deception|trick|mislead|intimidat|coerc|threat|blackmail|manipulat|interrogat|humiliat|terroriz|menac|force(?:d)? submission|forced submission)\b/.test(source);
+    const negative = /\b(bluff(?:s|ed|ing)?|lie|lying|lied|deceiv\w*|deception|trick(?:s|ed|ing)?|mislead\w*|intimidat\w*|coerc\w*|threat\w*|blackmail\w*|manipulat\w*|interrogat\w*|humiliat\w*|terroriz\w*|menac\w*|force(?:d)? submission|forced submission)\b/.test(source);
     if (negative) {
         return {
             oppStat: 'MND',
@@ -1520,7 +1550,7 @@ export function classifySocialMapStatsRule(semantic, targets) {
         };
     }
 
-    const positive = /\b(persuad|persuasion|negotiat|negotiation|diplomac|diplomacy|bargain|reassur|reconciliation|reconcile|good-faith|appeal|convince|reason with|mediate)\b/.test(source);
+    const positive = /\b(persuad\w*|persuasion|negotiat\w*|negotiation|diplomac\w*|diplomacy|bargain\w*|reassur\w*|reconciliation|reconcile\w*|good-faith|appeal\w*|convinc\w*|reason with|mediat\w*)\b/.test(source);
     if (positive) {
         return {
             oppStat: 'CHA',
@@ -1538,12 +1568,27 @@ export function isBodyAffectingMagic(semantic, goal, targets) {
     const source = [
         semantic.identifyGoal,
         goal,
+        semantic.identifyChallenge,
         semantic.explicitMeans,
     ].filter(Boolean).join(' ').toLowerCase();
 
     const hasMagic = /\b(magic|magical|spell|arcane|hex|curse|supernatural|enchant|enchantment|sorcery|power)\b/.test(source);
     const affectsBody = /\b(paraly[sz]e|paralysis|poison|venom|blind|blindness|deafen|numb|sleep|pain|muscle|blood|breath|choke|disease|sicken|transmut|petrif|bind|bodily|body|immobiliz|lock|freeze|stun)\b/.test(source);
     return hasMagic && affectsBody;
+}
+
+export function isPhysicalIntimacyChallenge(semantic, goal, targets) {
+    if (goal !== 'IntimacyAdvancePhysical' && semantic?.intimacyAdvance !== 'physical') return false;
+    if (!firstReal(targets.OppTargets?.NPC)) return false;
+
+    const source = [
+        semantic.identifyGoal,
+        goal,
+        semantic.identifyChallenge,
+        semantic.explicitMeans,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    return /\b(kiss|touch|grab|grope|fondl|caress|pin|press|hold|pull|tilt|cup|embrace|hug|tear|rip|undress|clothes|dress|shirt|skirt|panties|underwear|mouth|lips|body|physical|contact)\b/.test(source);
 }
 
 export function parseFinalState(value) {

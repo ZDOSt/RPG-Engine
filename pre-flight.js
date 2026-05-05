@@ -81,6 +81,7 @@ function buildReadableSemanticDebug(ledger) {
         '',
         'ResolutionEngine:',
         'identifyGoal=' + valueOrNone(resolution.identifyGoal),
+        'identifyChallenge=' + valueOrNone(resolution.identifyChallenge),
         'intimacyAdvance=' + valueOrNone(resolution.intimacyAdvance),
         'explicitMeans=' + valueOrNone(resolution.explicitMeans),
         'identifyTargets:',
@@ -256,6 +257,8 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
 }
 
 function readableActionDescription(semanticResolution, resolution) {
+    const challenge = valueOrNone(semanticResolution.identifyChallenge);
+    if (challenge !== '(none)') return challenge;
     const explicit = valueOrNone(semanticResolution.explicitMeans);
     if (explicit !== '(none)') return explicit;
     const goal = valueOrNone(resolution.GOAL);

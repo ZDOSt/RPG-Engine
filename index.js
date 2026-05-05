@@ -2,9 +2,7 @@ import { ENGINE_PROMPT_TEXT } from './engines.js';
 import {
     formatDebugMessagePrefix,
     formatNarratorPromptContext,
-    formatNarratorPromptError,
     formatPreFlightDebug,
-    formatPreFlightError,
 } from './pre-flight.js';
 import { extractSemanticLedger } from './semantic-extractor.js';
 import { buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
@@ -101,6 +99,18 @@ function clearProgress(toast) {
     } catch {
         // Non-fatal.
     }
+}
+
+function showBlockingError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+        if (globalThis.toastr?.error) {
+            globalThis.toastr.error(message, `${EXTENSION_NAME}: generation aborted`, { timeOut: 15000, extendedTimeOut: 15000 });
+        }
+    } catch {
+        // Toasts are best-effort only.
+    }
+    console.error(`[${EXTENSION_NAME}] generation aborted`, error);
 }
 
 function getChatId(context = getContext()) {
@@ -299,17 +309,18 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
     subscribeMessageHandler();
 
     if (state.runningSemanticPass) {
-        console.warn(`[${EXTENSION_NAME}] semantic pass skipped because another run is active`);
-        return false;
+        const error = new Error('Structured preflight is already running. Generation aborted to avoid sending a narration without a valid audit.');
+        showBlockingError(error);
+        if (typeof abort === 'function') abort(true);
+        return true;
     }
 
     const context = getContext();
     if (!context) {
-        const audit = formatPreFlightError('SillyTavern context unavailable.');
-        const narratorContext = formatNarratorPromptError('SillyTavern context unavailable.');
-        state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
-        injectNarratorContext(narratorContext);
-        return false;
+        const error = new Error('SillyTavern context unavailable. Generation aborted before narration.');
+        showBlockingError(error);
+        if (typeof abort === 'function') abort(true);
+        return true;
     }
 
     state.chatSignature = captureChatSignature(context);
@@ -335,12 +346,11 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         injectRuntimeSentinel();
         injectNarratorContext(narratorContext);
     } catch (error) {
-        console.error(`[${EXTENSION_NAME}] deterministic pre-flight failed`, error);
-        const audit = formatPreFlightError(error);
-        const narratorContext = formatNarratorPromptError(error);
-        state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
-        injectRuntimeSentinel();
-        injectNarratorContext(narratorContext);
+        state.lastDebugPrefix = '';
+        state.pendingRun = null;
+        clearRuntimePrompts();
+        showBlockingError(error);
+        if (typeof abort === 'function') abort(true);
     } finally {
         clearProgress(progressToast);
         state.runningSemanticPass = false;

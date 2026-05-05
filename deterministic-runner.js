@@ -163,6 +163,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     audit.push('STEP 2: EXECUTE ResolutionEngine(input) USING SEMANTIC_LEDGER');
     audit.push(`2.0 roll_pool=[r0=${rollPool[0]},r1=${rollPool[1]},r2=${rollPool[2]},r3=${rollPool[3]},r4=${rollPool[4]},r5=${rollPool[5]}]`);
     audit.push(`2.1 identifyGoal=${goal}`);
+    audit.push(`2.1a identifyChallenge=${semantic.identifyChallenge || semantic.explicitMeans || goal}`);
     audit.push(`2.2 identifyTargets.semantic=${formatTargets(rawTargets)}`);
 
     const intimacyTarget = firstReal(preliminaryTargets.ActionTargets);
@@ -418,7 +419,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         }
         audit.push(`3.4d updateRapport=${compact(rapport)}`);
 
-        const deltas = hostilePressureResult?.deltas || deriveDirection(target, currentDisposition, currentRapport, auditInteraction);
+        const deltas = hostilePressureResult?.deltas || deriveDirection(target, currentDisposition, currentRapport, auditInteraction, resolutionPacket);
         const updatedDisposition = updateDisposition(currentDisposition, deltas);
         currentDisposition = updatedDisposition;
         if (hostilePressureResult?.dominatedFearBreak && currentDisposition.F >= 4 && currentDisposition.H >= 3) {
@@ -844,8 +845,6 @@ function addLivingName(set, name) {
     const normalized = normalizeNameKey(name);
     if (normalized) set.add(normalized);
 }
-
-
 
 
 
