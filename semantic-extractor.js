@@ -1,13 +1,17 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
+import { getRequestHeaders } from '../../../../script.js';
+import { createGenerationParameters, getChatCompletionModel, oai_settings } from '../../../../scripts/openai.js';
 
 export const SEMANTIC_PREFLIGHT_STOP_SENTINEL = 'SEMANTIC_PREFLIGHT_COMPLETE';
 
 const SEMANTIC_RESPONSE_LENGTH_MIN = 2048;
 const SEMANTIC_RESPONSE_LENGTH_MAX = 8192;
 const SEMANTIC_RESPONSE_LENGTH_PER_TRACKED_NPC = 256;
+const SEMANTIC_TOOL_NAME = 'submit_semantic_preflight';
+const SEMANTIC_BACKEND_ENDPOINT = '/api/backends/chat-completions/generate';
 
 export async function extractSemanticLedger(context, promptContext, type, trackerSnapshot, options = {}) {
-    if (!context?.generateRawData) {
+    if (!context?.generateRawData && options?.preferToolCall === false) {
         throw new Error('SillyTavern generateRawData API is unavailable.');
     }
 
@@ -17,15 +21,63 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
     const responseLength = Number.isFinite(options?.responseLength) && options.responseLength > 0
         ? options.responseLength
         : estimateSemanticResponseLength(trackerSnapshot);
-    const raw = await generateSemanticRaw(context, prompt, responseLength);
 
+    let raw;
     let ledger;
-    try {
-        ledger = parseSemanticLedger(raw, trackerSnapshot);
-        validateRawLedgerContract(ledger, raw);
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Semantic pass returned no valid ledger. Generation aborted before narration. ${message}`);
+    let extractionMeta;
+    if (options?.preferToolCall !== false) {
+        try {
+            const toolResult = await generateSemanticToolCall(context, prompt, responseLength);
+            raw = toolResult.raw;
+            ledger = parseSemanticLedger(toolResult.ledger, trackerSnapshot);
+            validateRawLedgerContract(ledger, raw);
+            extractionMeta = {
+                source: 'SillyTavern direct backend forced function tool + local validation',
+                schema: 'submit_semantic_preflight_tool_v1',
+                strict: true,
+                responseLength,
+                toolName: SEMANTIC_TOOL_NAME,
+            };
+        } catch (error) {
+            if (!isSemanticToolTransportError(error)) {
+                const message = error instanceof Error ? error.message : String(error);
+                throw new Error(`Semantic tool-call pass returned no valid ledger. Generation aborted before narration. ${message}`);
+            }
+
+            if (!context?.generateRawData) {
+                const message = error instanceof Error ? error.message : String(error);
+                throw new Error(`Semantic tool-call transport failed and generateRawData fallback is unavailable. Generation aborted before narration. ${message}`);
+            }
+
+            console.warn('[Structured Preflight Engines] semantic tool-call transport failed; falling back to compact ledger.', error);
+            raw = await generateSemanticRaw(context, prompt, responseLength);
+            extractionMeta = {
+                source: 'SillyTavern generateRawData compact preflight ledger fallback + local validation',
+                schema: 'compact_engine_name_anchored_preflight_ledger_v1',
+                strict: true,
+                responseLength,
+                fallbackFrom: 'submit_semantic_preflight_tool_v1',
+                fallbackReason: error instanceof Error ? error.message : String(error),
+            };
+        }
+    } else {
+        raw = await generateSemanticRaw(context, prompt, responseLength);
+        extractionMeta = {
+            source: 'SillyTavern generateRawData compact preflight ledger + local validation',
+            schema: 'compact_engine_name_anchored_preflight_ledger_v1',
+            strict: true,
+            responseLength,
+        };
+    }
+
+    if (!ledger) {
+        try {
+            ledger = parseSemanticLedger(raw, trackerSnapshot);
+            validateRawLedgerContract(ledger, raw);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Semantic pass returned no valid ledger. Generation aborted before narration. ${message}`);
+        }
     }
 
     if (!ledger || typeof ledger !== 'object') {
@@ -36,12 +88,7 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
     validateNormalizedLedger(normalized, raw);
     normalized.deterministicOverrides = {
         ...(normalized.deterministicOverrides || {}),
-        semanticLedgerExtraction: {
-            source: 'SillyTavern generateRawData compact preflight ledger + local validation',
-            schema: 'compact_engine_name_anchored_preflight_ledger_v1',
-            strict: true,
-            responseLength,
-        },
+        semanticLedgerExtraction: extractionMeta,
     };
     const personaCoreStats = extractPersonaCoreStats(context);
     if (personaCoreStats) {
@@ -70,11 +117,450 @@ function estimateSemanticResponseLength(trackerSnapshot) {
 }
 
 async function generateSemanticRaw(context, prompt, responseLength) {
+    if (!context?.generateRawData) {
+        throw new Error('SillyTavern generateRawData API is unavailable.');
+    }
     const options = { prompt };
     if (Number.isFinite(responseLength) && responseLength > 0) {
         options.responseLength = responseLength;
     }
     return await context.generateRawData(options);
+}
+
+class SemanticToolTransportError extends Error {
+    constructor(message, details = {}) {
+        super(message);
+        this.name = 'SemanticToolTransportError';
+        this.status = details.status;
+        this.body = details.body;
+        this.cause = details.cause;
+    }
+}
+
+function isSemanticToolTransportError(error) {
+    return error instanceof SemanticToolTransportError || error?.name === 'SemanticToolTransportError';
+}
+
+async function generateSemanticToolCall(context, prompt, responseLength) {
+    let generateData;
+    const toolPrompt = buildSemanticToolPrompt(prompt);
+    try {
+        const model = getChatCompletionModel(oai_settings);
+        const params = await createGenerationParameters(oai_settings, model, 'quiet', toolPrompt);
+        generateData = params.generate_data;
+    } catch (error) {
+        throw new SemanticToolTransportError('Could not build SillyTavern chat-completion backend request for semantic tool call.', { cause: error });
+    }
+
+    const chatCompletionSource = generateData.chat_completion_source || oai_settings?.chat_completion_source;
+    const semanticTool = buildSemanticPreflightTool(chatCompletionSource);
+    generateData.messages = toolPrompt;
+    generateData.stream = false;
+    generateData.n = undefined;
+    generateData.tools = [semanticTool];
+    generateData.tool_choice = buildSemanticToolChoice(chatCompletionSource);
+    generateData.include_reasoning = false;
+    generateData.enable_web_search = false;
+    delete generateData.request_images;
+    delete generateData.request_image_resolution;
+    delete generateData.request_image_aspect_ratio;
+    delete generateData.json_schema;
+    delete generateData.stop;
+
+    if (Number.isFinite(responseLength) && responseLength > 0) {
+        if (Object.prototype.hasOwnProperty.call(generateData, 'max_completion_tokens') && !Object.prototype.hasOwnProperty.call(generateData, 'max_tokens')) {
+            generateData.max_completion_tokens = responseLength;
+        } else {
+            generateData.max_tokens = responseLength;
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(generateData, 'temperature')) {
+        generateData.temperature = 0.1;
+    }
+
+    let response;
+    try {
+        response = await fetch(SEMANTIC_BACKEND_ENDPOINT, {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(generateData),
+        });
+    } catch (error) {
+        throw new SemanticToolTransportError('SillyTavern backend semantic tool-call request failed before provider response.', { cause: error });
+    }
+
+    if (!response.ok) {
+        let body = '';
+        try {
+            body = await response.text();
+        } catch {
+            body = '';
+        }
+        throw new SemanticToolTransportError(`SillyTavern backend rejected semantic tool-call request: ${response.status} ${response.statusText}${body ? ` ${body.slice(0, 600)}` : ''}`, {
+            status: response.status,
+            body,
+        });
+    }
+
+    const raw = await response.json();
+    if (raw?.error) {
+        throw new SemanticToolTransportError(`Provider returned an error for semantic tool-call request: ${previewRaw(raw)}`, { body: previewRaw(raw) });
+    }
+    const ledger = extractSemanticToolLedger(raw);
+    return { raw, ledger };
+}
+
+function buildSemanticToolPrompt(prompt) {
+    const messages = Array.isArray(prompt)
+        ? prompt.map(message => ({ ...message }))
+        : [];
+    let contractIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        if (typeof messages[index]?.content === 'string' && /MANDATORY OUTPUT CONTRACT/i.test(messages[index].content)) {
+            contractIndex = index;
+            break;
+        }
+    }
+    const toolContract = [
+        `MANDATORY OUTPUT CONTRACT: Call the function tool ${SEMANTIC_TOOL_NAME} exactly once.`,
+        'Do not output narration, prose, markdown, visible JSON, or a compact text ledger.',
+        'Fill every required tool argument from the semantic/contextual engine outputs.',
+        'The tool argument paths mirror the engine function names: resolutionEngine.identifyGoal = ResolutionEngine.identifyGoal, resolutionEngine.identifyChallenge = ResolutionEngine.identifyChallenge, resolutionEngine.identifyTargets = ResolutionEngine.identifyTargets, resolutionEngine.mapStats = ResolutionEngine.mapStats, relationshipEngine[index] = RelationshipEngine(npc), chaosSemantic = CHAOS_INTERRUPT, nameSemantic = NameGenerationEngine, and proactivitySemantic.cap = NPCProactivityEngine.cap.',
+        'Use empty arrays for no targets/obstacles/observers. Use "none" string values only for enum/string fields that require none.',
+        'engineContext.trackerRelevantNPCs may be an empty array; the extension already has the canonical tracker snapshot locally.',
+        'The compact ledger wording elsewhere in the prompt is the fallback representation of the same fields; for this request, the forced tool call is the only valid output.',
+    ].join('\n');
+
+    if (contractIndex >= 0) {
+        messages[contractIndex] = {
+            ...messages[contractIndex],
+            role: 'user',
+            content: toolContract,
+        };
+    } else {
+        messages.push({ role: 'user', content: toolContract });
+    }
+
+    return messages;
+}
+
+function buildSemanticToolChoice(chatCompletionSource) {
+    if (chatCompletionSource === 'claude') {
+        return 'any';
+    }
+
+    return {
+        type: 'function',
+        function: { name: SEMANTIC_TOOL_NAME },
+    };
+}
+
+function buildSemanticPreflightTool(chatCompletionSource) {
+    const strictSource = ['openai', 'azure_openai'].includes(chatCompletionSource);
+    const parameters = buildSemanticPreflightSchema();
+    if (!strictSource) {
+        removeStrictOnlySchemaKeywords(parameters);
+    }
+
+    const tool = {
+        type: 'function',
+        function: {
+            name: SEMANTIC_TOOL_NAME,
+            description: 'Submit the mandatory structured semantic preflight ledger for the current SillyTavern roleplay action. This is data extraction only; do not narrate or roll dice.',
+            parameters,
+        },
+    };
+
+    if (strictSource) {
+        tool.function.strict = true;
+    }
+
+    return tool;
+}
+
+function removeStrictOnlySchemaKeywords(schema) {
+    if (!schema || typeof schema !== 'object') return schema;
+    delete schema.additionalProperties;
+    if (schema.properties && typeof schema.properties === 'object') {
+        Object.values(schema.properties).forEach(removeStrictOnlySchemaKeywords);
+    }
+    if (schema.items) {
+        removeStrictOnlySchemaKeywords(schema.items);
+    }
+    return schema;
+}
+
+function buildSemanticPreflightSchema() {
+    const coreStatsSchema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['Rank', 'MainStat', 'PHY', 'MND', 'CHA'],
+        properties: {
+            Rank: { type: 'string', enum: ['none', 'Weak', 'Average', 'Trained', 'Elite', 'Boss'] },
+            MainStat: { type: 'string', enum: ['none', 'PHY', 'MND', 'CHA', 'Balanced'] },
+            PHY: { type: 'integer' },
+            MND: { type: 'integer' },
+            CHA: { type: 'integer' },
+        },
+    };
+    const stringListSchema = {
+        type: 'array',
+        items: { type: 'string' },
+    };
+    const stakeChangeSchema = {
+        type: 'object',
+        additionalProperties: false,
+        required: STAKE_OUTCOME_KEYS,
+        properties: Object.fromEntries(STAKE_OUTCOME_KEYS.map(key => [key, { type: 'string', enum: ['benefit', 'harm', 'none'] }])),
+    };
+
+    return {
+        type: 'object',
+        additionalProperties: false,
+        required: ['engineContext', 'resolutionEngine', 'relationshipEngine', 'chaosSemantic', 'nameSemantic', 'proactivitySemantic'],
+        properties: {
+            engineContext: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['userCoreStats', 'trackerRelevantNPCs'],
+                properties: {
+                    userCoreStats: coreStatsSchema,
+                    trackerRelevantNPCs: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['NPC'],
+                            properties: {
+                                NPC: { type: 'string' },
+                            },
+                        },
+                    },
+                },
+            },
+            resolutionEngine: {
+                type: 'object',
+                additionalProperties: false,
+                required: [
+                    'identifyGoal',
+                    'identifyChallenge',
+                    'intimacyAdvance',
+                    'explicitMeans',
+                    'identifyTargets',
+                    'checkIntimacyGate',
+                    'hasStakes',
+                    'actionCount',
+                    'mapStats',
+                    'classifyHostilePhysicalIntent',
+                    'genStats',
+                ],
+                properties: {
+                    identifyGoal: { type: 'string' },
+                    identifyChallenge: { type: 'string' },
+                    intimacyAdvance: { type: 'string', enum: ['none', 'physical', 'verbal'] },
+                    explicitMeans: { type: 'string' },
+                    identifyTargets: {
+                        type: 'object',
+                        additionalProperties: false,
+                        required: ['ActionTargets', 'OppTargets', 'BenefitedObservers', 'HarmedObservers'],
+                        properties: {
+                            ActionTargets: stringListSchema,
+                            OppTargets: {
+                                type: 'object',
+                                additionalProperties: false,
+                                required: ['NPC', 'ENV'],
+                                properties: {
+                                    NPC: stringListSchema,
+                                    ENV: stringListSchema,
+                                },
+                            },
+                            BenefitedObservers: stringListSchema,
+                            HarmedObservers: stringListSchema,
+                        },
+                    },
+                    checkIntimacyGate: { type: 'boolean' },
+                    hasStakes: { type: 'boolean' },
+                    actionCount: stringListSchema,
+                    mapStats: {
+                        type: 'object',
+                        additionalProperties: false,
+                        required: ['USER', 'OPP'],
+                        properties: {
+                            USER: { type: 'string', enum: ['PHY', 'MND', 'CHA'] },
+                            OPP: { type: 'string', enum: ['PHY', 'MND', 'CHA', 'ENV'] },
+                        },
+                    },
+                    classifyHostilePhysicalIntent: { type: 'boolean' },
+                    genStats: coreStatsSchema,
+                },
+            },
+            relationshipEngine: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: [
+                        'NPC',
+                        'relevant',
+                        'auditInteraction',
+                        'initFlags',
+                        'newEncounterExplicit',
+                        'explicitIntimidationOrCoercion',
+                        'stakeChangeByOutcome',
+                        'overrideFlags',
+                        'genStats',
+                    ],
+                    properties: {
+                        NPC: { type: 'string' },
+                        relevant: { type: 'boolean' },
+                        auditInteraction: { type: 'boolean' },
+                        initFlags: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['romanticOpen', 'userBadRep', 'userGoodRep', 'userNonHuman', 'fearImmunity'],
+                            properties: {
+                                romanticOpen: { type: 'boolean' },
+                                userBadRep: { type: 'boolean' },
+                                userGoodRep: { type: 'boolean' },
+                                userNonHuman: { type: 'boolean' },
+                                fearImmunity: { type: 'boolean' },
+                            },
+                        },
+                        newEncounterExplicit: { type: 'boolean' },
+                        explicitIntimidationOrCoercion: { type: 'boolean' },
+                        stakeChangeByOutcome: stakeChangeSchema,
+                        overrideFlags: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['Exploitation', 'Hedonist', 'Transactional', 'Established'],
+                            properties: {
+                                Exploitation: { type: 'boolean' },
+                                Hedonist: { type: 'boolean' },
+                                Transactional: { type: 'boolean' },
+                                Established: { type: 'boolean' },
+                            },
+                        },
+                        genStats: coreStatsSchema,
+                    },
+                },
+            },
+            chaosSemantic: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['sceneSummary'],
+                properties: {
+                    sceneSummary: { type: 'string' },
+                },
+            },
+            nameSemantic: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['nameRequired', 'explicitNameKnown', 'isLocation', 'seed', 'normalizeSeed', 'detectMode', 'generatedName'],
+                properties: {
+                    nameRequired: { type: 'boolean' },
+                    explicitNameKnown: { type: 'boolean' },
+                    isLocation: { type: 'boolean' },
+                    seed: { type: 'string' },
+                    normalizeSeed: { type: 'string' },
+                    detectMode: { type: 'string', enum: ['none', 'PERSON', 'LOCATION'] },
+                    generatedName: { type: 'string' },
+                },
+            },
+            proactivitySemantic: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['cap'],
+                properties: {
+                    cap: { type: 'integer' },
+                },
+            },
+        },
+    };
+}
+
+function extractSemanticToolLedger(raw) {
+    const calls = collectToolCalls(raw);
+    const matching = calls.find(call => getToolCallName(call) === SEMANTIC_TOOL_NAME) || calls[0];
+    if (!matching) {
+        throw new Error(`semantic tool-call response did not contain ${SEMANTIC_TOOL_NAME}. RawPreview=${previewRaw(raw)}`);
+    }
+
+    const args = getToolCallArguments(matching);
+    const ledger = parseToolArguments(args);
+    if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) {
+        throw new Error(`semantic tool-call arguments were not an object. RawPreview=${previewRaw(raw)}`);
+    }
+    return ledger;
+}
+
+function collectToolCalls(raw) {
+    const calls = [];
+
+    for (const choice of raw?.choices || []) {
+        if (Array.isArray(choice?.message?.tool_calls)) calls.push(...choice.message.tool_calls);
+        if (choice?.message?.function_call) calls.push(choice.message.function_call);
+        if (Array.isArray(choice?.delta?.tool_calls)) calls.push(...choice.delta.tool_calls);
+    }
+
+    if (Array.isArray(raw?.content)) {
+        calls.push(...raw.content.filter(item => item?.type === 'tool_use' || item?.type === 'function_call'));
+    }
+
+    if (Array.isArray(raw?.message?.tool_calls)) {
+        calls.push(...raw.message.tool_calls);
+    } else if (raw?.message?.tool_calls && typeof raw.message.tool_calls === 'object') {
+        calls.push(raw.message.tool_calls);
+    }
+
+    const geminiParts = raw?.candidates?.[0]?.content?.parts;
+    if (Array.isArray(geminiParts)) {
+        calls.push(...geminiParts.filter(part => part?.functionCall));
+    }
+
+    const responseParts = raw?.responseContent?.parts;
+    if (Array.isArray(responseParts)) {
+        calls.push(...responseParts.filter(part => part?.functionCall).map(part => part.functionCall));
+    }
+
+    if (Array.isArray(raw)) {
+        for (const item of raw) {
+            calls.push(...collectToolCalls(item));
+        }
+    }
+
+    return calls;
+}
+
+function getToolCallName(call) {
+    return call?.function?.name
+        || call?.name
+        || call?.functionCall?.name
+        || call?.tool_name
+        || '';
+}
+
+function getToolCallArguments(call) {
+    return call?.function?.arguments
+        ?? call?.arguments
+        ?? call?.input
+        ?? call?.functionCall?.args
+        ?? call?.parameters
+        ?? call?.args;
+}
+
+function parseToolArguments(args) {
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+        return args;
+    }
+    if (typeof args !== 'string') {
+        throw new Error('semantic tool-call arguments were missing');
+    }
+    const text = args.trim();
+    if (!text) {
+        throw new Error('semantic tool-call arguments were empty');
+    }
+    return JSON.parse(extractJsonObject(text));
 }
 
 const COMPACT_LEDGER_CONTRACT = [
@@ -832,9 +1318,7 @@ function clampNumber(value, min, max) {
 function normalizeLedger(ledger) {
     ledger.engineContext = ledger.engineContext || {};
     ledger.engineContext.userCoreStats = normalizeCore(ledger.engineContext.userCoreStats);
-    ledger.engineContext.trackerRelevantNPCs = Array.isArray(ledger.engineContext.trackerRelevantNPCs)
-        ? ledger.engineContext.trackerRelevantNPCs
-        : [];
+    ledger.engineContext.trackerRelevantNPCs = normalizeTrackerRelevantNPCs(ledger.engineContext.trackerRelevantNPCs);
     ledger.resolutionEngine = ledger.resolutionEngine || {};
     ledger.resolutionEngine.identifyGoal = ledger.resolutionEngine.identifyGoal || 'Normal_Interaction';
     ledger.resolutionEngine.identifyChallenge = ledger.resolutionEngine.identifyChallenge || ledger.resolutionEngine.explicitMeans || ledger.resolutionEngine.identifyGoal;
@@ -870,6 +1354,24 @@ function normalizeCore(core) {
         MND: toNumber(core?.MND, 1),
         CHA: toNumber(core?.CHA, 1),
     };
+}
+
+function normalizeTrackerRelevantNPCs(entries) {
+    if (!Array.isArray(entries)) return [];
+    return entries
+        .map(entry => {
+            const npc = cleanScalar(entry?.NPC);
+            if (!npc || isNoneValue(npc)) return null;
+            return {
+                NPC: npc,
+                currentDisposition: entry?.currentDisposition ?? null,
+                currentRapport: toNumber(entry?.currentRapport, 0),
+                rapportEncounterLock: entry?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
+                intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(entry?.intimacyGate) ? entry.intimacyGate : 'SKIP',
+                currentCoreStats: normalizeCore(entry?.currentCoreStats),
+            };
+        })
+        .filter(Boolean);
 }
 
 function normalizeActionMarkers(markers) {
