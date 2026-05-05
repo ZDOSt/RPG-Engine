@@ -1,10 +1,11 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
+import { addEphemeralStoppingString, flushEphemeralStoppingStrings } from '../../../../scripts/power-user.js';
 import {
     formatDebugMessagePrefix,
     formatNarratorPromptContext,
     formatPreFlightDebug,
 } from './pre-flight.js';
-import { extractSemanticLedger } from './semantic-extractor.js';
+import { extractSemanticLedger, SEMANTIC_PREFLIGHT_STOP_SENTINEL } from './semantic-extractor.js';
 import { buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
 
 const EXTENSION_NAME = 'Structured Preflight Engines';
@@ -506,8 +507,10 @@ async function handleChatCompletionPromptReady(eventData) {
 async function runSemanticPassWithPromptReadyBypass(context, assembledChat, type, trackerSnapshot) {
     state.bypassPromptReady = true;
     try {
+        addEphemeralStoppingString(SEMANTIC_PREFLIGHT_STOP_SENTINEL);
         return await extractSemanticLedger(context, assembledChat, type, trackerSnapshot, { assembledPrompt: true });
     } finally {
+        flushEphemeralStoppingStrings();
         state.bypassPromptReady = false;
     }
 }

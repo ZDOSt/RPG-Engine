@@ -1,6 +1,10 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
 
-const SEMANTIC_RESPONSE_LENGTH = 1500;
+export const SEMANTIC_PREFLIGHT_STOP_SENTINEL = 'SEMANTIC_PREFLIGHT_COMPLETE';
+
+const SEMANTIC_RESPONSE_LENGTH_MIN = 2048;
+const SEMANTIC_RESPONSE_LENGTH_MAX = 8192;
+const SEMANTIC_RESPONSE_LENGTH_PER_TRACKED_NPC = 256;
 
 export async function extractSemanticLedger(context, promptContext, type, trackerSnapshot, options = {}) {
     if (!context?.generateRawData) {
@@ -10,7 +14,10 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
     const prompt = options?.assembledPrompt
         ? buildSemanticPromptFromAssembledChat(context, promptContext, type, trackerSnapshot)
         : buildSemanticPrompt(context, promptContext, type, trackerSnapshot);
-    const raw = await generateSemanticRaw(context, prompt);
+    const responseLength = Number.isFinite(options?.responseLength) && options.responseLength > 0
+        ? options.responseLength
+        : estimateSemanticResponseLength(trackerSnapshot);
+    const raw = await generateSemanticRaw(context, prompt, responseLength);
 
     let ledger;
     try {
@@ -33,6 +40,7 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
             source: 'SillyTavern generateRawData compact preflight ledger + local validation',
             schema: 'compact_engine_name_anchored_preflight_ledger_v1',
             strict: true,
+            responseLength,
         },
     };
     const personaCoreStats = extractPersonaCoreStats(context);
@@ -53,7 +61,15 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
     return normalized;
 }
 
-async function generateSemanticRaw(context, prompt, responseLength = SEMANTIC_RESPONSE_LENGTH) {
+function estimateSemanticResponseLength(trackerSnapshot) {
+    const trackedNpcCount = trackerSnapshot && typeof trackerSnapshot === 'object'
+        ? Object.keys(trackerSnapshot).length
+        : 0;
+    const estimated = SEMANTIC_RESPONSE_LENGTH_MIN + (trackedNpcCount * SEMANTIC_RESPONSE_LENGTH_PER_TRACKED_NPC);
+    return Math.max(SEMANTIC_RESPONSE_LENGTH_MIN, Math.min(SEMANTIC_RESPONSE_LENGTH_MAX, estimated));
+}
+
+async function generateSemanticRaw(context, prompt, responseLength) {
     const options = { prompt };
     if (Number.isFinite(responseLength) && responseLength > 0) {
         options.responseLength = responseLength;
@@ -64,7 +80,8 @@ async function generateSemanticRaw(context, prompt, responseLength = SEMANTIC_RE
 const COMPACT_LEDGER_CONTRACT = [
     'STRICT COMPACT PREFLIGHT LEDGER CONTRACT:',
     '- Output only the ledger block. No markdown. No prose. No JSON. No comments. No explanations.',
-    '- Begin with BEGIN_SEMANTIC_PREFLIGHT and end with END_SEMANTIC_PREFLIGHT.',
+    '- Begin with BEGIN_SEMANTIC_PREFLIGHT and end the ledger with END_SEMANTIC_PREFLIGHT.',
+    `- After END_SEMANTIC_PREFLIGHT, output ${SEMANTIC_PREFLIGHT_STOP_SENTINEL} on its own final line. Do not output anything after it.`,
     '- Fill every required line exactly once. Keep the exact function/key names shown below.',
     '- The ledger is only a form. The Engine reference is the rule source. Read and execute the semantic/contextual engine functions first, then fill the lines from those outputs.',
     '- Use comma-separated names or (none) for lists. Use Y/N for booleans. Use benefit/harm/none for stakeChangeByOutcome values.',
@@ -140,7 +157,8 @@ NameGenerationEngine.normalizeSeed=(none)
 NameGenerationEngine.detectMode=none
 NameGenerationEngine.generatedName=(none)
 NPCProactivityEngine.cap=1
-END_SEMANTIC_PREFLIGHT`;
+END_SEMANTIC_PREFLIGHT
+${SEMANTIC_PREFLIGHT_STOP_SENTINEL}`;
 
 function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
     const chatContext = formatChatContext(coreChat);
@@ -174,7 +192,7 @@ function buildSemanticPrompt(context, coreChat, type, trackerSnapshot) {
         {
             role: 'user',
             content:
-                'MANDATORY OUTPUT CONTRACT: Return one compact ledger block with these exact field names. Do not output anything before BEGIN_SEMANTIC_PREFLIGHT or after END_SEMANTIC_PREFLIGHT. Your first visible output token must be BEGIN_SEMANTIC_PREFLIGHT.\n' +
+                `MANDATORY OUTPUT CONTRACT: Return one compact ledger block with these exact field names, then ${SEMANTIC_PREFLIGHT_STOP_SENTINEL} on its own final line. Do not output anything before BEGIN_SEMANTIC_PREFLIGHT or after ${SEMANTIC_PREFLIGHT_STOP_SENTINEL}. Your first visible output token must be BEGIN_SEMANTIC_PREFLIGHT.\n` +
                 COMPACT_LEDGER_TEMPLATE,
         },
     ];
@@ -205,7 +223,7 @@ function buildSemanticPromptFromAssembledChat(context, assembledChat, type, trac
         {
             role: 'user',
             content:
-                'MANDATORY OUTPUT CONTRACT: Return one compact ledger block with these exact field names. Do not output anything before BEGIN_SEMANTIC_PREFLIGHT or after END_SEMANTIC_PREFLIGHT. Your first visible output token must be BEGIN_SEMANTIC_PREFLIGHT.\n' +
+                `MANDATORY OUTPUT CONTRACT: Return one compact ledger block with these exact field names, then ${SEMANTIC_PREFLIGHT_STOP_SENTINEL} on its own final line. Do not output anything before BEGIN_SEMANTIC_PREFLIGHT or after ${SEMANTIC_PREFLIGHT_STOP_SENTINEL}. Your first visible output token must be BEGIN_SEMANTIC_PREFLIGHT.\n` +
                 COMPACT_LEDGER_TEMPLATE,
         },
     ];
