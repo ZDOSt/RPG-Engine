@@ -183,7 +183,7 @@ export function formatNarratorPromptContext(report) {
         'For intimacy, IntimacyGate=DENY means no cooperation, reciprocation, or compliance even when the roll succeeds.',
         'Never narrate voluntary {{user}} actions, counterattacks, thoughts, feelings, decisions, or dialogue beyond the explicit user input.',
         'Involuntary reflexive physical reactions caused directly by computed external impact/restraint are allowed; keep them immediate/passive and do not turn them into choices, tactics, counters, or dialogue.',
-        'Length target: 80-140 words unless the scene requires less.',
+        'Length target: 80-180 words for simple scenes; up to 300 words for intricate, multi-beat, combat, intimacy-boundary, proactivity, aggression, or chaos scenes.',
         '',
         'User Actions: ' + summary.userAction,
         'Result: ' + summary.result,
