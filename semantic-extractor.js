@@ -389,7 +389,7 @@ function parseSemanticLedger(raw, trackerSnapshot) {
         }
     }
 
-    throw new Error(`Semantic pass did not return a valid mandatory compact ledger. Candidates=${candidates.length}. Errors=${errors.slice(0, 4).join(' | ')}`);
+    throw new Error(`Semantic pass did not return a valid mandatory compact ledger. Candidates=${candidates.length}. Errors=${errors.slice(0, 4).join(' | ')}. RawPreview=${previewRaw(raw)}`);
 }
 
 function parseLedgerText(text, trackerSnapshot) {
@@ -448,6 +448,17 @@ function extractTextCandidates(raw) {
 
     add(raw);
     return values;
+}
+
+function previewRaw(raw) {
+    try {
+        return JSON.stringify(raw, (_key, value) => {
+            if (typeof value === 'string') return value.slice(0, 600);
+            return value;
+        }).slice(0, 1200);
+    } catch {
+        return String(raw).slice(0, 1200);
+    }
 }
 
 function hasLedgerShape(value) {
