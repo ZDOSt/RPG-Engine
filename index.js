@@ -511,7 +511,10 @@ function normalizeDisplayTrackerNpcs(npcs) {
     const normalized = {};
     for (const [name, value] of Object.entries(npcs || {})) {
         if (!isRealName(name)) continue;
-        normalized[name] = normalizeTrackerEntry(value);
+        normalized[name] = normalizeTrackerEntry({
+            ...value,
+            persistenceTier: value?.persistenceTier || inferPersistenceTier(name),
+        });
     }
     return normalized;
 }
@@ -522,15 +525,109 @@ function buildDisplayTrackerSnapshot({ messageKey, pendingRun, report }) {
         ...(pendingRun?.trackerBefore || {}),
         ...(pendingRun?.trackerAfter || {}),
     });
+    const rawPresentNpcNames = toRealNameArray(pendingRun?.presentNpcNames || resolutionPacket.NPCInScene);
+    const presentNpcNames = applyDisplayPresenceCorrections(rawPresentNpcNames, Object.keys(trackerAfter), pendingRun?.latestUserText);
+    const displayNpcs = applyTrackerPresenceMetadata(trackerAfter, presentNpcNames, {
+        messageKey,
+        latestUserText: pendingRun?.latestUserText,
+    });
     return {
         version: TRACKER_DISPLAY_VERSION,
         messageKey,
         type: pendingRun?.type || 'normal',
         savedAt: Date.now(),
-        presentNpcNames: toRealNameArray(pendingRun?.presentNpcNames || resolutionPacket.NPCInScene),
+        presentNpcNames,
         userCoreStats: pendingRun?.userCoreStats || report?.semanticLedger?.engineContext?.userCoreStats || null,
-        npcs: trackerAfter,
+        npcs: displayNpcs,
     };
+}
+
+function applyTrackerPresenceMetadata(npcs, presentNames, { messageKey, latestUserText } = {}) {
+    const normalized = normalizeDisplayTrackerNpcs(npcs);
+    const presentSet = new Set(toRealNameArray(presentNames).map(name => name.toLowerCase()));
+    const explicitAbsentSet = getExplicitlyAbsentTrackerNames(latestUserText, Object.keys(normalized));
+    const stamped = {};
+
+    for (const [name, entry] of Object.entries(normalized)) {
+        const key = name.toLowerCase();
+        const previousPresence = entry.presence || 'Present';
+        const isPresent = presentSet.has(key) && !explicitAbsentSet.has(key);
+        const isExplicitlyAbsent = explicitAbsentSet.has(key);
+        const presence = isPresent ? 'Present' : isExplicitlyAbsent ? 'Absent' : previousPresence;
+
+        stamped[name] = {
+            ...entry,
+            persistenceTier: entry.persistenceTier || inferPersistenceTier(name),
+            lifecycle: entry.lifecycle || 'Active',
+            presence,
+            lastSeenMessageKey: presence === 'Present' ? messageKey || entry.lastSeenMessageKey || '' : entry.lastSeenMessageKey || '',
+            absentSinceMessageKey: presence === 'Absent' && previousPresence !== 'Absent'
+                ? messageKey || entry.absentSinceMessageKey || ''
+                : entry.absentSinceMessageKey || '',
+        };
+    }
+
+    return stamped;
+}
+
+function buildTrackerUpdateForPersistence(displaySnapshot) {
+    return {
+        npcs: normalizeDisplayTrackerNpcs(displaySnapshot?.npcs || {}),
+    };
+}
+
+function applyDisplayPresenceCorrections(presentNames, trackedNames, latestUserText) {
+    const explicitlyAbsent = getExplicitlyAbsentTrackerNames(latestUserText, trackedNames);
+    if (!explicitlyAbsent.size) return presentNames;
+    return presentNames.filter(name => !explicitlyAbsent.has(name.toLowerCase()));
+}
+
+function inferPersistenceTier(name) {
+    const text = String(name ?? '').trim();
+    if (!text) return 'Temporary';
+    if (/[#\d]/.test(text)) return 'Temporary';
+    if (/\b(?:guard|soldier|bandit|raider|archer|thug|goblin|orc|ogre|cultist|mercenary|villager|patron|civilian|beast|wolf|zombie|skeleton|enemy|attacker|ambusher|scout|sentry|hunter|monster|creature|minion|mob)\b/i.test(text)) {
+        return 'Temporary';
+    }
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length >= 2 && words.some(word => /^[A-Z][a-z]+/.test(word))) return 'Recurring';
+    if (/^[A-Z][a-z]+$/.test(text)) return 'Recurring';
+    return 'Temporary';
+}
+
+function getExplicitlyAbsentTrackerNames(text, trackedNames) {
+    const source = normalizeSearchText(text);
+    const absent = new Set();
+    if (!source || !Array.isArray(trackedNames)) return absent;
+
+    for (const name of trackedNames) {
+        const normalizedName = normalizeSearchText(name);
+        if (!normalizedName || !source.includes(normalizedName)) continue;
+        if (hasExplicitAbsenceForName(source, normalizedName)) {
+            absent.add(String(name).toLowerCase());
+        }
+    }
+
+    return absent;
+}
+
+function hasExplicitAbsenceForName(text, name) {
+    const index = text.indexOf(name);
+    if (index < 0) return false;
+
+    const window = text.slice(Math.max(0, index - 180), Math.min(text.length, index + name.length + 240));
+    if (/\b(?:no longer|not|not anymore)\s+(?:in\s+)?sight\b/.test(window)) return true;
+    if (/\bout of sight\b/.test(window)) return true;
+    if (/\bno longer visible\b/.test(window)) return true;
+    if (/\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b.{0,160}\b(?:behind|away)\b/.test(window)) return true;
+    return /\b(?:behind|away)\b.{0,160}\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b/.test(window);
+}
+
+function normalizeSearchText(value) {
+    return String(value ?? '')
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 function getMessageSwipeId(message) {
@@ -614,9 +711,7 @@ function formatDisposition(disposition) {
 function buildTrackerDisplayHtml(snapshot) {
     const npcs = normalizeDisplayTrackerNpcs(snapshot?.npcs);
     const names = Object.keys(npcs).sort((a, b) => a.localeCompare(b));
-    const presentSet = new Set(toRealNameArray(snapshot?.presentNpcNames).map(name => name.toLowerCase()));
-    const present = names.filter(name => presentSet.has(name.toLowerCase()));
-    const absent = names.filter(name => !presentSet.has(name.toLowerCase()));
+    const present = names.filter(name => npcs[name]?.presence !== 'Absent' && npcs[name]?.lifecycle === 'Active');
     const userCore = snapshot?.userCoreStats;
 
     const renderNpc = name => {
@@ -650,7 +745,6 @@ function buildTrackerDisplayHtml(snapshot) {
             <div class="structured-preflight-tracker-body">
                 <div class="structured-preflight-tracker-title">NPCs</div>
                 ${renderSection('Present', present)}
-                ${renderSection('Absent', absent)}
                 <div class="structured-preflight-tracker-title">Player</div>
                 <div>Stats <code>${escapeHtml(formatCoreStats(userCore))}</code></div>
             </div>
@@ -760,6 +854,22 @@ function captureChatSignature(context = getContext()) {
 
 function getLatestReportPresentNpcNames(report) {
     return toRealNameArray(report?.finalNarrativeHandoff?.resolutionPacket?.NPCInScene);
+}
+
+function getLatestUserText(chat) {
+    if (!Array.isArray(chat)) return '';
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+        const message = chat[index];
+        if (message?.role !== 'user') continue;
+        if (typeof message.content === 'string') return message.content;
+        if (Array.isArray(message.content)) {
+            return message.content
+                .map(part => typeof part === 'string' ? part : part?.text)
+                .filter(Boolean)
+                .join('\n');
+        }
+    }
+    return '';
 }
 
 function firstChangedIndex(before, after) {
@@ -887,7 +997,7 @@ function restoreTrackerForRegeneration(type) {
     const targetMessageId = Array.isArray(context?.chat) ? context.chat.length - 1 : null;
     const snapshot = targetMessageId == null ? null : root.snapshots?.[getMessageKey(targetMessageId, context)]?.before;
     if (snapshot) {
-        root.npcs = clone(snapshot) || {};
+        root.npcs = normalizeDisplayTrackerNpcs(snapshot);
         root.snapshots[getMessageKey(targetMessageId, context)].restoredForRegeneration = Date.now();
         console.info(`[${EXTENSION_NAME}] restored tracker snapshot before ${type} of message ${targetMessageId}`);
     }
@@ -934,10 +1044,10 @@ async function prependComputedDebug(messageId, type) {
             messageKey,
             pendingRun: state.pendingRun,
         });
-        await saveTrackerUpdate(context, { npcs: state.pendingRun.trackerAfter });
+        await saveTrackerUpdate(context, buildTrackerUpdateForPersistence(trackerDisplaySnapshot));
         root.snapshots[messageKey] = {
             before: clone(state.pendingRun.trackerBefore),
-            after: clone(state.pendingRun.trackerAfter),
+            after: clone(trackerDisplaySnapshot.npcs),
             display: clone(trackerDisplaySnapshot),
             type: state.pendingRun.type,
             savedAt: Date.now(),
@@ -996,7 +1106,7 @@ async function handleMessageDeleted(newLength) {
     clearRuntimePrompts();
 
     if (restoreCandidate) {
-        root.npcs = clone(restoreCandidate.before) || {};
+        root.npcs = normalizeDisplayTrackerNpcs(restoreCandidate.before);
         await persistMetadata(context);
         console.info(`[${EXTENSION_NAME}] restored tracker snapshot after message deletion from index ${Math.min(chatLength, firstAffectedIndex)}`);
     } else if (restoreTrackerFromLatestDisplaySnapshot(context)) {
@@ -1127,6 +1237,7 @@ async function handleChatCompletionPromptReady(eventData) {
             trackerAfter: report.trackerUpdate?.npcs || {},
             presentNpcNames: getLatestReportPresentNpcNames(report),
             userCoreStats: report.semanticLedger?.engineContext?.userCoreStats || null,
+            latestUserText: getLatestUserText(eventData.chat),
         };
         state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
 

@@ -1402,7 +1402,7 @@ export function buildNarrationGuidance(resolution, handoffs, chaos, proactivity,
 export function buildPersistencePolicy() {
     return {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
-        persistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportEncounterLock', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode'],
+        persistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportEncounterLock', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey'],
         perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
 }
@@ -1419,6 +1419,9 @@ export function trackerSummary(trackerUpdate) {
         return [
             name,
             disposition,
+            `presence:${value?.presence ?? 'Present'}`,
+            `tier:${value?.persistenceTier ?? 'Recurring'}`,
+            `life:${value?.lifecycle ?? 'Active'}`,
             `rapport:${value?.currentRapport ?? 0}`,
             `gate:${value?.intimacyGate ?? 'SKIP'}`,
             stats,
@@ -1439,7 +1442,26 @@ export function normalizeTrackerEntry(value) {
         hostileLandedPressure: clamp(Number(value?.hostileLandedPressure ?? 0), 0, 20),
         dominantLock: ['FEAR', 'HOSTILITY'].includes(value?.dominantLock) ? value.dominantLock : 'None',
         pressureMode: ['none', 'cornered', 'dominated'].includes(value?.pressureMode) ? value.pressureMode : 'none',
+        presence: normalizePresence(value?.presence),
+        lifecycle: normalizeLifecycle(value?.lifecycle),
+        persistenceTier: normalizePersistenceTier(value?.persistenceTier),
+        lastSeenMessageKey: typeof value?.lastSeenMessageKey === 'string' ? value.lastSeenMessageKey : '',
+        absentSinceMessageKey: typeof value?.absentSinceMessageKey === 'string' ? value.absentSinceMessageKey : '',
+        retiredSinceMessageKey: typeof value?.retiredSinceMessageKey === 'string' ? value.retiredSinceMessageKey : '',
     };
+}
+
+export function normalizePresence(value) {
+    return value === 'Absent' ? 'Absent' : 'Present';
+}
+
+export function normalizeLifecycle(value) {
+    if (value === 'Dead' || value === 'Retired') return value;
+    return 'Active';
+}
+
+export function normalizePersistenceTier(value) {
+    return value === 'Temporary' ? 'Temporary' : 'Recurring';
 }
 
 export function normalizeIntimacyGateSource(value) {

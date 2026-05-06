@@ -88,7 +88,10 @@ export async function saveTrackerUpdate(context, trackerUpdate) {
     root.npcs = root.npcs || {};
 
     for (const [name, value] of Object.entries(trackerUpdate.npcs)) {
-        root.npcs[name] = value;
+        root.npcs[name] = normalizeTrackerEntry({
+            ...(root.npcs[name] || {}),
+            ...(value || {}),
+        });
     }
 
     context.chatMetadata.structuredPreflightTracker = root;
@@ -513,6 +516,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             audit.push(`3.7a currentCoreStats not persisted for ${npc}: semantic genStats was default 1/1/1`);
         }
         trackerUpdate[npc] = {
+            ...state,
             currentDisposition,
             currentRapport,
             rapportEncounterLock,
@@ -996,7 +1000,6 @@ function addLivingName(set, name) {
     const normalized = normalizeNameKey(name);
     if (normalized) set.add(normalized);
 }
-
 
 
 
