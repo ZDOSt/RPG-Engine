@@ -484,6 +484,7 @@ function buildSemanticPreflightSchema() {
                     'actionCount',
                     'mapStats',
                     'classifyHostilePhysicalIntent',
+                    'classifyPhysicalBoundaryPressure',
                     'genStats',
                 ],
                 properties: {
@@ -523,6 +524,7 @@ function buildSemanticPreflightSchema() {
                         },
                     },
                     classifyHostilePhysicalIntent: { type: 'boolean' },
+                    classifyPhysicalBoundaryPressure: { type: 'boolean' },
                     genStats: coreStatsSchema,
                 },
             },
@@ -549,8 +551,9 @@ function buildSemanticPreflightSchema() {
                         initFlags: {
                             type: 'object',
                             additionalProperties: false,
-                            required: ['romanticOpen', 'userBadRep', 'userGoodRep', 'userNonHuman', 'fearImmunity'],
+                            required: ['activeEnemy', 'romanticOpen', 'userBadRep', 'userGoodRep', 'userNonHuman', 'fearImmunity'],
                             properties: {
+                                activeEnemy: { type: 'boolean' },
                                 romanticOpen: { type: 'boolean' },
                                 userBadRep: { type: 'boolean' },
                                 userGoodRep: { type: 'boolean' },
@@ -730,6 +733,7 @@ ResolutionEngine.actionCount=a1
 ResolutionEngine.mapStats.USER=PHY
 ResolutionEngine.mapStats.OPP=ENV
 ResolutionEngine.classifyHostilePhysicalIntent=N
+ResolutionEngine.classifyPhysicalBoundaryPressure=N
 ResolutionEngine.genStats.Rank=none
 ResolutionEngine.genStats.MainStat=none
 ResolutionEngine.genStats.PHY=1
@@ -738,6 +742,7 @@ ResolutionEngine.genStats.CHA=1
 RelationshipEngine.count=1
 RelationshipEngine[0].NPC=NPC name or (none)
 RelationshipEngine[0].relevant=Y
+RelationshipEngine[0].initPreset.activeEnemy=N
 RelationshipEngine[0].initPreset.romanticOpen=N
 RelationshipEngine[0].initPreset.userBadRep=N
 RelationshipEngine[0].initPreset.userGoodRep=N
@@ -863,13 +868,13 @@ function buildSemanticContractText(userName, charName, type, trackerSnapshot) {
         'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into ResolutionEngine genStats and the matching RelationshipEngine genStats. ' +
         'Do not leave a named portrayed NPC as Rank none or 1/1/1 unless the card, scene, and tracker give no explicit portrayal at all. ' +
         'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
-        'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
+        'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, classifyPhysicalBoundaryPressure, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
         'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your ledger. ' +
         'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
         'Then fill CHAOS_INTERRUPT.sceneSummary, NameGenerationEngine lines, and NPCProactivityEngine.cap from their engine/contextual requirements. ' +
         'Tie rule override: exact roll ties are cinematic stalemates/struggles, not defender wins; include stakeChangeByOutcome.struggle accordingly. ' +
         'Do not use deterministic outcomes, dice, or guesses to change semantic stakes. ' +
-        'Important classification reminders: Asking/proposing/requesting explicit intimacy is IntimacyAdvanceVerbal. Physical contact is IntimacyAdvancePhysical only when the final goal is an explicit direct intimate advance toward a specific NPC; non-explicit physical contact does not count as an intimacy advance by itself. identifyChallenge is the explicit stakes-bearing action/challenge; ignore incidental gestures, setup, delivery method, movement, or flavor unless that act itself carries stakes. classifyHostilePhysicalIntent is true for explicit non-consensual physical force against a living entity, including attacks, shoves, grabs, pins, restraint, immobilization, forced movement, blocking escape, or preventing casting/action; it is false for helpful/consensual touch, purely social pressure, ENV force, or purely mental/supernatural effects. For intimacy advances toward a named NPC, put that NPC in ActionTargets; if they resist, contest, oppose, or consent-gate the advance, also put that same NPC in OppTargets.NPC. If IntimacyConsent=false/IntimacyGate=DENY, successful or landed intimacy outcomes for that target worsen boundary/autonomy/trust stakes; stakeChangeByOutcome for success/dominant_impact/solid_impact/light_impact must be harm, not none. ActionTargets and observers must be living entities only; non-living obstacles/objects/hazards/effects go only in OppTargets.ENV. OppTargets.NPC requires stakes-bearing living opposition; no-stakes social attention, casual banter, compliments, or flavor actions should keep the NPC as ActionTarget only. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. A protected/rescued NPC is a BenefitedObserver unless {{user}} directly acts on that NPC. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure of the final goal or explicit challenge materially affects safety, harm, danger, detection, material gain/loss, significant status/authority/trust, autonomy/physical freedom, hostile restraint/immobilization/confinement, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. For mapStats, map the stat from the final goal or explicit challenge that carries stakes, not incidental gestures, flavor, delivery method, or setup. Denied/opposed IntimacyAdvancePhysical is USER=PHY and OPP=PHY even when the approach includes romantic, seductive, verbal, or social framing. Positive social opposition such as persuasion, negotiation, diplomacy, bargaining, reassurance, reconciliation, or good-faith appeal against a living opposing target is USER=CHA and OPP=CHA; negative social opposition such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target is USER=CHA and OPP=MND. Body-affecting magic against a living target (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding) is USER=MND and OPP=PHY; non-living hazards/effects remain OppTargets.ENV and OPP=ENV unless a living target explicitly resists. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit only if that outcome significantly and concretely improves their stakes; harm if it materially worsens their stakes; otherwise none. Do not mark benefit for compliments, flirting, mood improvement, politeness, ordinary conversation, user self-advancement, successful negotiation for the user, choosing not to harm the NPC, failing to harm the NPC, de-escalation without a concrete NPC gain, or the NPC merely surviving/remaining safe.\n\n' +
+        'Important classification reminders: Asking/proposing/requesting/questioning explicit intimacy is IntimacyAdvanceVerbal. "Will you kiss me?", "Can I kiss you?", and asking an NPC to kiss/touch/hold {{user}} are verbal unless {{user}} also attempts physical contact in the same input. IntimacyAdvancePhysical requires attempted physical sexual/intimate contact initiated by {{user}} toward a specific NPC. A declaration of love, flirting, compliments, teasing, affectionate tone, or non-explicit romantic/social behavior is not an intimacy advance. identifyChallenge is the explicit stakes-bearing action/challenge; ignore incidental gestures, setup, delivery method, movement, or flavor unless that act itself carries stakes. classifyHostilePhysicalIntent is true only for direct bodily aggression/control against a living entity: attack, assault, strike, shove, tackle, choke, harmful grab, restraint, pin, immobilization, forced movement, blocking escape, or preventing casting/action with bodily force. It is false for taking/grabbing/pulling/snatching/opening/moving/contesting an object, possession, access point, path, or space unless {{user}} also attacks, harms, restrains, pins, shoves, drags, or controls the NPC body. classifyPhysicalBoundaryPressure is true for stakes-bearing forceful object/possession/space/access contests against a resisting NPC when classifyHostilePhysicalIntent is false; it is not combat and does not create H4 by itself. initPreset.activeEnemy is true only when the NPC is explicitly actively hostile to {{user}} now: attacking, ambushing, robbing, hunting, threatening, capturing, fighting, or intentionally obstructing with hostile intent. Archetype or label alone, such as bandit/criminal/enemy soldier/orc/monster, is not activeEnemy without explicit active hostile intent. For intimacy advances toward a named NPC, put that NPC in ActionTargets; if they resist, contest, oppose, or consent-gate the advance, also put that same NPC in OppTargets.NPC. If IntimacyConsent=false/IntimacyGate=DENY, successful or landed intimacy outcomes for that target worsen boundary/autonomy/trust stakes; stakeChangeByOutcome for success/dominant_impact/solid_impact/light_impact must be harm, not none. Denied verbal intimacy may increase Hostility but cannot create H4; H4 is reserved for activeEnemy or hostilePhysicalIntent. ActionTargets and observers must be living entities only; non-living obstacles/objects/hazards/effects go only in OppTargets.ENV. OppTargets.NPC requires stakes-bearing living opposition; no-stakes social attention, casual banter, compliments, or flavor actions should keep the NPC as ActionTarget only. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. A protected/rescued NPC is a BenefitedObserver unless {{user}} directly acts on that NPC. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure of the final goal or explicit challenge materially affects safety, harm, danger, detection, material gain/loss, significant status/authority/trust, autonomy/physical freedom, hostile restraint/immobilization/confinement, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. For mapStats, map the stat from the final goal or explicit challenge that carries stakes, not incidental gestures, flavor, delivery method, or setup. Denied/opposed IntimacyAdvancePhysical is USER=PHY and OPP=PHY even when the approach includes romantic, seductive, verbal, or social framing. Positive social opposition such as persuasion, negotiation, diplomacy, bargaining, reassurance, reconciliation, or good-faith appeal against a living opposing target is USER=CHA and OPP=CHA; negative social opposition such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target is USER=CHA and OPP=MND. Body-affecting magic against a living target (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding) is USER=MND and OPP=PHY; non-living hazards/effects remain OppTargets.ENV and OPP=ENV unless a living target explicitly resists. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit only if that outcome significantly and concretely improves their stakes; harm if it materially worsens their stakes; otherwise none. Do not mark benefit for compliments, flirting, mood improvement, politeness, ordinary conversation, user self-advancement, successful negotiation for the user, choosing not to harm the NPC, failing to harm the NPC, de-escalation without a concrete NPC gain, or the NPC merely surviving/remaining safe.\n\n' +
         COMPACT_LEDGER_CONTRACT;
 }
 
@@ -1102,6 +1107,7 @@ function validateRawLedgerContract(ledger, raw) {
     if (!ledger?.resolutionEngine?.mapStats?.USER) missing.push('resolutionEngine.mapStats.USER');
     if (!ledger?.resolutionEngine?.mapStats?.OPP) missing.push('resolutionEngine.mapStats.OPP');
     if (typeof ledger?.resolutionEngine?.classifyHostilePhysicalIntent !== 'boolean') missing.push('resolutionEngine.classifyHostilePhysicalIntent:boolean');
+    if (typeof ledger?.resolutionEngine?.classifyPhysicalBoundaryPressure !== 'boolean') missing.push('resolutionEngine.classifyPhysicalBoundaryPressure:boolean');
     if (Object.prototype.hasOwnProperty.call(ledger?.resolutionEngine || {}, 'hostilePhysicalIntent')) missing.push('forbidden extra field resolutionEngine.hostilePhysicalIntent');
     if (Object.prototype.hasOwnProperty.call(ledger?.resolutionEngine || {}, 'primaryOppTarget')) missing.push('forbidden extra field resolutionEngine.primaryOppTarget');
     if (Object.prototype.hasOwnProperty.call(ledger?.resolutionEngine || {}, 'primaryOpposition')) missing.push('forbidden extra field resolutionEngine.primaryOpposition');
@@ -1173,6 +1179,7 @@ function parseCompactLedger(text, trackerSnapshot) {
         'ResolutionEngine.mapStats.USER',
         'ResolutionEngine.mapStats.OPP',
         'ResolutionEngine.classifyHostilePhysicalIntent',
+        'ResolutionEngine.classifyPhysicalBoundaryPressure',
         'ResolutionEngine.genStats.Rank',
         'ResolutionEngine.genStats.MainStat',
         'ResolutionEngine.genStats.PHY',
@@ -1200,6 +1207,7 @@ function parseCompactLedger(text, trackerSnapshot) {
         const relRequired = [
             `${prefix}.NPC`,
             `${prefix}.relevant`,
+            `${prefix}.initPreset.activeEnemy`,
             `${prefix}.initPreset.romanticOpen`,
             `${prefix}.initPreset.userBadRep`,
             `${prefix}.initPreset.userGoodRep`,
@@ -1244,6 +1252,7 @@ function parseCompactLedger(text, trackerSnapshot) {
             relevant: readBoolean(fields, `${prefix}.relevant`, true),
             auditInteraction: readBoolean(fields, `${prefix}.auditInteraction`, false),
             initFlags: {
+                activeEnemy: readBoolean(fields, `${prefix}.initPreset.activeEnemy`, false),
                 romanticOpen: readBoolean(fields, `${prefix}.initPreset.romanticOpen`, false),
                 userBadRep: readBoolean(fields, `${prefix}.initPreset.userBadRep`, false),
                 userGoodRep: readBoolean(fields, `${prefix}.initPreset.userGoodRep`, false),
@@ -1285,6 +1294,7 @@ function parseCompactLedger(text, trackerSnapshot) {
             OPP: normalizeOppStat(fields.get('ResolutionEngine.mapStats.OPP')),
         },
         classifyHostilePhysicalIntent: readBoolean(fields, 'ResolutionEngine.classifyHostilePhysicalIntent', false),
+        classifyPhysicalBoundaryPressure: readBoolean(fields, 'ResolutionEngine.classifyPhysicalBoundaryPressure', false),
         genStats: readCoreGroup(fields, 'ResolutionEngine.genStats'),
     };
     validateRelationshipCoverage(resolutionEngine, relationshipEngine);
@@ -1460,6 +1470,7 @@ function normalizeLedger(ledger) {
     ledger.resolutionEngine.mapStats = ledger.resolutionEngine.mapStats || {};
     ledger.resolutionEngine.hasStakes = toBoolean(ledger.resolutionEngine.hasStakes, false);
     ledger.resolutionEngine.classifyHostilePhysicalIntent = toBoolean(ledger.resolutionEngine.classifyHostilePhysicalIntent, false);
+    ledger.resolutionEngine.classifyPhysicalBoundaryPressure = toBoolean(ledger.resolutionEngine.classifyPhysicalBoundaryPressure, false);
     delete ledger.resolutionEngine.hostilePhysicalIntent;
     delete ledger.resolutionEngine.primaryOppTarget;
     delete ledger.resolutionEngine.primaryOpposition;
@@ -1467,6 +1478,7 @@ function normalizeLedger(ledger) {
     ledger.relationshipEngine = Array.isArray(ledger.relationshipEngine) ? ledger.relationshipEngine : [];
     ledger.relationshipEngine.forEach(item => {
         item.initFlags = item.initFlags || {};
+        item.initFlags.activeEnemy = toBoolean(item.initFlags.activeEnemy, false);
         item.stakeChangeByOutcome = item.stakeChangeByOutcome || {};
         item.overrideFlags = item.overrideFlags || {};
         item.genStats = normalizeCore(item.genStats);
@@ -1530,6 +1542,7 @@ function validateNormalizedLedger(ledger, raw) {
     if (!ledger.resolutionEngine?.mapStats?.USER) missing.push('resolutionEngine.mapStats.USER');
     if (!ledger.resolutionEngine?.mapStats?.OPP) missing.push('resolutionEngine.mapStats.OPP');
     if (typeof ledger.resolutionEngine?.classifyHostilePhysicalIntent !== 'boolean') missing.push('resolutionEngine.classifyHostilePhysicalIntent:boolean');
+    if (typeof ledger.resolutionEngine?.classifyPhysicalBoundaryPressure !== 'boolean') missing.push('resolutionEngine.classifyPhysicalBoundaryPressure:boolean');
     if (Object.prototype.hasOwnProperty.call(ledger.resolutionEngine || {}, 'hostilePhysicalIntent')) missing.push('forbidden extra field resolutionEngine.hostilePhysicalIntent');
     if (Object.prototype.hasOwnProperty.call(ledger.resolutionEngine || {}, 'primaryOppTarget')) missing.push('forbidden extra field resolutionEngine.primaryOppTarget');
     if (Object.prototype.hasOwnProperty.call(ledger.resolutionEngine || {}, 'primaryOpposition')) missing.push('forbidden extra field resolutionEngine.primaryOpposition');

@@ -94,6 +94,7 @@ function buildReadableSemanticDebug(ledger) {
         'actionCount=' + list(resolution.actionCount),
         'mapStats=' + inline(resolution.mapStats ?? {}),
         'classifyHostilePhysicalIntent=' + String(Boolean(resolution.classifyHostilePhysicalIntent)),
+        'classifyPhysicalBoundaryPressure=' + String(Boolean(resolution.classifyPhysicalBoundaryPressure)),
         'genStats=' + coreLine(resolution.genStats),
         '',
         'RelationshipEngine:',
@@ -135,6 +136,7 @@ function buildReadableDeterministicDebug(handoff) {
         'resolutionPacket.LandedActions=' + valueOrNone(resolution.LandedActions),
         'resolutionPacket.CounterPotential=' + valueOrNone(resolution.CounterPotential),
         'resolutionPacket.classifyHostilePhysicalIntent=' + valueOrNone(resolution.classifyHostilePhysicalIntent),
+        'resolutionPacket.classifyPhysicalBoundaryPressure=' + valueOrNone(resolution.classifyPhysicalBoundaryPressure),
         'resolutionPacket.ActionTargets=' + list(resolution.ActionTargets),
         'resolutionPacket.OppTargets.NPC=' + list(resolution.OppTargets?.NPC),
         'resolutionPacket.OppTargets.ENV=' + list(resolution.OppTargets?.ENV),
@@ -153,6 +155,7 @@ function buildReadableDeterministicDebug(handoff) {
             `npcHandoffs[${index}].NPC_STAKES=${valueOrNone(npc.NPC_STAKES)}`,
             `npcHandoffs[${index}].IntimacyGate=${valueOrNone(npc.IntimacyGate)}`,
             `npcHandoffs[${index}].RelationToUserAction=${inline(npc.RelationToUserAction ?? {})}`,
+            `npcHandoffs[${index}].BoundaryPressure=${valueOrNone(npc.BoundaryPressure)}`,
             `npcHandoffs[${index}].PressureMode=${valueOrNone(npc.PressureMode)}`,
         ]),
         '',
@@ -214,6 +217,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         `gate:${h.IntimacyGate}`,
         `stakes:${h.NPC_STAKES}`,
         `landed:${h.Landed}`,
+        `boundary:${h.BoundaryPressure ?? 'N'}`,
         `pressure:${h.HostilePressure ?? 0}/${h.HostileLandedPressure ?? 0}/${h.DominantLock ?? 'None'}/${h.PressureMode ?? 'none'}`,
     ].join('/')).join(';') || 'none';
 
@@ -302,6 +306,9 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const proactiveNote = aggressionText === 'none' && proactiveText !== 'none'
         ? ' Then let the listed proactive NPC action happen only as denial, boundary, refusal, retreat, resistance, or escalation consistent with the gate.'
         : '';
+    const boundaryNote = resolution.classifyPhysicalBoundaryPressure === 'Y'
+        ? ' Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance without inventing a landed attack.'
+        : '';
 
     if (intimacyDenied) {
         if (goal === 'IntimacyAdvancePhysical') {
@@ -315,7 +322,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     if (proactiveText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}. Then let the listed proactive NPC action happen naturally without treating triggersAggressionRoll:N as "not directed at the user."`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote} Then let the listed proactive NPC action happen naturally without treating triggersAggressionRoll:N as "not directed at the user."`;
     }
 
     if (isIntimacyAdvance) {
@@ -330,11 +337,15 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
         return `The user action is ${userAction}; no roll is needed. Keep ${npcName}'s response consistent with ${state}, with no invented hostility or extra mechanics${chaosNote}.`;
     }
 
-    if (chaosText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}. Include the listed chaos beat while keeping NPC state anchored to ${state}.`;
+    if (resolution.classifyPhysicalBoundaryPressure === 'Y') {
+        return `The user action is ${userAction}; resolve it as ${outcome}. Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance according to ${state}, without inventing a landed attack.${chaosNote}`;
     }
 
-    return `The user action is ${userAction}; resolve it as ${outcome}. Narrate the NPC response according to ${state} and the listed targets.`;
+    if (chaosText !== 'none') {
+        return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote} Include the listed chaos beat while keeping NPC state anchored to ${state}.`;
+    }
+
+    return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote} Narrate the NPC response according to ${state} and the listed targets.`;
 }
 
 function strongestIntimacyGate(handoff, resolution) {
@@ -382,7 +393,9 @@ function buildAggressionGuide(aggressionResults) {
             ? 'retaliation after the user action'
             : value.AttackType === 'CounterAttack'
                 ? `counterattack exploiting the opening (${value.CounterPotential}+${value.CounterBonus})`
-                : 'immediate NPC attack';
+                : value.AttackType === 'ProactiveAttack'
+                    ? 'proactive attack from current hostile state'
+                    : 'immediate NPC attack';
         if (value.ReactionOutcome === 'npc_overpowers') {
             return `${name}: ${attackType} strongly succeeds/overpowers; narrate clear NPC advantage. Do not narrate any follow-up action or dialogue by {{user}}.`;
         }

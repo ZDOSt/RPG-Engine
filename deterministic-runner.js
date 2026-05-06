@@ -13,6 +13,7 @@ import {
     relationToUserAction,
     proactivityRefereeGuard,
     updateRapport,
+    applyPhysicalBoundaryPressure,
     applyHostilePhysicalPressure,
     deriveDirection,
     updateDisposition,
@@ -33,6 +34,7 @@ import {
     selectIntent,
     targetsUserFromIntent,
     isImmediateAttackIntent,
+    isImmediateAttackIntentForType,
     buildNarrationGuidance,
     buildPersistencePolicy,
     trackerSummary,
@@ -138,12 +140,16 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     const semantic = ledger.resolutionEngine || {};
     const targetClassifier = buildTargetClassifier(ledger, trackerSnapshot, context);
     const rawTargets = normalizeTargets(semantic.identifyTargets);
-    const intimacyAdvance = String(semantic.intimacyAdvance || 'none').toLowerCase();
-    const goal = intimacyAdvance === 'physical'
+    const intimacyReferee = applyIntimacyAdvanceHardRules(semantic, audit);
+    const intimacyAdvance = String(intimacyReferee.value || 'none').toLowerCase();
+    let goal = intimacyAdvance === 'physical'
         ? 'IntimacyAdvancePhysical'
         : intimacyAdvance === 'verbal'
             ? 'IntimacyAdvanceVerbal'
             : String(semantic.identifyGoal || 'Normal_Interaction');
+    if (goal === 'IntimacyAdvancePhysical' && intimacyReferee.value === 'verbal') {
+        goal = 'IntimacyAdvanceVerbal';
+    }
     const semanticHasStakes = bool(semantic.hasStakes) ? 'Y' : 'N';
     const preliminaryTargets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes: 'Y', goal, intimacyConsent: 'N' });
 
@@ -279,7 +285,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         const atkTot = atkDie + statValue(userCore, userStat);
         const defTot = oppStat === 'ENV' ? defDie : defDie + statValue(targetCore, oppStat);
         const margin = atkTot - defTot;
-        const hostilePhysicalIntent = bool(semantic.classifyHostilePhysicalIntent);
+        const hostileReferee = applyHostilePhysicalIntentHardRules(semantic, audit);
+        const hostilePhysicalIntent = hostileReferee.value;
         hostilePhysical = userStat === 'PHY' && hostilePhysicalIntent;
 
         if (hostilePhysical) {
@@ -292,6 +299,12 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         resultLine = `1d20(${atkDie}) + ${userStat}(${statValue(userCore, userStat)}) = ${atkTot} vs 1d20(${defDie})${oppStat === 'ENV' ? '' : ` + ${oppStat}(${statValue(targetCore, oppStat)})`} = ${defTot} -> ${outcome.OutcomeTier}`;
     }
 
+    const boundaryReferee = applyPhysicalBoundaryPressureHardRules(semantic, targets, {
+        hasStakes,
+        hostilePhysical,
+        goal,
+    }, audit);
+
     const packet = {
         GOAL: goal,
         actions,
@@ -302,6 +315,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         Outcome: outcome.Outcome,
         CounterPotential: outcome.CounterPotential,
         classifyHostilePhysicalIntent: hostilePhysical ? 'Y' : 'N',
+        classifyPhysicalBoundaryPressure: boundaryReferee.value ? 'Y' : 'N',
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
         BenefitedObservers: showNone(targets.BenefitedObservers),
@@ -367,6 +381,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             const effectiveInitFlags = applyInitFlagReferee(sem.initFlags || {}, refereeContext, audit, `3.3 ${npc}.initPreset`);
             const init = initPreset(effectiveInitFlags);
             currentDisposition = init.disposition;
+            audit.push(`3.3d initPreset.activeEnemy=${yn(effectiveInitFlags.activeEnemy)}`);
             audit.push(`3.3e initPreset.romanticOpen=${yn(effectiveInitFlags.romanticOpen)}`);
             audit.push(`3.3f initPreset.userBadRep=${yn(effectiveInitFlags.userBadRep)}`);
             audit.push(`3.3g initPreset.userGoodRep=${yn(effectiveInitFlags.userGoodRep)}`);
@@ -392,6 +407,9 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         const npcStakes = resolutionPacket.STAKES === 'Y' && ['benefit', 'harm'].includes(stakeChange) ? 'Y' : 'N';
         const auditInteraction = npcStakes === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
         const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem);
+        const boundaryPressureResult = applyPhysicalBoundaryPressure(npc, resolutionPacket, {
+            currentDisposition,
+        });
         const hostilePressureResult = applyHostilePhysicalPressure(npc, resolutionPacket, {
             currentDisposition,
             hostilePressure,
@@ -399,7 +417,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             dominantLock,
             pressureMode,
         });
-        const target = hostilePressureResult?.target || routedTarget;
+        const target = hostilePressureResult?.target || boundaryPressureResult?.target || routedTarget;
         const rapport = updateRapport(currentRapport, target, rapportEncounterLock, hostilePressureResult ? 'hostilePressure' : 'normal');
         currentRapport = rapport.currentRapport;
         rapportEncounterLock = rapport.rapportEncounterLock;
@@ -418,6 +436,12 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         }
         audit.push(`3.4b NPC_STAKES=${npcStakes}`);
         audit.push(`3.4c routeDispositionTarget=${routedTarget}`);
+        if (boundaryPressureResult) {
+            audit.push(`3.4c.0 physicalBoundaryPressure=${compact({
+                target,
+                deltas: boundaryPressureResult.deltas,
+            })}`);
+        }
         if (hostilePressureResult) {
             audit.push(`3.4c.1 hostilePhysicalPressure=${compact({
                 target,
@@ -430,7 +454,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         }
         audit.push(`3.4d updateRapport=${compact(rapport)}`);
 
-        const deltas = hostilePressureResult?.deltas || deriveDirection(target, currentDisposition, currentRapport, auditInteraction, resolutionPacket);
+        const deltas = hostilePressureResult?.deltas || boundaryPressureResult?.deltas || deriveDirection(target, currentDisposition, currentRapport, auditInteraction, resolutionPacket);
         const updatedDisposition = updateDisposition(currentDisposition, deltas);
         currentDisposition = updatedDisposition;
         if (hostilePressureResult?.dominatedFearBreak && currentDisposition.F >= 4 && currentDisposition.H >= 3) {
@@ -476,6 +500,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             IntimacyGateSource: intimacyGateSource,
             HostilePressure: hostilePressure,
             HostileLandedPressure: hostileLandedPressure,
+            BoundaryPressure: boundaryPressureResult ? 'Y' : 'N',
             DominantLock: dominantLock,
             PressureMode: pressureMode,
             RelationToUserAction: relationToUserAction(npc, resolutionPacket),
@@ -663,13 +688,25 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     const counterBonus = counterBonusFromPotential(counterPotential);
     const criticalSuccess = resolutionPacket?.OutcomeTier === 'Critical_Success';
     const retaliationAllowed = resolutionPacket?.classifyHostilePhysicalIntent === 'Y';
-    const attackType = criticalSuccess ? 'None' : counterAllowed ? 'CounterAttack' : retaliationAllowed ? 'Retaliation' : 'None';
+    const proactiveAttackAllowed = Object.values(proactivityResults || {}).some(result =>
+        result?.Proactive === 'Y'
+        && result?.TargetsUser === 'Y'
+        && result?.Intent === 'ESCALATE_VIOLENCE');
+    const attackType = criticalSuccess
+        ? 'None'
+        : counterAllowed
+            ? 'CounterAttack'
+            : retaliationAllowed
+                ? 'Retaliation'
+                : proactiveAttackAllowed
+                    ? 'ProactiveAttack'
+                    : 'None';
     const proactiveAggressive = Object.entries(proactivityResults).filter(([, result]) =>
         attackType !== 'None'
         &&
         result.Proactive === 'Y'
         && result.TargetsUser === 'Y'
-        && isImmediateAttackIntent(result.Intent));
+        && isImmediateAttackIntentForType(result.Intent, attackType));
     const counterTarget = counterAllowed ? firstReal(resolutionPacket?.OppTargets?.NPC) || firstReal(resolutionPacket?.ActionTargets) : null;
     const aggressive = counterAllowed && !criticalSuccess && counterTarget
         ? [proactiveAggressive.find(([npc]) => sameName(npc, counterTarget)) || [counterTarget, {
@@ -691,11 +728,12 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     audit.push(`7.1c counterTarget=${counterTarget || NONE}`);
     audit.push(`7.2 AggressionPresent=${aggressive.length ? 'Y' : 'N'}`);
 
-    if (!aggressive.length) {
-        if (criticalSuccess) audit.push('7.2a Critical_Success -> no immediate NPC attack roll');
-        else if (counterAllowed) audit.push('7.2a no qualifying proactive counterattack');
-        else if (retaliationAllowed) audit.push('7.2a no qualifying proactive retaliation');
-        else audit.push('7.2a no immediate counterattack/retaliation trigger');
+        if (!aggressive.length) {
+            if (criticalSuccess) audit.push('7.2a Critical_Success -> no immediate NPC attack roll');
+            else if (counterAllowed) audit.push('7.2a no qualifying proactive counterattack');
+            else if (retaliationAllowed) audit.push('7.2a no qualifying proactive retaliation');
+            else if (proactiveAttackAllowed) audit.push('7.2a no qualifying proactive attack');
+            else audit.push('7.2a no immediate counterattack/retaliation trigger');
         audit.push('7.2a AGGRESSION_RESULTS={}');
         audit.push('---');
         return { results };
@@ -765,6 +803,9 @@ function getCardFields(context) {
 function applyInitFlagReferee(flags, refereeContext, audit, label) {
     const effective = { ...flags };
     const classification = refereeContext?.userNonHuman;
+    if (bool(effective.activeEnemy)) {
+        audit.push(`${label}.activeEnemy=Y`);
+    }
     if (!classification || classification.value == null) return effective;
 
     const current = bool(effective.userNonHuman);
@@ -779,6 +820,105 @@ function applyInitFlagReferee(flags, refereeContext, audit, label) {
         evidence: classification.evidence,
     })}`);
     return effective;
+}
+
+function applyIntimacyAdvanceHardRules(semantic, audit) {
+    let value = ['physical', 'verbal', 'none'].includes(String(semantic.intimacyAdvance || '').toLowerCase())
+        ? String(semantic.intimacyAdvance || '').toLowerCase()
+        : 'none';
+    const source = semanticSourceText(semantic);
+    if (value === 'none' && semantic?.identifyGoal === 'IntimacyAdvancePhysical') value = 'physical';
+    if (value === 'none' && semantic?.identifyGoal === 'IntimacyAdvanceVerbal') value = 'verbal';
+
+    if (value === 'physical' && isVerbalIntimacyRequest(source) && !hasUserInitiatedIntimateContact(source)) {
+        audit.push(`2.1b deterministicIntimacyAdvanceReferee=${compact({
+            hardRule: 'ResolutionEngine.identifyGoal: asking/requesting/proposing intimacy is verbal unless the user attempts physical contact',
+            from: 'physical',
+            to: 'verbal',
+            evidence: source.slice(0, 220),
+        })}`);
+        value = 'verbal';
+    }
+
+    return { value };
+}
+
+function applyHostilePhysicalIntentHardRules(semantic, audit) {
+    const semanticValue = bool(semantic.classifyHostilePhysicalIntent);
+    const source = semanticSourceText(semantic);
+
+    if (semanticValue && isObjectBoundaryContest(source) && !hasDirectBodilyAggression(source)) {
+        audit.push(`2.7o.1 deterministicHostilePhysicalIntentReferee=${compact({
+            hardRule: 'ResolutionEngine.classifyHostilePhysicalIntent: forceful object/possession/space contest is not hostile physical intent unless the NPC body is attacked/restrained/controlled',
+            from: 'Y',
+            to: 'N',
+            evidence: source.slice(0, 220),
+        })}`);
+        return { value: false };
+    }
+
+    return { value: semanticValue };
+}
+
+function applyPhysicalBoundaryPressureHardRules(semantic, targets, options, audit) {
+    const source = semanticSourceText(semantic);
+    const hasLivingOpposition = firstReal(targets.OppTargets?.NPC);
+    let value = bool(semantic.classifyPhysicalBoundaryPressure);
+    const hardBoundary = options.hasStakes === 'Y'
+        && !options.hostilePhysical
+        && hasLivingOpposition
+        && isObjectBoundaryContest(source)
+        && !hasDirectBodilyAggression(source);
+
+    if (value && (options.hasStakes !== 'Y' || options.hostilePhysical || !hasLivingOpposition)) {
+        audit.push(`2.7p deterministicPhysicalBoundaryPressureReferee=${compact({
+            hardRule: 'ResolutionEngine.classifyPhysicalBoundaryPressure requires stakes-bearing living opposition and no hostilePhysicalIntent',
+            from: 'Y',
+            to: 'N',
+            hasStakes: options.hasStakes,
+            hostilePhysical: options.hostilePhysical ? 'Y' : 'N',
+            hasLivingOpposition: hasLivingOpposition ? 'Y' : 'N',
+        })}`);
+        value = false;
+    } else if (!value && hardBoundary) {
+        audit.push(`2.7p deterministicPhysicalBoundaryPressureReferee=${compact({
+            hardRule: 'ResolutionEngine.classifyPhysicalBoundaryPressure: forceful object/possession/space contest against resisting NPC applies boundary pressure',
+            from: 'N',
+            to: 'Y',
+            evidence: source.slice(0, 220),
+        })}`);
+        value = true;
+    }
+
+    return { value };
+}
+
+function semanticSourceText(semantic) {
+    return [
+        semantic?.identifyGoal,
+        semantic?.identifyChallenge,
+        semantic?.explicitMeans,
+    ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function isVerbalIntimacyRequest(source) {
+    return /\b(will you|would you|could you|can you|may i|can i|could i|let me|please|ask(?:s|ed|ing)?|request(?:s|ed|ing)?|invite(?:s|d)?|propos(?:e|es|ed|ing)|want you to)\b.{0,80}\b(kiss|touch|hold|embrace|sleep with|sex|intimacy|intimate|bed|caress)\b/.test(source)
+        || /\b(kiss|touch|hold|embrace|sleep with|sex|intimacy|intimate|bed|caress)\b.{0,80}\b(me|you|permission|allow|let)\b/.test(source);
+}
+
+function hasUserInitiatedIntimateContact(source) {
+    return /\b(i|user|{{user}})\s+(?:try|tries|tried|attempt|attempts|attempted|lean|leans|leaned|move|moves|moved|reach|reaches|reached|press|presses|pressed|pull|pulls|pulled|grab|grabs|grabbed|touch|touches|touched|kiss|kisses|kissed|cup|cups|cupped|caress|caresses|caressed|grope|gropes|groped)\b/.test(source)
+        && /\b(kiss|lips|mouth|touch|hold|embrace|body|waist|chin|face|cheek|neck|hair|hand|caress|grope|undress|clothes|shirt|dress|skirt|underwear)\b/.test(source);
+}
+
+function isObjectBoundaryContest(source) {
+    const forcefulObject = /\b(snatch(?:es|ed|ing)?|grab(?:s|bed|bing)?|take(?:s|n)?|took|pull(?:s|ed|ing)?|yank(?:s|ed|ing)?|wrench(?:es|ed|ing)?|rip(?:s|ped|ping)?|steal(?:s|ing|stole|stolen)?|seize(?:s|d|ing)?|force(?:s|d|ing)? past|push(?:es|ed|ing)? past|shove(?:s|d)? past|barge(?:s|d|ing)?|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?)\b/.test(source);
+    const objectOrBoundary = /\b(scroll|book|letter|coin|purse|bag|weapon|sword|dagger|key|door|gate|chest|box|object|item|possession|path|passage|doorway|threshold|room|space|hand|table|desk|belt|pouch)\b/.test(source);
+    return forcefulObject && objectOrBoundary;
+}
+
+function hasDirectBodilyAggression(source) {
+    return /\b(punch(?:es|ed|ing)?|kick(?:s|ed|ing)?|strike(?:s|struck|striking)?|hit(?:s|ting)?|slash(?:es|ed|ing)?|stab(?:s|bed|bing)?|cut(?:s|ting)?|choke(?:s|d|ing)?|tackle(?:s|d|ing)?|slam(?:s|med|ming)?|shove(?:s|d|ing)?\s+(?:him|her|them|npc|guard|bandit|woman|man)|grab(?:s|bed|bing)?\s+(?:him|her|them|npc|guard|bandit|woman|man|wrist|arm|hand|throat|neck|shoulder|body|waist|hair|face|leg|ankle)\b|restrain(?:s|ed|ing)?|pin(?:s|ned|ning)?|immobiliz(?:e|es|ed|ing)|drag(?:s|ged|ging)?\s+(?:him|her|them|npc|guard|bandit|woman|man)|force(?:s|d|ing)?\s+(?:him|her|them|npc|guard|bandit|woman|man)\b|block(?:s|ed|ing)?\s+(?:his|her|their)?\s*(?:escape|movement))\b/.test(source);
 }
 
 
@@ -856,16 +996,6 @@ function addLivingName(set, name) {
     const normalized = normalizeNameKey(name);
     if (normalized) set.add(normalized);
 }
-
-
-
-
-
-
-
-
-
-
 
 
 
