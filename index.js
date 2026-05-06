@@ -526,8 +526,12 @@ function buildDisplayTrackerSnapshot({ messageKey, pendingRun, report }) {
         ...(pendingRun?.trackerAfter || {}),
     });
     const rawPresentNpcNames = toRealNameArray(pendingRun?.presentNpcNames || resolutionPacket.NPCInScene);
-    const presentNpcNames = applyDisplayPresenceCorrections(rawPresentNpcNames, Object.keys(trackerAfter), pendingRun?.latestUserText);
-    const displayNpcs = applyTrackerPresenceMetadata(trackerAfter, presentNpcNames, {
+    const promotionResult = applyExplicitNamePromotions(trackerAfter, rawPresentNpcNames, {
+        messageKey,
+        latestUserText: pendingRun?.latestUserText,
+    });
+    const presentNpcNames = applyDisplayPresenceCorrections(promotionResult.presentNames, Object.keys(promotionResult.npcs), pendingRun?.latestUserText);
+    const displayNpcs = applyTrackerPresenceMetadata(promotionResult.npcs, presentNpcNames, {
         messageKey,
         latestUserText: pendingRun?.latestUserText,
     });
@@ -568,6 +572,80 @@ function applyTrackerPresenceMetadata(npcs, presentNames, { messageKey, latestUs
     }
 
     return stamped;
+}
+
+function applyExplicitNamePromotions(npcs, presentNames, { messageKey, latestUserText } = {}) {
+    const normalized = normalizeDisplayTrackerNpcs(npcs);
+    let updatedPresentNames = toRealNameArray(presentNames);
+    const promotions = getExplicitNamePromotions(latestUserText, Object.keys(normalized));
+
+    for (const { oldName, newName } of promotions) {
+        const oldEntry = normalized[oldName];
+        const newEntry = normalized[newName];
+        if (!oldEntry) continue;
+
+        normalized[newName] = normalizeTrackerEntry({
+            ...oldEntry,
+            ...(newEntry || {}),
+            persistenceTier: 'Recurring',
+            presence: 'Present',
+            lifecycle: 'Active',
+            lastSeenMessageKey: messageKey || newEntry?.lastSeenMessageKey || oldEntry.lastSeenMessageKey || '',
+            absentSinceMessageKey: '',
+            retiredSinceMessageKey: '',
+        });
+        normalized[oldName] = normalizeTrackerEntry({
+            ...oldEntry,
+            presence: 'Absent',
+            lifecycle: 'Retired',
+            absentSinceMessageKey: oldEntry.absentSinceMessageKey || messageKey || '',
+            retiredSinceMessageKey: messageKey || oldEntry.retiredSinceMessageKey || '',
+        });
+        updatedPresentNames = updatedPresentNames
+            .filter(name => normalizeSearchText(name) !== normalizeSearchText(oldName))
+            .concat(newName);
+    }
+
+    return {
+        npcs: normalized,
+        presentNames: [...new Set(updatedPresentNames)],
+    };
+}
+
+function getExplicitNamePromotions(text, trackedNames) {
+    const source = normalizeSearchText(text);
+    const promotions = [];
+    if (!source || !Array.isArray(trackedNames)) return promotions;
+
+    for (const oldName of trackedNames) {
+        if (inferPersistenceTier(oldName) !== 'Temporary') continue;
+        const normalizedOldName = normalizeSearchText(oldName);
+        if (!normalizedOldName || !source.includes(normalizedOldName)) continue;
+        const escapedOldName = escapeRegExp(normalizedOldName);
+        const patterns = [
+            new RegExp(`\\b(?:same|that|the)\\s+${escapedOldName}\\b.{0,80}\\b(?:name is|named|called)\\s+([a-z][a-z'-]{1,30})\\b`, 'i'),
+            new RegExp(`\\b${escapedOldName}\\b.{0,80}\\b(?:name is|named|called)\\s+([a-z][a-z'-]{1,30})\\b`, 'i'),
+        ];
+        for (const pattern of patterns) {
+            const match = pattern.exec(source);
+            if (!match?.[1]) continue;
+            const newName = titleCaseName(match[1]);
+            if (!newName || normalizeSearchText(newName) === normalizedOldName) continue;
+            promotions.push({ oldName, newName });
+            break;
+        }
+    }
+
+    return promotions;
+}
+
+function titleCaseName(value) {
+    return String(value ?? '')
+        .trim()
+        .split(/[\s-]+/)
+        .filter(Boolean)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+        .join(' ');
 }
 
 function buildTrackerUpdateForPersistence(displaySnapshot) {
@@ -616,11 +694,49 @@ function hasExplicitAbsenceForName(text, name) {
     if (index < 0) return false;
 
     const window = text.slice(Math.max(0, index - 180), Math.min(text.length, index + name.length + 240));
-    if (/\b(?:no longer|not|not anymore)\s+(?:in\s+)?sight\b/.test(window)) return true;
-    if (/\bout of sight\b/.test(window)) return true;
-    if (/\bno longer visible\b/.test(window)) return true;
-    if (/\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b.{0,160}\b(?:behind|away)\b/.test(window)) return true;
-    return /\b(?:behind|away)\b.{0,160}\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b/.test(window);
+    const departureIndex = getExplicitDepartureIndex(window);
+    if (departureIndex < 0) return false;
+    const presenceIndex = getExplicitPresenceIndex(window, name);
+    return presenceIndex < 0 || presenceIndex < departureIndex;
+}
+
+function hasExplicitPresenceForName(window, name) {
+    return getExplicitPresenceIndex(window, name) >= 0;
+}
+
+function getExplicitPresenceIndex(window, name) {
+    const escapedName = escapeRegExp(name);
+    const patterns = [
+        new RegExp(`\\b${escapedName}\\b.{0,80}\\b(?:remain|remains|stays|stay|stayed|standing|stands|waits|beside|with me|near me|still here|still present)\\b`),
+        new RegExp(`\\b(?:remain|remains|stays|stay|stayed|standing|stands|waits|beside|with me|near me|still here|still present)\\b.{0,80}\\b${escapedName}\\b`),
+    ];
+    return firstPatternIndex(window, patterns);
+}
+
+function getExplicitDepartureIndex(window) {
+    return firstPatternIndex(window, [
+        /\b(?:no longer|not|not anymore)\s+(?:in\s+)?sight\b/,
+        /\bout of sight\b/,
+        /\bno longer visible\b/,
+        /\b(?:leave|leaves|left|leaving|depart|departs|departed|departing|exit|exits|exited|exiting)\b.{0,120}\b(?:room|office|hall|alley|street|scene|area|place|building|shop|tavern|camp|hideout|chamber|archive|gate|courtyard|square|market|road|clearing|woods|forest|cave|tunnel|vault)\b/,
+        /\b(?:leave|leaves|left|leaving|depart|departs|departed|departing|exit|exits|exited|exiting)\b.{0,160}\b(?:i|we|me)\s+(?:am|are|remain|remains|remained|stay|stays|stayed)\s+alone\b/,
+        /\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b.{0,160}\b(?:behind|away)\b/,
+        /\b(?:behind|away)\b.{0,160}\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b/,
+    ]);
+}
+
+function firstPatternIndex(text, patterns) {
+    let first = -1;
+    for (const pattern of patterns) {
+        const match = pattern.exec(text);
+        if (!match) continue;
+        if (first < 0 || match.index < first) first = match.index;
+    }
+    return first;
+}
+
+function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function normalizeSearchText(value) {
