@@ -5,32 +5,35 @@ function ResolutionEngine(input) {
     UNIVERSAL:
 'EXPLICIT-ONLY. MUST be stated in Character Card / Lore / Scene text / tracker. NO invention. Uncertain = N or default. FIRST-YES-WINS = first matching explicit rule becomes final. No reconsideration. NEVER invent stats, targets, actions, obstacles, or outcomes. MAX 3 ACTIONS. TIE = STALEMATE / STRUGGLE. ROLLS = 1d20 + relevant stat vs opposing 1d20 + relevant stat, or vs plain Environment 1d20.',
     STATS:
-'PHY = challenges that require physical effort, strength, agility, speed, coordination, endurance, stealth movement, combat skill, or bodily execution under risk. MND = challenges that require thought, memory, perception, focus, reasoning, knowledge, awareness, will, or deliberate mental/supernatural exertion. CHA = social challenges that require persuasion, deception, intimidation, negotiation, emotional influence, personal presence, or interpersonal skill. Map the stat from the final goal or explicit challenge that carries stakes, not from incidental gestures, flavor, delivery method, or setup. Core stat scale is 1 to 10.',
+'PHY = challenges that require physical effort, strength, agility, speed, coordination, endurance, stealth movement, combat skill, or bodily execution under risk. MND = challenges that require thought, memory, perception, focus, reasoning, knowledge, awareness, will, or deliberate mental/supernatural exertion. CHA = social challenges that require persuasion, deception, intimidation, negotiation, emotional influence, personal presence, or interpersonal skill. Map the stat from finalGoal or explicit challenge that carries stakes, not from incidental gestures, flavor, delivery method, or setup. Core stat scale is 1 to 10.',
     STAKES:
-'Stakes are meaningful possible consequences tied to success or failure. Stakes include physical risk, harm, danger, detection, material gain or loss, significant social status/authority/trust shift, loss of autonomy or physical freedom, hostile restraint/immobilization/confinement, meaningful obstacle resolution or failure, or explicit goal advancement or failure for {{user}} or a specific living entity. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. If success or failure would not materially change the outcome, no roll is needed.'
+'Stakes are meaningful possible consequences tied to success or failure. Stakes include physical risk, harm, danger, detection, material gain or loss, significant social status/authority/trust shift, loss of autonomy or physical freedom, hostile restraint/immobilization/confinement, meaningful obstacle resolution or failure, or explicit finalGoal advancement or failure for {{user}} or a specific living entity. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. If success or failure would not materially change the outcome, no roll is needed.'
   });
 
   identifyGoal(input):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
-    rule: return a short, plain description of the final goal/intent of {{user}}'s actions in the last input
+    finalGoal: return a short, plain description of {{user}}'s finalGoal/intent in the last input
     rule: ignore setup, movement, intermediary steps, and post-action flavor unless they are themselves separate consequential actions
-    rule: if the final goal/intent is an explicit direct physical sexual or intimate advance toward a specific NPC, including kissing or other physical sexual/intimate contact, return IntimacyAdvancePhysical
-    rule: if the final goal/intent is an explicit direct verbal sexual or intimate proposition toward a specific NPC, return IntimacyAdvanceVerbal
-    rule: flirting, compliments, teasing, affectionate tone, or non-explicit romantic/social behavior do NOT count as intimacy advances
+    rule: if finalGoal is an explicit direct physical sexual or physical intimate advance toward a specific NPC, including attempted kissing or other attempted physical sexual/intimate contact, return IntimacyAdvancePhysical
+    rule: IntimacyAdvancePhysical REQUIRES attempted physical contact by {{user}}. A request for intimacy, question about intimacy, declaration of love, flirtation, compliment, or romantic statement is NOT physical.
+    rule: if finalGoal is an explicit direct verbal sexual or verbal intimate proposition/request toward a specific NPC, return IntimacyAdvanceVerbal
+    rule: IntimacyAdvanceVerbal REQUIRES an explicit request, invitation, proposition, or demand for sexual/intimate activity. A declaration of love, flirting, compliments, teasing, affectionate tone, or non-explicit romantic/social behavior is NOT IntimacyAdvanceVerbal.
+    rule: otherwise return finalGoal
 
-  identifyChallenge(input, goal, context):
+  identifyChallenge(input, finalGoal, context):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
-    rule: return the explicit action within {{user}}'s input that carries risk, uncertainty, resistance, or stakes for {{user}}'s final goal
+    rule: return the decisive action, challenge, or explicit attack sequence within {{user}}'s input that carries risk, uncertainty, resistance, or stakes for {{user}}'s finalGoal
+    rule: this is the decisive action, challenge, or explicit attack sequence that determines whether {{user}}'s finalGoal succeeds or fails
     rule: copy the concrete action or challenge from {{user}}'s input when possible
     rule: ignore incidental gestures, flavor, delivery method, setup, movement, or positioning unless that act itself carries stakes or resistance
-    rule: if no distinct stakes-bearing challenge exists, return goal
+    rule: if no distinct stakes-bearing challenge exists, return finalGoal
 
-  classifyHostilePhysicalIntent(input, goal, targets):
+  classifyHostilePhysicalIntent(input, finalGoal, targets):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
     rule: return true only if {{user}} explicitly uses physical force against a living entity as attack, assault, shove, grab, restraint, pin, immobilization, forced movement, physical domination, blocking escape, preventing casting/action, or other non-consensual bodily control
     rule: return false for consensual/helpful touch, healing, examination, rescue, ordinary movement, environmental force, social pressure, or purely mental/social/magical actions with no explicit physical force by {{user}}'s body
 
-  identifyTargets(input, challenge, goal, context):
+  identifyTargets(input, challenge, finalGoal, context):
     policy: LOCKED, EXPLICIT-ONLY
     ActionTargets = LIVING entities {{user}} directly tries to affect as the main resolution target
     OppTargets.NPC = LIVING entities whose stakes are at risk and who actively or passively oppose, contest, or resist {{user}}'s actions
@@ -44,18 +47,18 @@ function ResolutionEngine(input) {
     rule: if any target list is not present, return [(none)]
     return {ActionTargets, OppTargets, BenefitedObservers, HarmedObservers}
 
-  checkIntimacyGate(goal, targets, context):
+  checkIntimacyGate(finalGoal, targets, context):
     policy: LOCKED, EXPLICIT-ONLY
-    rule: if goal=IntimacyAdvancePhysical or goal=IntimacyAdvanceVerbal, read exact target NPC entry in latest sceneTracker
+    rule: if finalGoal=IntimacyAdvancePhysical or finalGoal=IntimacyAdvanceVerbal, read exact target NPC entry in latest sceneTracker
     rule: return Y if B>=4 under currentDisposition OR IntimacyGate=ALLOW
     rule: return Y if current explicit RelationshipEngine checkThreshold would produce OverrideActive=Y and no F/H lock blocks it
     else -> N
 
-  hasStakes(input, goal, challenge, targets, IntimacyConsent, context):
+  hasStakes(input, finalGoal, challenge, targets, IntimacyConsent, context):
     policy: LOCKED, EXPLICIT-ONLY
-    rule: if goal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal] and IntimacyConsent=N, return Y
-    rule: if goal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal], return N
-    rule: return Y if success or failure of the final goal or explicit challenge could affect {{user}} or NPC's stakes, as per DEF.STAKES
+    rule: if finalGoal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal] and IntimacyConsent=N, return Y
+    rule: if finalGoal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal], return N
+    rule: return Y if success or failure of finalGoal or explicit challenge could affect {{user}} or NPC's stakes, as per DEF.STAKES
     else -> N
 
   actionCount(input, challenge):
@@ -65,17 +68,17 @@ function ResolutionEngine(input) {
     rule: each individual attack within a sequence counts as one action
     rule: return one action marker per attack: [a1], [a1,a2], or [a1,a2,a3]
 
-  mapStats(input, goal, challenge, targets, context):
+  mapStats(input, finalGoal, challenge, targets, context):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
-    rule: determine USER stat by applying DEF.STATS to identifyChallenge when identifyChallenge is distinct from goal
-    rule: use final goal only if no distinct stakes-bearing challenge exists
-    rule: if the final goal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling challenge
+    rule: determine USER stat by applying DEF.STATS to identifyChallenge when identifyChallenge is distinct from finalGoal
+    rule: use finalGoal only if no distinct stakes-bearing challenge exists
+    rule: if finalGoal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling challenge
     rule: if {{user}} uses deliberate mental/supernatural exertion to affect a living target's bodily functions or physical state (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding), USER=MND and OPP=PHY
     rule: if magic or a substance creates a non-living environmental hazard/obstacle instead of directly contesting a living target, put the hazard/obstacle in OppTargets.ENV and use OPP=ENV unless a living target explicitly resists the effect
-    rule: if goal=IntimacyAdvancePhysical and IntimacyConsent=N, USER=PHY and OPP=PHY. This rule is absolute for denied/opposed physical intimacy, including kissing or attempted intimate contact, even if the approach includes romantic, seductive, verbal, or social framing
+    rule: if finalGoal=IntimacyAdvancePhysical and IntimacyConsent=N, USER=PHY and OPP=PHY. This rule is absolute for denied/opposed physical intimacy, including kissing or attempted intimate contact, even if the approach includes romantic, seductive, verbal, or social framing
     rule: if explicit means is positive social interaction such as persuasion, negotiation, diplomacy, bargaining, reconciliation, reassurance, or good-faith appeal against a living opposing target, USER=CHA and OPP=CHA
     rule: if explicit means is negative social interaction such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target, USER=CHA and OPP=MND
-    rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that first OppTargets.NPC entity's resistance to {{user}}'s explicit means or goal
+    rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that first OppTargets.NPC entity's resistance to {{user}}'s explicit means or finalGoal
     rule: if OppTargets.NPC=[(none)] and OppTargets.ENV contains an obstacle, OPP=ENV
     return {USER, OPP}
 
@@ -118,7 +121,7 @@ function ResolutionEngine(input) {
     rule: save currentCoreStats to sceneTracker and never change unless explicitly altered
     return {Rank, MainStat, PHY, MND, CHA}
 
-  resolveOutcome(input, goal, actions, stats, userCore, targetCore):
+  resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore):
     policy: LOCKED
     comment: LandedActions and CounterPotential only apply to explicit hostile PHY actions with classifyHostilePhysicalIntent=true.
     comment: For all other actions, resolution is Success, Stalemate/struggle, or Failure.
@@ -150,23 +153,23 @@ function ResolutionEngine(input) {
       return {OutcomeTier, LandedActions, Outcome, CounterPotential}
 
   execution:
-    goal = identifyGoal(input)
-    challenge = identifyChallenge(input, goal, context)
-    targets = identifyTargets(input, challenge, goal, context)
-    IntimacyConsent = checkIntimacyGate(goal, targets, context)
-    STAKES = hasStakes(input, goal, challenge, targets, IntimacyConsent, context)
+    finalGoal = identifyGoal(input)
+    challenge = identifyChallenge(input, finalGoal, context)
+    targets = identifyTargets(input, challenge, finalGoal, context)
+    IntimacyConsent = checkIntimacyGate(finalGoal, targets, context)
+    STAKES = hasStakes(input, finalGoal, challenge, targets, IntimacyConsent, context)
     actions = actionCount(input, challenge)
     if STAKES=N:
       outcome = {OutcomeTier:NONE, LandedActions:(none), Outcome:no_roll, CounterPotential:none}
     else:
-      stats = mapStats(input, goal, challenge, targets, context)
+      stats = mapStats(input, finalGoal, challenge, targets, context)
       userCore = getUserCoreStats()
       if stats.OPP!=ENV:
         targetCore = getCurrentCoreStats(first OppTargets.NPC)
         if missing -> targetCore = genStats(first OppTargets.NPC, context)
-      outcome = resolveOutcome(input, goal, actions, stats, userCore, targetCore)
+      outcome = resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore)
     NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, and relationshipEngine entries
-    return {GOAL:goal, actions:actions, IntimacyConsent:IntimacyConsent, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
+    return {GOAL:finalGoal, actions:actions, IntimacyConsent:IntimacyConsent, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
 }
 ---------------------------
 function RelationshipEngine(npc, resolutionPacket) {
