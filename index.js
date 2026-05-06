@@ -1,4 +1,4 @@
-import { ENGINE_PROMPT_TEXT } from './engines.js';
+import { ENGINE_PROMPT_TEXT, classifyDisposition, normalizeTrackerEntry } from './engines.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings } from '../../../../scripts/extensions.js';
 import { addEphemeralStoppingString, flushEphemeralStoppingStrings } from '../../../../scripts/power-user.js';
@@ -19,6 +19,9 @@ const SETTINGS_CONTAINER_ID = 'structured_preflight_settings_container';
 const ENGINE_PROMPT_KEY = 'structured_preflight_engines';
 const NARRATOR_PROMPT_KEY = 'structured_preflight_narrator_context';
 const PROFILE_NONE = '<None>';
+const TRACKER_DISPLAY_EXTRA_KEY = 'structured_preflight_tracker_display';
+const TRACKER_DISPLAY_BLOCK_CLASS = 'structured-preflight-tracker-block';
+const TRACKER_DISPLAY_VERSION = 1;
 const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,
     semanticConnectionProfile: '',
@@ -494,6 +497,257 @@ function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+function isRealName(value) {
+    const text = String(value ?? '').trim();
+    return Boolean(text && text !== '(none)' && text.toLowerCase() !== 'none');
+}
+
+function toRealNameArray(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(item => String(item ?? '').trim()).filter(isRealName);
+}
+
+function normalizeDisplayTrackerNpcs(npcs) {
+    const normalized = {};
+    for (const [name, value] of Object.entries(npcs || {})) {
+        if (!isRealName(name)) continue;
+        normalized[name] = normalizeTrackerEntry(value);
+    }
+    return normalized;
+}
+
+function buildDisplayTrackerSnapshot({ messageKey, pendingRun, report }) {
+    const resolutionPacket = report?.finalNarrativeHandoff?.resolutionPacket || {};
+    const trackerAfter = normalizeDisplayTrackerNpcs({
+        ...(pendingRun?.trackerBefore || {}),
+        ...(pendingRun?.trackerAfter || {}),
+    });
+    return {
+        version: TRACKER_DISPLAY_VERSION,
+        messageKey,
+        type: pendingRun?.type || 'normal',
+        savedAt: Date.now(),
+        presentNpcNames: toRealNameArray(pendingRun?.presentNpcNames || resolutionPacket.NPCInScene),
+        userCoreStats: pendingRun?.userCoreStats || report?.semanticLedger?.engineContext?.userCoreStats || null,
+        npcs: trackerAfter,
+    };
+}
+
+function getMessageSwipeId(message) {
+    const fromMessage = Number(message?.swipe_id ?? 0);
+    return Number.isFinite(fromMessage) && fromMessage >= 0 ? fromMessage : 0;
+}
+
+function ensureSwipeInfoEntry(message, swipeId) {
+    if (!Array.isArray(message?.swipe_info)) return null;
+    if (!message.swipe_info[swipeId] || typeof message.swipe_info[swipeId] !== 'object') {
+        message.swipe_info[swipeId] = {
+            send_date: message.send_date,
+            gen_started: message.gen_started,
+            gen_finished: message.gen_finished,
+            extra: {},
+        };
+    }
+    message.swipe_info[swipeId].extra = message.swipe_info[swipeId].extra || {};
+    return message.swipe_info[swipeId];
+}
+
+function setMessageTrackerDisplaySnapshot(message, snapshot) {
+    if (!message || message.is_user || !snapshot) return;
+    const swipeId = getMessageSwipeId(message);
+    message.extra = message.extra || {};
+    message.extra[TRACKER_DISPLAY_EXTRA_KEY] = message.extra[TRACKER_DISPLAY_EXTRA_KEY] || {};
+    message.extra[TRACKER_DISPLAY_EXTRA_KEY][swipeId] = clone(snapshot);
+
+    const swipeInfo = ensureSwipeInfoEntry(message, swipeId);
+    if (swipeInfo) {
+        swipeInfo.extra[TRACKER_DISPLAY_EXTRA_KEY] = swipeInfo.extra[TRACKER_DISPLAY_EXTRA_KEY] || {};
+        swipeInfo.extra[TRACKER_DISPLAY_EXTRA_KEY][swipeId] = clone(snapshot);
+    }
+}
+
+function getMessageTrackerDisplaySnapshot(message) {
+    if (!message || message.is_user) return null;
+    const swipeId = getMessageSwipeId(message);
+    return message.extra?.[TRACKER_DISPLAY_EXTRA_KEY]?.[swipeId]
+        || message.swipe_info?.[swipeId]?.extra?.[TRACKER_DISPLAY_EXTRA_KEY]?.[swipeId]
+        || null;
+}
+
+function getLatestTrackerDisplaySnapshot(context = getContext()) {
+    const chat = context?.chat;
+    if (!Array.isArray(chat)) return null;
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+        const snapshot = getMessageTrackerDisplaySnapshot(chat[index]);
+        if (snapshot?.npcs) return snapshot;
+    }
+    return null;
+}
+
+function restoreTrackerFromLatestDisplaySnapshot(context = getContext()) {
+    const root = getTrackerRoot(context);
+    const snapshot = getLatestTrackerDisplaySnapshot(context);
+    if (!root || !snapshot?.npcs) return false;
+    root.npcs = normalizeDisplayTrackerNpcs(snapshot.npcs);
+    return true;
+}
+
+function restoreTrackerFromMessageDisplaySnapshot(messageId, context = getContext()) {
+    const root = getTrackerRoot(context);
+    const message = context?.chat?.[messageId];
+    const snapshot = getMessageTrackerDisplaySnapshot(message);
+    if (!root || !snapshot?.npcs) return false;
+    root.npcs = normalizeDisplayTrackerNpcs(snapshot.npcs);
+    return true;
+}
+
+function formatCoreStats(core) {
+    if (!core) return 'PHY - / MND - / CHA -';
+    return `PHY ${core.PHY ?? '-'} / MND ${core.MND ?? '-'} / CHA ${core.CHA ?? '-'}`;
+}
+
+function formatDisposition(disposition) {
+    if (!disposition) return 'B-/F-/H-';
+    return `B${disposition.B}/F${disposition.F}/H${disposition.H}`;
+}
+
+function buildTrackerDisplayHtml(snapshot) {
+    const npcs = normalizeDisplayTrackerNpcs(snapshot?.npcs);
+    const names = Object.keys(npcs).sort((a, b) => a.localeCompare(b));
+    const presentSet = new Set(toRealNameArray(snapshot?.presentNpcNames).map(name => name.toLowerCase()));
+    const present = names.filter(name => presentSet.has(name.toLowerCase()));
+    const absent = names.filter(name => !presentSet.has(name.toLowerCase()));
+    const userCore = snapshot?.userCoreStats;
+
+    const renderNpc = name => {
+        const entry = npcs[name];
+        const disposition = entry.currentDisposition;
+        const classified = disposition ? classifyDisposition(disposition) : { lock: 'None', behavior: 'None' };
+        const pressure = Number(entry.hostilePressure || 0);
+        const landedPressure = Number(entry.hostileLandedPressure || 0);
+        const pressureLine = pressure || landedPressure || entry.dominantLock !== 'None' || entry.pressureMode !== 'none'
+            ? `<div class="structured-preflight-tracker-muted">Pressure ${pressure}/${landedPressure} | Mode ${escapeHtml(entry.pressureMode || 'none')} | Dominant ${escapeHtml(entry.dominantLock || 'None')}</div>`
+            : '';
+        return `
+            <div class="structured-preflight-tracker-npc">
+                <div class="structured-preflight-tracker-name">${escapeHtml(name)}</div>
+                <div><code>${escapeHtml(formatDisposition(disposition))}</code> | Lock <code>${escapeHtml(classified.lock)}</code> | Behavior <code>${escapeHtml(classified.behavior)}</code></div>
+                <div>Rapport <code>${escapeHtml(entry.currentRapport)}/5</code> | Encounter Lock <code>${escapeHtml(entry.rapportEncounterLock)}</code> | Gate <code>${escapeHtml(entry.intimacyGate)}</code></div>
+                <div>Stats <code>${escapeHtml(formatCoreStats(entry.currentCoreStats))}</code></div>
+                ${pressureLine}
+            </div>`;
+    };
+
+    const renderSection = (title, sectionNames) => `
+        <div class="structured-preflight-tracker-section">
+            <div class="structured-preflight-tracker-heading">${title}</div>
+            ${sectionNames.length ? sectionNames.map(renderNpc).join('') : '<div class="structured-preflight-tracker-empty">None</div>'}
+        </div>`;
+
+    return `
+        <details class="${TRACKER_DISPLAY_BLOCK_CLASS}">
+            <summary>Tracker</summary>
+            <div class="structured-preflight-tracker-body">
+                <div class="structured-preflight-tracker-title">NPCs</div>
+                ${renderSection('Present', present)}
+                ${renderSection('Absent', absent)}
+                <div class="structured-preflight-tracker-title">Player</div>
+                <div>Stats <code>${escapeHtml(formatCoreStats(userCore))}</code></div>
+            </div>
+        </details>`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function ensureTrackerDisplayStyles() {
+    if (document.getElementById('structured_preflight_tracker_display_styles')) return;
+    const style = document.createElement('style');
+    style.id = 'structured_preflight_tracker_display_styles';
+    style.textContent = `
+        .${TRACKER_DISPLAY_BLOCK_CLASS} {
+            margin-top: 0.75rem;
+            padding: 0.45rem 0.65rem;
+            border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.18));
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #000) 26%, transparent);
+            font-size: 0.88rem;
+        }
+        .${TRACKER_DISPLAY_BLOCK_CLASS} > summary {
+            cursor: pointer;
+            font-weight: 600;
+            user-select: none;
+        }
+        .structured-preflight-tracker-body {
+            margin-top: 0.55rem;
+            display: grid;
+            gap: 0.55rem;
+        }
+        .structured-preflight-tracker-title,
+        .structured-preflight-tracker-heading,
+        .structured-preflight-tracker-name {
+            font-weight: 600;
+        }
+        .structured-preflight-tracker-section {
+            display: grid;
+            gap: 0.35rem;
+        }
+        .structured-preflight-tracker-npc {
+            padding-left: 0.45rem;
+            border-left: 2px solid var(--SmartThemeQuoteColor, rgba(255,255,255,0.28));
+            line-height: 1.45;
+        }
+        .structured-preflight-tracker-muted,
+        .structured-preflight-tracker-empty {
+            opacity: 0.78;
+        }
+    `;
+    document.head.append(style);
+}
+
+function renderTrackerDisplayBlockForMessage(messageId, snapshot = null, context = getContext()) {
+    const message = context?.chat?.[messageId];
+    const trackerSnapshot = snapshot || getMessageTrackerDisplaySnapshot(message);
+    if (typeof document === 'undefined') return;
+
+    const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+    if (!messageElement) return;
+
+    messageElement.querySelector(`.${TRACKER_DISPLAY_BLOCK_CLASS}`)?.remove();
+    if (!trackerSnapshot?.npcs) return;
+
+    ensureTrackerDisplayStyles();
+    const textElement = messageElement.querySelector('.mes_text');
+    if (!textElement) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = buildTrackerDisplayHtml(trackerSnapshot).trim();
+    const block = wrapper.firstElementChild;
+    if (!block) return;
+
+    const mediaWrapper = messageElement.querySelector('.mes_media_wrapper');
+    if (mediaWrapper) {
+        mediaWrapper.before(block);
+    } else {
+        textElement.after(block);
+    }
+}
+
+function renderAllTrackerDisplayBlocks(context = getContext()) {
+    if (!Array.isArray(context?.chat)) return;
+    context.chat.forEach((message, index) => {
+        if (!message?.is_user) {
+            renderTrackerDisplayBlockForMessage(index, null, context);
+        }
+    });
+}
+
 function captureChatSignature(context = getContext()) {
     if (!Array.isArray(context?.chat)) return [];
     return context.chat.map(message => [
@@ -502,6 +756,10 @@ function captureChatSignature(context = getContext()) {
         String(message?.send_date ?? ''),
         String(message?.mes ?? '').slice(0, 80),
     ].join('|'));
+}
+
+function getLatestReportPresentNpcNames(report) {
+    return toRealNameArray(report?.finalNarrativeHandoff?.resolutionPacket?.NPCInScene);
 }
 
 function firstChangedIndex(before, after) {
@@ -672,13 +930,19 @@ async function prependComputedDebug(messageId, type) {
 
     const root = getTrackerRoot(context);
     if (root && state.pendingRun) {
+        const trackerDisplaySnapshot = buildDisplayTrackerSnapshot({
+            messageKey,
+            pendingRun: state.pendingRun,
+        });
         await saveTrackerUpdate(context, { npcs: state.pendingRun.trackerAfter });
         root.snapshots[messageKey] = {
             before: clone(state.pendingRun.trackerBefore),
             after: clone(state.pendingRun.trackerAfter),
+            display: clone(trackerDisplaySnapshot),
             type: state.pendingRun.type,
             savedAt: Date.now(),
         };
+        setMessageTrackerDisplaySnapshot(message, trackerDisplaySnapshot);
         await persistMetadata(context);
         state.pendingRun = null;
     }
@@ -691,6 +955,7 @@ async function prependComputedDebug(messageId, type) {
     if (typeof context.updateMessageBlock === 'function') {
         context.updateMessageBlock(messageId, message);
     }
+    renderTrackerDisplayBlockForMessage(messageId, null, context);
 
     if (typeof context.saveChat === 'function') {
         await context.saveChat();
@@ -734,22 +999,37 @@ async function handleMessageDeleted(newLength) {
         root.npcs = clone(restoreCandidate.before) || {};
         await persistMetadata(context);
         console.info(`[${EXTENSION_NAME}] restored tracker snapshot after message deletion from index ${Math.min(chatLength, firstAffectedIndex)}`);
+    } else if (restoreTrackerFromLatestDisplaySnapshot(context)) {
+        await persistMetadata(context);
+        console.info(`[${EXTENSION_NAME}] restored tracker display snapshot after message deletion.`);
     }
+    setTimeout(() => renderAllTrackerDisplayBlocks(context), 0);
 }
 
-function handleMessageSwiped() {
+async function handleMessageSwiped(messageId) {
+    const context = getContext();
+    const resolvedMessageId = Number.isFinite(Number(messageId)) ? Number(messageId) : null;
+    if (resolvedMessageId != null && restoreTrackerFromMessageDisplaySnapshot(resolvedMessageId, context)) {
+        await persistMetadata(context);
+    } else if (restoreTrackerFromLatestDisplaySnapshot(context)) {
+        await persistMetadata(context);
+    }
     state.lastDebugKey = null;
     state.chatSignature = captureChatSignature();
     clearRuntimePrompts();
+    setTimeout(() => renderAllTrackerDisplayBlocks(context), 0);
 }
 
 function handleChatChanged() {
     clearPendingRunCleanupTimer();
+    const context = getContext();
+    restoreTrackerFromLatestDisplaySnapshot(context);
     state.lastDebugKey = null;
     state.lastDebugPrefix = '';
     state.pendingRun = null;
     state.chatSignature = captureChatSignature();
     clearRuntimePrompts();
+    setTimeout(() => renderAllTrackerDisplayBlocks(context), 0);
 }
 
 function handleGenerationLifecycleEnd() {
@@ -768,6 +1048,7 @@ function handleGenerationLifecycleEnd() {
             console.warn(`[${EXTENSION_NAME}] cleared pending pre-flight handoff because no assistant message was received after generation ended.`);
         }, 5000);
     }
+    setTimeout(() => renderAllTrackerDisplayBlocks(), 0);
 }
 
 function subscribeMessageHandler() {
@@ -844,6 +1125,8 @@ async function handleChatCompletionPromptReady(eventData) {
             type: state.pendingGeneration.type || 'normal',
             trackerBefore: trackerSnapshot,
             trackerAfter: report.trackerUpdate?.npcs || {},
+            presentNpcNames: getLatestReportPresentNpcNames(report),
+            userCoreStats: report.semanticLedger?.engineContext?.userCoreStats || null,
         };
         state.lastDebugPrefix = formatDebugMessagePrefix(audit, narratorContext);
 
@@ -855,6 +1138,8 @@ async function handleChatCompletionPromptReady(eventData) {
     } catch (error) {
         state.lastDebugPrefix = '';
         state.pendingRun = null;
+        clearProgress(state.progressToast);
+        state.progressToast = null;
         clearRuntimePrompts();
         showBlockingError(error);
         abortGenerationAfterPromptReady(context);
@@ -949,9 +1234,19 @@ function removeEventHandler(context, eventName, handler) {
 subscribeMessageHandler();
 getSettings();
 if (typeof jQuery === 'function') {
-    jQuery(renderSettingsPanel);
+    jQuery(() => {
+        renderSettingsPanel();
+        setTimeout(() => {
+            restoreTrackerFromLatestDisplaySnapshot();
+            renderAllTrackerDisplayBlocks();
+        }, 0);
+    });
 } else {
     renderSettingsPanel();
+    setTimeout(() => {
+        restoreTrackerFromLatestDisplaySnapshot();
+        renderAllTrackerDisplayBlocks();
+    }, 0);
 }
 clearRuntimePrompts();
 console.info(`[${EXTENSION_NAME}] loaded`);

@@ -306,6 +306,9 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const proactiveNote = aggressionText === 'none' && proactiveText !== 'none'
         ? ' Then let the listed proactive NPC action happen only as denial, boundary, refusal, retreat, resistance, or escalation consistent with the gate.'
         : '';
+    const naturalProactiveNote = proactiveText !== 'none'
+        ? ' Then narrate the listed proactive NPC action as a present scene beat, following its intent and impulse. If no Aggression result is listed, do not invent a resolved NPC hit.'
+        : '';
     const boundaryNote = resolution.classifyPhysicalBoundaryPressure === 'Y'
         ? ' Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance without inventing a landed attack.'
         : '';
@@ -322,7 +325,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     if (proactiveText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote} Then let the listed proactive NPC action happen naturally without treating triggersAggressionRoll:N as "not directed at the user."`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote}${naturalProactiveNote}`;
     }
 
     if (isIntimacyAdvance) {
