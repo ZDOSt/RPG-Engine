@@ -1,6 +1,6 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
 import { getRequestHeaders } from '../../../../script.js';
-import { createGenerationParameters, getChatCompletionModel, oai_settings } from '../../../../scripts/openai.js';
+import { createGenerationParameters, getChatCompletionModel, oai_settings, proxies } from '../../../../scripts/openai.js';
 
 export const SEMANTIC_PREFLIGHT_STOP_SENTINEL = 'SEMANTIC_PREFLIGHT_COMPLETE';
 
@@ -11,7 +11,7 @@ const SEMANTIC_TOOL_NAME = 'submit_semantic_preflight';
 const SEMANTIC_BACKEND_ENDPOINT = '/api/backends/chat-completions/generate';
 
 export async function extractSemanticLedger(context, promptContext, type, trackerSnapshot, options = {}) {
-    if (!context?.generateRawData && options?.preferToolCall === false) {
+    if (!context?.generateRawData && !options?.semanticProfileId && options?.preferToolCall === false) {
         throw new Error('SillyTavern generateRawData API is unavailable.');
     }
 
@@ -27,16 +27,22 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
     let extractionMeta;
     if (options?.preferToolCall !== false) {
         try {
-            const toolResult = await generateSemanticToolCall(context, prompt, responseLength);
+            const toolResult = options?.semanticProfileId
+                ? await generateSemanticToolCallWithProfile(context, prompt, responseLength, options)
+                : await generateSemanticToolCall(context, prompt, responseLength);
             raw = toolResult.raw;
             ledger = parseSemanticLedger(toolResult.ledger, trackerSnapshot);
             validateRawLedgerContract(ledger, raw);
             extractionMeta = {
-                source: 'SillyTavern direct backend forced function tool + local validation',
+                source: options?.semanticProfileId
+                    ? `SillyTavern direct connection profile forced function tool + local validation (${options.semanticProfileName || options.semanticProfileId})`
+                    : 'SillyTavern direct backend forced function tool + local validation',
                 schema: 'submit_semantic_preflight_tool_v1',
                 strict: true,
                 responseLength,
                 toolName: SEMANTIC_TOOL_NAME,
+                semanticProfile: options?.semanticProfileName || undefined,
+                semanticPreset: options?.semanticPreset || undefined,
             };
         } catch (error) {
             if (!isSemanticToolTransportError(error)) {
@@ -44,29 +50,41 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
                 throw new Error(`Semantic tool-call pass returned no valid ledger. Generation aborted before narration. ${message}`);
             }
 
-            if (!context?.generateRawData) {
+            if (!context?.generateRawData && !options?.semanticProfileId) {
                 const message = error instanceof Error ? error.message : String(error);
                 throw new Error(`Semantic tool-call transport failed and generateRawData fallback is unavailable. Generation aborted before narration. ${message}`);
             }
 
             console.warn('[Structured Preflight Engines] semantic tool-call transport failed; falling back to compact ledger.', error);
-            raw = await generateSemanticRaw(context, prompt, responseLength);
+            raw = options?.semanticProfileId
+                ? await generateSemanticRawWithProfile(prompt, responseLength, options)
+                : await generateSemanticRaw(context, prompt, responseLength);
             extractionMeta = {
-                source: 'SillyTavern generateRawData compact preflight ledger fallback + local validation',
+                source: options?.semanticProfileId
+                    ? `SillyTavern direct connection profile compact preflight ledger fallback + local validation (${options.semanticProfileName || options.semanticProfileId})`
+                    : 'SillyTavern generateRawData compact preflight ledger fallback + local validation',
                 schema: 'compact_engine_name_anchored_preflight_ledger_v1',
                 strict: true,
                 responseLength,
+                semanticProfile: options?.semanticProfileName || undefined,
+                semanticPreset: options?.semanticPreset || undefined,
                 fallbackFrom: 'submit_semantic_preflight_tool_v1',
                 fallbackReason: error instanceof Error ? error.message : String(error),
             };
         }
     } else {
-        raw = await generateSemanticRaw(context, prompt, responseLength);
+        raw = options?.semanticProfileId
+            ? await generateSemanticRawWithProfile(prompt, responseLength, options)
+            : await generateSemanticRaw(context, prompt, responseLength);
         extractionMeta = {
-            source: 'SillyTavern generateRawData compact preflight ledger + local validation',
+            source: options?.semanticProfileId
+                ? `SillyTavern direct connection profile compact preflight ledger + local validation (${options.semanticProfileName || options.semanticProfileId})`
+                : 'SillyTavern generateRawData compact preflight ledger + local validation',
             schema: 'compact_engine_name_anchored_preflight_ledger_v1',
             strict: true,
             responseLength,
+            semanticProfile: options?.semanticProfileName || undefined,
+            semanticPreset: options?.semanticPreset || undefined,
         };
     }
 
@@ -125,6 +143,22 @@ async function generateSemanticRaw(context, prompt, responseLength) {
         options.responseLength = responseLength;
     }
     return await context.generateRawData(options);
+}
+
+async function generateSemanticRawWithProfile(prompt, responseLength, options = {}) {
+    const result = await sendChatCompletionProfileRequest(
+        prompt,
+        responseLength,
+        options,
+        {
+            temperature: 0.1,
+            stop: [SEMANTIC_PREFLIGHT_STOP_SENTINEL],
+            stopping_strings: [SEMANTIC_PREFLIGHT_STOP_SENTINEL],
+            stop_sequence: [SEMANTIC_PREFLIGHT_STOP_SENTINEL],
+        },
+        true,
+    );
+    return result?.content ?? String(result ?? '');
 }
 
 class SemanticToolTransportError extends Error {
@@ -209,6 +243,103 @@ async function generateSemanticToolCall(context, prompt, responseLength) {
     }
     const ledger = extractSemanticToolLedger(raw);
     return { raw, ledger };
+}
+
+async function generateSemanticToolCallWithProfile(context, prompt, responseLength, options = {}) {
+    const profile = getConnectionProfile(options.semanticProfileId);
+    const apiMap = context?.CONNECT_API_MAP?.[profile?.api];
+    const chatCompletionSource = apiMap?.source;
+    if (!chatCompletionSource) {
+        throw new SemanticToolTransportError(`Semantic profile "${options.semanticProfileName || options.semanticProfileId}" does not support chat-completion tool calls.`);
+    }
+
+    const toolPrompt = buildSemanticToolPrompt(prompt);
+    const semanticTool = buildSemanticPreflightTool(chatCompletionSource);
+    const overridePayload = {
+        temperature: 0.1,
+        stream: false,
+        messages: toolPrompt,
+        tools: [semanticTool],
+        tool_choice: buildSemanticToolChoice(chatCompletionSource),
+        include_reasoning: false,
+        enable_web_search: false,
+        request_images: undefined,
+        request_image_resolution: undefined,
+        request_image_aspect_ratio: undefined,
+        json_schema: undefined,
+        stop: undefined,
+        ...(Number.isFinite(responseLength) && responseLength > 0 ? { max_tokens: responseLength } : {}),
+    };
+
+    let raw;
+    try {
+        raw = await sendChatCompletionProfileRequest(
+            toolPrompt,
+            responseLength,
+            options,
+            overridePayload,
+            false,
+        );
+    } catch (error) {
+        throw new SemanticToolTransportError(`Direct semantic profile tool-call request failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+
+    if (raw?.error) {
+        throw new SemanticToolTransportError(`Provider returned an error for semantic profile tool-call request: ${previewRaw(raw)}`, { body: previewRaw(raw) });
+    }
+
+    const ledger = extractSemanticToolLedger(raw);
+    return { raw, ledger };
+}
+
+async function sendChatCompletionProfileRequest(prompt, responseLength, options = {}, overridePayload = {}, extractData = true) {
+    if (!options?.semanticProfileId) {
+        throw new SemanticToolTransportError('Semantic connection profile id is missing.');
+    }
+
+    const context = globalThis.SillyTavern?.getContext?.();
+    const profile = getConnectionProfile(options.semanticProfileId);
+    const apiMap = context?.CONNECT_API_MAP?.[profile?.api];
+    const chatCompletionSource = apiMap?.source;
+    if (!context?.ChatCompletionService?.processRequest || !chatCompletionSource) {
+        throw new SemanticToolTransportError(`Semantic profile "${options.semanticProfileName || options.semanticProfileId}" does not support direct chat-completion requests.`);
+    }
+
+    const proxyPreset = proxies.find(proxy => proxy.name === profile.proxy);
+    const messages = Array.isArray(prompt)
+        ? prompt
+        : [{ role: 'user', content: String(prompt || '') }];
+
+    return await context.ChatCompletionService.processRequest(
+        {
+            stream: false,
+            messages,
+            max_tokens: responseLength,
+            model: profile.model,
+            chat_completion_source: chatCompletionSource,
+            custom_url: profile['api-url'],
+            vertexai_region: profile['api-url'],
+            zai_endpoint: profile['api-url'],
+            siliconflow_endpoint: profile['api-url'],
+            reverse_proxy: proxyPreset?.url,
+            proxy_password: proxyPreset?.password,
+            custom_prompt_post_processing: profile['prompt-post-processing'],
+            ...overridePayload,
+        },
+        {
+            presetName: options.semanticPreset || profile.preset || undefined,
+        },
+        extractData,
+    );
+}
+
+function getConnectionProfile(profileId) {
+    const profile = globalThis.SillyTavern?.getContext?.()?.extensionSettings?.connectionManager?.profiles
+        ?.find(item => item?.id === profileId);
+    if (!profile) {
+        throw new SemanticToolTransportError(`Semantic connection profile not found: ${profileId}`);
+    }
+    return profile;
 }
 
 function buildSemanticToolPrompt(prompt) {

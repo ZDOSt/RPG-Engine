@@ -3,6 +3,7 @@ import { saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings } from '../../../../scripts/extensions.js';
 import { addEphemeralStoppingString, flushEphemeralStoppingStrings } from '../../../../scripts/power-user.js';
 import { getPresetManager } from '../../../../scripts/preset-manager.js';
+import { rotateSecret, SECRET_KEYS, secret_state } from '../../../../scripts/secrets.js';
 import { SlashCommandParser } from '../../../../scripts/slash-commands/SlashCommandParser.js';
 import {
     formatDebugMessagePrefix,
@@ -22,6 +23,31 @@ const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,
     semanticConnectionProfile: '',
     semanticPreset: '',
+});
+const CHAT_COMPLETION_SECRET_KEYS = Object.freeze({
+    ai21: SECRET_KEYS.AI21,
+    aimlapi: SECRET_KEYS.AIMLAPI,
+    azure_openai: SECRET_KEYS.AZURE_OPENAI,
+    chutes: SECRET_KEYS.CHUTES,
+    claude: SECRET_KEYS.CLAUDE,
+    cohere: SECRET_KEYS.COHERE,
+    cometapi: SECRET_KEYS.COMETAPI,
+    custom: SECRET_KEYS.CUSTOM,
+    deepseek: SECRET_KEYS.DEEPSEEK,
+    electronhub: SECRET_KEYS.ELECTRONHUB,
+    fireworks: SECRET_KEYS.FIREWORKS,
+    google: SECRET_KEYS.MAKERSUITE,
+    groq: SECRET_KEYS.GROQ,
+    mistralai: SECRET_KEYS.MISTRALAI,
+    moonshot: SECRET_KEYS.MOONSHOT,
+    nanogpt: SECRET_KEYS.NANOGPT,
+    openai: SECRET_KEYS.OPENAI,
+    openrouter: SECRET_KEYS.OPENROUTER,
+    perplexity: SECRET_KEYS.PERPLEXITY,
+    pollinations: SECRET_KEYS.POLLINATIONS,
+    vertexai: SECRET_KEYS.VERTEXAI,
+    xai: SECRET_KEYS.XAI,
+    zai: SECRET_KEYS.ZAI,
 });
 const ENGINE_RUNTIME_SENTINEL = [
     '[STRUCTURED_PREFLIGHT_ENGINE_EXTENSION v0.5 - SEMANTIC PASS ACTIVE]',
@@ -77,6 +103,13 @@ function getConnectionProfileNames() {
         .map(profile => String(profile?.name || '').trim())
         .filter(Boolean)
         .sort((a, b) => a.localeCompare(b));
+}
+
+function getConnectionProfileByName(profileName) {
+    const wanted = String(profileName || '').trim();
+    if (!wanted) return null;
+    return (extension_settings.connectionManager?.profiles || [])
+        .find(profile => String(profile?.name || '').trim().toLowerCase() === wanted.toLowerCase()) || null;
 }
 
 function getActiveConnectionProfileName() {
@@ -156,6 +189,55 @@ function applyPresetName(presetName) {
     }
 }
 
+function getSecretKeyForConnectionProfile(profile) {
+    const context = getContext();
+    const apiMap = context?.CONNECT_API_MAP?.[profile?.api];
+    return CHAT_COMPLETION_SECRET_KEYS[apiMap?.source] || null;
+}
+
+function getActiveSecretId(secretKey) {
+    const secrets = secret_state?.[secretKey];
+    if (!Array.isArray(secrets)) return '';
+    return secrets.find(secret => secret?.active)?.id || '';
+}
+
+async function withConnectionProfileSecret(profile, callback) {
+    const secretKey = getSecretKeyForConnectionProfile(profile);
+    const targetSecretId = String(profile?.['secret-id'] || '').trim();
+    if (!secretKey || !targetSecretId) {
+        return await callback();
+    }
+
+    const originalSecretId = getActiveSecretId(secretKey);
+    const shouldRotate = originalSecretId && originalSecretId !== targetSecretId;
+
+    try {
+        if (shouldRotate) {
+            console.info(`[${EXTENSION_NAME}] activating semantic profile secret for ${profile.name}.`);
+            await rotateSecret(secretKey, targetSecretId);
+        }
+        return await callback();
+    } finally {
+        if (shouldRotate) {
+            try {
+                await rotateSecret(secretKey, originalSecretId);
+                console.info(`[${EXTENSION_NAME}] restored roleplay secret after semantic pass.`);
+            } catch (error) {
+                console.error(`[${EXTENSION_NAME}] failed to restore roleplay secret after semantic pass.`, error);
+                try {
+                    globalThis.toastr?.error?.(
+                        'Semantic pass finished, but restoring the original API secret failed. Check ST connection settings before continuing.',
+                        EXTENSION_NAME,
+                        { timeOut: 15000, extendedTimeOut: 15000 },
+                    );
+                } catch {
+                    // Toasts are best-effort only.
+                }
+            }
+        }
+    }
+}
+
 async function withSemanticGenerationSettings(callback) {
     const settings = getSettings();
     const useSeparateSettings = Boolean(settings.useSeparateSemanticSettings);
@@ -166,16 +248,28 @@ async function withSemanticGenerationSettings(callback) {
         return await callback();
     }
 
-    const originalProfile = await readActiveConnectionProfileName();
+    if (semanticProfile) {
+        const profile = getConnectionProfileByName(semanticProfile);
+        if (!profile) {
+            throw new Error(`Semantic connection profile "${semanticProfile}" was not found.`);
+        }
+
+        console.info(`[${EXTENSION_NAME}] using direct semantic connection profile request: ${profile.name}`);
+        if (semanticPreset) {
+            console.info(`[${EXTENSION_NAME}] using semantic preset override for direct request: ${semanticPreset}`);
+        }
+
+        return await withConnectionProfileSecret(profile, () => callback({
+            semanticProfileId: profile.id,
+            semanticProfileName: profile.name,
+            semanticPreset,
+        }));
+    }
+
     const originalPreset = getActivePresetName();
     let switched = false;
 
     try {
-        if (semanticProfile) {
-            console.info(`[${EXTENSION_NAME}] applying semantic connection profile: ${semanticProfile}`);
-            await applyConnectionProfileName(semanticProfile);
-            switched = true;
-        }
         if (semanticPreset) {
             console.info(`[${EXTENSION_NAME}] applying semantic preset: ${semanticPreset}`);
             applyPresetName(semanticPreset);
@@ -185,18 +279,15 @@ async function withSemanticGenerationSettings(callback) {
     } finally {
         if (switched) {
             try {
-                if (semanticProfile) {
-                    await applyConnectionProfileName(originalProfile || PROFILE_NONE);
-                }
                 if (originalPreset) {
                     applyPresetName(originalPreset);
                 }
-                console.info(`[${EXTENSION_NAME}] restored roleplay connection profile/preset after semantic pass.`);
+                console.info(`[${EXTENSION_NAME}] restored roleplay preset after semantic pass.`);
             } catch (error) {
-                console.error(`[${EXTENSION_NAME}] failed to restore roleplay connection profile/preset after semantic pass.`, error);
+                console.error(`[${EXTENSION_NAME}] failed to restore roleplay preset after semantic pass.`, error);
                 try {
                     globalThis.toastr?.error?.(
-                        'Semantic pass finished, but restoring the original connection profile or preset failed. Check ST connection settings before continuing.',
+                        'Semantic pass finished, but restoring the original preset failed. Check ST connection settings before continuing.',
                         EXTENSION_NAME,
                         { timeOut: 15000, extendedTimeOut: 15000 },
                     );
@@ -779,7 +870,12 @@ async function runSemanticPassWithPromptReadyBypass(context, assembledChat, type
     state.bypassPromptReady = true;
     try {
         addEphemeralStoppingString(SEMANTIC_PREFLIGHT_STOP_SENTINEL);
-        return await withSemanticGenerationSettings(() => extractSemanticLedger(context, assembledChat, type, trackerSnapshot, { assembledPrompt: true }));
+        return await withSemanticGenerationSettings(settings => extractSemanticLedger(context, assembledChat, type, trackerSnapshot, {
+            assembledPrompt: true,
+            semanticProfileId: settings?.semanticProfileId,
+            semanticProfileName: settings?.semanticProfileName,
+            semanticPreset: settings?.semanticPreset,
+        }));
     } finally {
         flushEphemeralStoppingStrings();
         state.bypassPromptReady = false;
