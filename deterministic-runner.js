@@ -178,9 +178,10 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
     const relationships = runRelationships(ledger, trackerSnapshot, resolution.packet, audit, refereeContext);
     const chaos = runChaos(ledger, relationships.handoffs, resolution.packet, dice, audit);
     const name = runNameGeneration(ledger, audit, context, type);
+    const injuryTrackerUpdate = applyInflictedNpcInjuriesToTrackerUpdate(resolution.packet, relationships.trackerUpdate, trackerSnapshot, audit);
     const proactivity = runProactivity(ledger, relationships.handoffs, resolution.packet, chaos.handoff, dice, audit);
-    const aggression = runAggression(ledger, trackerSnapshot, relationships.trackerUpdate, proactivity.results, resolution.packet, dice, audit, context);
-    const trackerDeltas = runTrackerUpdates(ledger, trackerSnapshot, relationships.trackerUpdate, context, audit);
+    const aggression = runAggression(ledger, trackerSnapshot, injuryTrackerUpdate, proactivity.results, resolution.packet, dice, audit, context);
+    const trackerDeltas = runTrackerUpdates(ledger, trackerSnapshot, injuryTrackerUpdate, context, audit, aggression.userTrackerDelta);
 
     const trackerUpdate = {
         npcs: trackerDeltas.npcs,
@@ -396,6 +397,15 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         goal,
     }, audit);
 
+    const inflictedInjuries = deriveInflictedNpcInjuries({
+        semantic,
+        context,
+        targets,
+        outcome,
+        hostilePhysical,
+        hasStakes,
+    });
+
     const packet = {
         GOAL: goal,
         actions,
@@ -414,8 +424,10 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         NPCInScene: showNone(npcInScene),
         UserImpairment: userImpairment,
         NPCImpairment: npcImpairment,
+        InflictedInjuries: inflictedInjuries,
     };
 
+    audit.push(`2.7q InflictedNpcInjuryEngine=${compact(inflictedInjuries)}`);
     audit.push(`2.8 HANDOFF=${compact(packet)}`);
     audit.push('---');
 
@@ -996,6 +1008,306 @@ function registerGeneratedName(context, name, meta) {
     if (typeof context.saveMetadataDebounced === 'function') context.saveMetadataDebounced();
 }
 
+function deriveInflictedNpcInjuries({ semantic, context, targets, outcome, hostilePhysical, hasStakes }) {
+    if (!hostilePhysical || hasStakes !== 'Y') return [];
+    const landedCount = Number(outcome?.LandedActions ?? 0);
+    if (!Number.isFinite(landedCount) || landedCount <= 0) return [];
+
+    const npcName = firstReal(targets?.OppTargets?.NPC) || firstReal(targets?.ActionTargets);
+    if (!isReal(npcName)) return [];
+
+    const source = [
+        semantic?.identifyGoal,
+        semantic?.identifyChallenge,
+        semantic?.explicitMeans,
+        getLatestUserTextFromContext(context),
+    ].filter(Boolean);
+    const sourceText = uniqueTextParts(source).join(' ');
+    const injury = inferInflictedInjuryFromAttackText(sourceText, outcome);
+    if (!injury) return [];
+
+    return [{
+        NPC: npcName,
+        condition: injury.condition,
+        woundsAdd: [injury.wound],
+        statusAdd: injury.status ? [injury.status] : [],
+        severity: injury.severity,
+        bodyPart: injury.bodyPart,
+        sourceAction: injury.sourceAction,
+        NarrationRule: `${npcName} suffers ${injury.wound}; narrate this as a lasting injury from the landed user attack, and let it impair later actions involving ${injury.functionText}.`,
+    }];
+}
+
+function inferInflictedInjuryFromAttackText(value, outcome) {
+    const text = String(value || '').toLowerCase();
+    if (!text.trim()) return null;
+    const explicitInjury = /\b(break|breaks|broken|fractur(?:e|es|ed|ing)|dislocat(?:e|es|ed|ing)|crippl(?:e|es|ed|ing)|injur(?:e|es|ed|ing)|wound(?:s|ed|ing)?|maim(?:s|ed|ing)?|cut(?:s|ting)?|slash(?:es|ed|ing)?|stab(?:s|bed|bing)?|pierce(?:s|d|ing)?|gash(?:es|ed|ing)?|tear(?:s|ing)?|torn|mangle(?:s|d|ing)?|crush(?:es|ed|ing)?|shatter(?:s|ed|ing)?|bleed(?:s|ing)?|burn(?:s|ed|ing)?|blind(?:s|ed|ing)?|concuss(?:es|ed|ing)?|poison(?:s|ed|ing)?|paraly[sz](?:e|es|ed|ing)?)\b/.test(text);
+    const targetBodyPart = inferTargetedBodyPart(text);
+    if (!explicitInjury && !targetBodyPart) return null;
+
+    const severity = severityFromOutcomeAndText(outcome, text);
+    const condition = conditionFromInflictedSeverity(severity);
+    const bodyPart = targetBodyPart || inferGenericBodyPart(text);
+    const injuryKind = injuryKindFromText(text, severity);
+    const wound = `${severity} ${bodyPart} ${injuryKind}`.replace(/\s+/g, ' ').trim();
+    const status = statusFromInflictedInjury(text, bodyPart, severity);
+
+    return {
+        severity,
+        condition,
+        bodyPart,
+        wound,
+        status,
+        sourceAction: compactAttackSource(value),
+        functionText: humanizeInjuryFunctions(functionsFromImpairmentText(wound, 'wound')),
+    };
+}
+
+function inferTargetedBodyPart(text) {
+    const patterns = [
+        ['knee', /\bknees?\b/],
+        ['leg', /\b(?:leg|thigh|shin|calf)\b/],
+        ['ankle', /\bankles?\b/],
+        ['foot', /\b(?:foot|feet)\b/],
+        ['hip', /\bhips?\b/],
+        ['arm', /\b(?:arm|forearm)\b/],
+        ['wrist', /\bwrists?\b/],
+        ['hand', /\bhands?\b/],
+        ['elbow', /\belbows?\b/],
+        ['shoulder', /\bshoulders?\b/],
+        ['ribs', /\bribs?\b/],
+        ['chest', /\bchest\b/],
+        ['stomach', /\b(?:stomach|abdomen|gut)\b/],
+        ['back', /\b(?:back|spine)\b/],
+        ['head', /\b(?:head|skull|temple)\b/],
+        ['neck', /\bneck\b/],
+        ['face', /\bface\b/],
+        ['eye', /\beyes?\b/],
+        ['throat', /\bthroat\b/],
+    ];
+    for (const [label, pattern] of patterns) {
+        if (pattern.test(text)) return label;
+    }
+    return '';
+}
+
+function inferGenericBodyPart(text) {
+    if (/\bkick(?:s|ed|ing)?|stomp(?:s|ed|ing)?|sweep(?:s|ing)?\b/.test(text)) return 'lower body';
+    if (/\bpunch(?:es|ed|ing)?|elbow(?:s|ed|ing)?|grab(?:s|bed|bing)?|strike(?:s|struck|striking)?\b/.test(text)) return 'upper body';
+    if (/\bstab(?:s|bed|bing)?|slash(?:es|ed|ing)?|cut(?:s|ting)?|pierce(?:s|d|ing)?\b/.test(text)) return 'body';
+    return 'body';
+}
+
+function severityFromOutcomeAndText(outcome, text) {
+    if (/\b(sever(?:e|ely)|shatter(?:s|ed|ing)?|crush(?:es|ed|ing)?|mangle(?:s|d|ing)?|maim(?:s|ed|ing)?|crippl(?:e|es|ed|ing)|paraly[sz](?:e|es|ed|ing)?|amputat(?:e|es|ed|ing)|sever(?:s|ed|ing)?)\b/.test(text)) {
+        return outcome?.Outcome === 'light_impact' ? 'moderate' : 'severe';
+    }
+    if (/\b(break|breaks|broken|fractur(?:e|es|ed|ing)|dislocat(?:e|es|ed|ing))\b/.test(text)) {
+        return outcome?.Outcome === 'light_impact' ? 'moderate' : 'severe';
+    }
+    if (outcome?.Outcome === 'dominant_impact') return 'severe';
+    if (outcome?.Outcome === 'solid_impact') return 'moderate';
+    return 'minor';
+}
+
+function conditionFromInflictedSeverity(severity) {
+    if (severity === 'severe') return 'badly_wounded';
+    if (severity === 'moderate') return 'wounded';
+    if (severity === 'minor') return 'bruised';
+    return 'unchanged';
+}
+
+function injuryKindFromText(text, severity) {
+    if (/\b(break|breaks|broken|fractur(?:e|es|ed|ing))\b/.test(text)) return severity === 'severe' ? 'fracture' : 'injury';
+    if (/\bdislocat(?:e|es|ed|ing)\b/.test(text)) return 'dislocation';
+    if (/\b(cut(?:s|ting)?|slash(?:es|ed|ing)?|gash(?:es|ed|ing)?|stab(?:s|bed|bing)?|pierce(?:s|d|ing)?)\b/.test(text)) return severity === 'minor' ? 'cut' : 'wound';
+    if (/\b(burn(?:s|ed|ing)?)\b/.test(text)) return 'burn';
+    if (/\b(concuss(?:es|ed|ing)?)\b/.test(text)) return 'concussion';
+    if (/\b(poison(?:s|ed|ing)?)\b/.test(text)) return 'poisoning';
+    if (/\b(blind(?:s|ed|ing)?)\b/.test(text)) return 'vision injury';
+    if (/\b(paraly[sz](?:e|es|ed|ing)?)\b/.test(text)) return 'paralysis';
+    if (severity === 'minor') return 'bruise';
+    return 'injury';
+}
+
+function statusFromInflictedInjury(text, bodyPart, severity) {
+    if (severity === 'minor') return '';
+    if (/\b(knee|leg|ankle|foot|feet|hip|thigh|shin|calf|lower body)\b/.test(bodyPart)) return `${severity} mobility impairment`;
+    if (/\b(arm|wrist|hand|elbow|shoulder|upper body)\b/.test(bodyPart)) return `${severity} grip/combat impairment`;
+    if (/\b(rib|ribs|chest|lung|lungs)\b/.test(bodyPart)) return `${severity} breathing impairment`;
+    if (/\b(head|skull|temple)\b/.test(bodyPart) || /\bconcuss/.test(text)) return `${severity} focus/balance impairment`;
+    if (/\b(eye|eyes)\b/.test(bodyPart) || /\bblind/.test(text)) return `${severity} vision impairment`;
+    if (/\bpoison/.test(text)) return `${severity} systemic impairment`;
+    if (/\bparaly[sz]/.test(text)) return `${severity} mobility impairment`;
+    return `${severity} physical impairment`;
+}
+
+function compactAttackSource(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 160) || NONE;
+}
+
+function uniqueTextParts(values) {
+    const seen = new Set();
+    const result = [];
+    for (const value of values || []) {
+        const text = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        const key = text.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(text);
+    }
+    return result;
+}
+
+function humanizeInjuryFunctions(functions) {
+    const labels = {
+        lower_body: 'lower-body movement',
+        upper_body: 'upper-body movement',
+        whole_body: 'whole-body movement',
+        physical_exertion: 'physical exertion',
+        mobility: 'mobility',
+        balance: 'balance',
+        stamina: 'stamina',
+        focus: 'focus',
+        grip: 'grip',
+        torso: 'torso movement',
+        breath: 'breathing',
+        head: 'head stability',
+        vision: 'vision',
+        aim: 'aim',
+        combat: 'combat',
+        systemic: 'overall stamina and focus',
+    };
+    return unique(functions || []).map(item => labels[item] || String(item).replace(/_/g, ' ')).join(', ') || 'physical action';
+}
+
+function applyInflictedNpcInjuriesToTrackerUpdate(resolutionPacket, relationshipTrackerUpdate, trackerSnapshot, audit) {
+    const merged = {};
+    for (const [name, value] of Object.entries(relationshipTrackerUpdate || {})) {
+        merged[name] = normalizeTrackerEntry(value);
+    }
+
+    const injuries = Array.isArray(resolutionPacket?.InflictedInjuries) ? resolutionPacket.InflictedInjuries : [];
+    applyInflictedNpcInjuriesToNpcMap(merged, trackerSnapshot, injuries);
+    Object.defineProperty(merged, '__inflictedInjuries', {
+        value: injuries,
+        enumerable: false,
+        configurable: true,
+    });
+
+    audit.push(`STEP 6.4: APPLY DETERMINISTIC INFLICTED NPC INJURIES=${compact(injuries)}`);
+    return merged;
+}
+
+function applyInflictedNpcInjuriesToNpcMap(npcs, trackerSnapshot, injuries) {
+    for (const injury of injuries || []) {
+        const name = injury?.NPC;
+        if (!isReal(name)) continue;
+        const before = normalizeTrackerEntry(npcs[name] || trackerSnapshot?.[name] || {});
+        npcs[name] = normalizeTrackerEntry({
+            ...before,
+            condition: worseTrackerCondition(before.condition, injury.condition),
+            wounds: applyListDelta(before.wounds, injury.woundsAdd, []),
+            statusEffects: applyListDelta(before.statusEffects, injury.statusAdd, []),
+        });
+    }
+}
+
+function worseTrackerCondition(current, next) {
+    const order = ['healthy', 'bruised', 'wounded', 'badly_wounded', 'critical', 'dead'];
+    const currentIndex = Math.max(0, order.indexOf(normalizeTrackerCondition(current)));
+    const nextIndex = Math.max(0, order.indexOf(normalizeTrackerCondition(next)));
+    return order[Math.max(currentIndex, nextIndex)] || 'healthy';
+}
+
+function applyUserResultInjuryDeltaToState(before, delta) {
+    const source = normalizeTrackerUserState(before || {});
+    const result = {
+        ...source,
+        condition: worseTrackerCondition(source.condition, delta?.condition),
+        wounds: applyListDelta(source.wounds, delta?.woundsAdd, []),
+        statusEffects: applyListDelta(source.statusEffects, delta?.statusAdd, []),
+    };
+    return normalizeTrackerUserState(result);
+}
+
+function deriveInflictedUserInjuryFromAggression({ npc, proactivityResult, attackType, reactionOutcome, margin, resolutionPacket }) {
+    if (!['npc_overpowers', 'npc_succeeds'].includes(reactionOutcome)) return null;
+    const source = [
+        attackType,
+        proactivityResult?.Intent,
+        proactivityResult?.Impulse,
+        resolutionPacket?.CounterPotential && resolutionPacket.CounterPotential !== 'none'
+            ? `counter potential ${resolutionPacket.CounterPotential}`
+            : '',
+    ].filter(Boolean).join(' ');
+    const severity = severityFromAggressionResult(reactionOutcome, margin, resolutionPacket?.CounterPotential);
+    const bodyPart = inferAggressionBodyPart(source);
+    const injuryKind = aggressionInjuryKind(source);
+    const wound = `${severity} ${bodyPart} ${injuryKind}`.replace(/\s+/g, ' ').trim();
+    const status = statusFromInflictedInjury(source, bodyPart, severity);
+
+    return {
+        sourceNpc: npc,
+        attackType,
+        reactionOutcome,
+        severity,
+        condition: conditionFromInflictedSeverity(severity),
+        woundsAdd: [wound],
+        statusAdd: status ? [status] : [],
+        NarrationRule: `${npc}'s ${attackType} causes ${wound}; narrate it as a lasting user injury when describing the NPC attack result, and apply later impairment by severity and affected body function.`,
+    };
+}
+
+function severityFromAggressionResult(reactionOutcome, margin, counterPotential) {
+    if (reactionOutcome === 'npc_overpowers') {
+        if (counterPotential === 'severe' || margin >= 8) return 'severe';
+        return 'moderate';
+    }
+    if (counterPotential === 'severe' && margin >= 3) return 'moderate';
+    return 'minor';
+}
+
+function inferAggressionBodyPart(source) {
+    const text = String(source || '').toLowerCase();
+    if (/\b(grab|grapple|restrain|boundary_physical)\b/.test(text)) return 'upper body';
+    if (/\b(kick|trip|sweep)\b/.test(text)) return 'lower body';
+    return 'body';
+}
+
+function aggressionInjuryKind(source) {
+    const text = String(source || '').toLowerCase();
+    if (/\b(grab|grapple|restrain|boundary_physical)\b/.test(text)) return 'strain';
+    if (/\b(counter|retaliation|violence|attack)\b/.test(text)) return 'injury';
+    return 'bruise';
+}
+
+function mergeUserResultInjuryDelta(current, injury) {
+    const source = current || {
+        condition: 'unchanged',
+        woundsAdd: [],
+        woundsRemove: [],
+        statusAdd: [],
+        statusRemove: [],
+        gearAdd: [],
+        gearRemove: [],
+        inventoryAdd: [],
+        inventoryRemove: [],
+        tasksAdd: [],
+        tasksRemove: [],
+        commitmentsAdd: [],
+        commitmentsRemove: [],
+    };
+    const currentCondition = source.condition === 'unchanged' ? 'healthy' : source.condition;
+    return {
+        ...source,
+        condition: worseTrackerCondition(currentCondition, injury.condition),
+        woundsAdd: applyListDelta(source.woundsAdd, injury.woundsAdd, []),
+        statusAdd: applyListDelta(source.statusAdd, injury.statusAdd, []),
+    };
+}
+
 const USER_IMPAIRMENT_STAGE = Object.freeze({
     none: { rank: 0, penalty: 0 },
     minor: { rank: 1, penalty: -1 },
@@ -1328,10 +1640,13 @@ function matchedImpairmentFunctions(sourceFunctions, actionFunctions) {
     return unique(matched);
 }
 
-function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, context, audit) {
+function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, context, audit, userResultDelta = null) {
     const semantic = ledger.trackerUpdateEngine || {};
     const userBefore = buildPlayerTrackerSnapshot(context);
-    const user = applyTrackerDeltaToState(userBefore, semantic.user, true);
+    let user = applyTrackerDeltaToState(userBefore, semantic.user, true);
+    if (userResultDelta) {
+        user = applyUserResultInjuryDeltaToState(user, userResultDelta);
+    }
     const npcs = {};
 
     for (const [name, value] of Object.entries({
@@ -1350,10 +1665,12 @@ function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, c
             ...applyTrackerDeltaToState(before, delta, false),
         });
     }
+    applyInflictedNpcInjuriesToNpcMap(npcs, trackerSnapshot, relationshipTrackerUpdate?.__inflictedInjuries || []);
 
     audit.push('STEP 6.5: EXECUTE TrackerUpdateEngine EXPLICIT DELTAS');
     audit.push(`6.5a user=${compact(user)}`);
     audit.push(`6.5b npcDeltas=${compact((semantic.npcs || []).map(delta => delta.NPC || NONE))}`);
+    if (userResultDelta) audit.push(`6.5c deterministicUserInjuryDelta=${compact(userResultDelta)}`);
     audit.push('---');
 
     return { user, npcs };
@@ -1561,6 +1878,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
         }]]
         : proactiveAggressive;
     const results = {};
+    let userTrackerDelta = null;
 
     audit.push('STEP 7: EXECUTE NPCAggressionResolution');
     audit.push(`7.1 counterPotential=${counterPotential}`);
@@ -1577,7 +1895,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
             else audit.push('7.2a no immediate counterattack/retaliation trigger');
         audit.push('7.2a AGGRESSION_RESULTS={}');
         audit.push('---');
-        return { results };
+        return { results, userTrackerDelta };
     }
 
     audit.push(`7.3 getUserCoreStats=${compact(userCore)}`);
@@ -1594,18 +1912,30 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
         const userTotal = userDie + userCore.PHY + userImpairmentPenalty;
         const margin = npcTotal - userTotal;
         const ReactionOutcome = aggressionReactionOutcome(margin);
-        results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin, NPCImpairment: npcImpairment, UserImpairment: userImpairment };
+        const inflictedUserInjury = deriveInflictedUserInjuryFromAggression({
+            npc,
+            proactivityResult,
+            attackType,
+            reactionOutcome: ReactionOutcome,
+            margin,
+            resolutionPacket,
+        });
+        if (inflictedUserInjury) {
+            userTrackerDelta = mergeUserResultInjuryDelta(userTrackerDelta, inflictedUserInjury);
+        }
+        results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin, NPCImpairment: npcImpairment, UserImpairment: userImpairment, InflictedUserInjury: inflictedUserInjury || null };
         audit.push(`7.5 ${npc}.npcCore=${compact(npcCore)}`);
         audit.push(`7.5d ${npc}.NPCImpairmentEngine=${compact(npcImpairment)}`);
         audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}+${counterBonus}${npcImpairmentPenalty ? `+impairment(${npcImpairmentPenalty})` : ''}=${npcTotal}`);
         audit.push(`7.5f ${npc}.UserDefenseImpairmentEngine=${compact(userImpairment)}`);
         audit.push(`7.5g userTotal=${userDie}+${userCore.PHY}${userImpairmentPenalty ? `+impairment(${userImpairmentPenalty})` : ''}=${userTotal}`);
+        audit.push(`7.5h ${npc}.InflictedUserInjury=${compact(inflictedUserInjury || {})}`);
         audit.push(`7.6 AGGRESSION_RESULT=${compact(results[npc])}`);
     }
 
     audit.push(`7.7 AGGRESSION_RESULTS=${compact(results)}`);
     audit.push('---');
-    return { results };
+    return { results, userTrackerDelta };
 }
 
 

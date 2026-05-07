@@ -846,7 +846,7 @@ const COMPACT_LEDGER_CONTRACT = [
     '- If no living NPC is relevant, output RelationshipEngine.count=0 and no RelationshipEngine[index] lines.',
     '- All genStats groups must include Rank, MainStat, PHY, MND, CHA.',
     '- TrackerUpdateEngine is explicit-only visual state tracking. Output deltas only from the latest user input and immediate visible context. Use condition=unchanged and (none) lists unless a change is explicitly stated.',
-    '- TrackerUpdateEngine must never rewrite full inventories, gear, wounds, status, tasks, or commitments from silence. Add only explicit new items/effects/tasks. Remove only explicit dropped/spent/used-up/lost/healed/cured/recovered/restored/magically healed/knitted closed/completed/canceled/failed/abandoned entries.',
+    '- TrackerUpdateEngine must never rewrite full inventories, gear, wounds, status, tasks, or commitments from silence. Add only explicit new items/effects/tasks. Remove only explicit dropped/spent/used-up/lost/completed/canceled/failed/abandoned entries. Remove wounds/status only when the text explicitly says the injury or status is healed, cured, recovered, restored, regenerated, magically healed, knitted closed, gone, or no longer impairing.',
     '- TrackerUpdateEngine must not treat a requested, intended, commanded, allowed, promised, predicted, or pending attempted action as an established wound/status/condition change. "I tell him to hit my arm hard enough to bruise it", "I stab him", or "I let the blow land" is not woundsAdd/statusAdd/condition by itself. "My arm is already bruised", "his arm is bleeding", or "I am poisoned" is.',
     '- TrackerUpdateEngine must track only current lasting injuries/status. Do not track momentary pain, impact, a hit landing, being knocked back/down, being winded, losing breath, flinching, staggering, or temporary shock unless the text explicitly establishes an ongoing bruise, cut, bleeding, sprain, break, fracture, poison, sickness, restraint, exhaustion, unconsciousness, or similar continuing state.',
     '- TrackerUpdateEngine NPC entries are only for NPCs with explicit condition, wound, status, or visible gear changes in this turn. NPC inventory is not tracked. If none, output TrackerUpdateEngine.NPC.count=0 and no NPC[index] lines.',
@@ -920,7 +920,7 @@ const POST_REPLY_TRACKER_CONTRACT = [
     '- Impact/result strength is a severity ceiling, not tracker evidence. A strong hit may allow a worse injury only if the final prose actually states that continuing injury.',
     '- Treat injuries/status/gear/inventory/tasks affecting the user/player/persona/active protagonist as TrackerUpdateEngine.User, even when the narration uses the persona name, "they", or body-part possessives instead of the literal word user.',
     '- Use the latest user input only to identify who the acting user/player/persona is and which described body/item/task belongs to them. Do not extract changes from the latest user input unless the same change also appears in the final assistant narration.',
-    '- Remove wounds/status when the prose explicitly says they are healed, cured, recovered, restored, regenerated, stabilized enough to no longer impair, magically healed, knitted closed, removed, or gone. Remove items/tasks only when explicitly dropped, spent, lost, completed, canceled, failed, or abandoned.',
+    '- Remove wounds/status only when the prose explicitly says the injury/status is healed, cured, recovered, restored, regenerated, magically healed, knitted closed, gone, or no longer impairing. Bandaging, splinting, dressing, cleaning, stitching, stabilizing, normal care, or starting treatment does NOT remove injuries unless the prose also says the injury/status is gone, healed, cured, fully recovered, or no longer impairing.',
     '- Never rewrite full tracker lists. Return deltas only.',
     '- Use condition=unchanged unless the narration explicitly changes overall condition.',
     '- NPC entries are only for named or currently tracked NPCs with explicit condition, wound, status, or visible gear changes. NPC inventory is not tracked.',
@@ -1124,7 +1124,7 @@ function buildSemanticContractText(userName, charName, type, trackerSnapshot, pl
         'Execute TrackerUpdateEngine as explicit-only persistent tracker deltas after RelationshipEngine. TrackerUpdateEngine is for display/state memory only, not outcome resolution. ' +
         'TrackerUpdateEngine.User records only explicit changes to the player condition, wounds, status effects, gear, inventory, tasks, and commitments. TrackerUpdateEngine.NPC records only explicit changes to tracked or directly affected NPC condition, wounds, status effects, and visible gear. NPC inventory is not tracked. ' +
         'Use condition=unchanged unless the latest user input or immediate visible context explicitly establishes a completed/current health state as healthy, bruised, wounded, badly_wounded, critical, or dead. Do not set condition from a desired/requested future injury or from an attempted action before narration confirms the result. ' +
-        'Use Add only for explicit gains/new injuries/new effects/new obligations. Use Remove only for explicit healing, curing, recovery, restoration, magical healing, dropping, spending, losing, completing, canceling, failing, or abandoning. Never infer unchanged lists from silence and never output a full replacement list. ' +
+        'Use Add only for explicit gains/new injuries/new effects/new obligations. Use Remove only for explicit dropping, spending, losing, completing, canceling, failing, or abandoning. Remove wounds/status only when the text explicitly says the injury or status is healed, cured, recovered, restored, regenerated, magically healed, knitted closed, gone, or no longer impairing. Bandaging, splinting, dressing, cleaning, stitching, stabilizing, normal care, or starting treatment does not remove injuries unless the text also says the injury/status is gone, healed, cured, fully recovered, or no longer impairing. Never infer unchanged lists from silence and never output a full replacement list. ' +
         'Do not mark wounds/status/condition from requested, intended, commanded, allowed, promised, predicted, or pending attempted actions before deterministic resolution; only track state already explicit as current/completed in context. ' +
         'Do not track momentary pain, impact, knockdown, stagger, breath loss, winded reaction, or temporary shock as wounds/status/condition unless an ongoing injury or continuing status is explicitly stated. ' +
         'For NameGenerationEngine, classify only whether a distinct unnamed person/entity or location needs a proper name in the upcoming response, whether a proper name is already explicit, whether it is a location, and a short 3-letter seed hint if explicit context suggests one. The seed is hidden entropy only and will not be forced into the visible name. The deterministic code generates the final name. Always return NameGenerationEngine.generatedName=(none); do not invent names in the semantic ledger. ' +
@@ -1723,18 +1723,6 @@ function parsePostReplyTrackerText(text) {
     const trackerNpcCount = clampNumber(readNumber(fields, 'TrackerUpdateEngine.NPC.count', 0), 0, 12);
     for (let index = 0; index < trackerNpcCount; index += 1) {
         const prefix = `TrackerUpdateEngine.NPC[${index}]`;
-        const npcRequired = [
-            `${prefix}.NPC`,
-            `${prefix}.condition`,
-            `${prefix}.woundsAdd`,
-            `${prefix}.woundsRemove`,
-            `${prefix}.statusAdd`,
-            `${prefix}.statusRemove`,
-            `${prefix}.gearAdd`,
-            `${prefix}.gearRemove`,
-        ];
-        const missingNpc = npcRequired.filter(key => !fields.has(key));
-        if (missingNpc.length) throw new Error(`post-reply tracker block missing required NPC lines: ${missingNpc.join(', ')}`);
         const npc = cleanScalar(fields.get(`${prefix}.NPC`));
         if (!npc || isNoneValue(npc)) continue;
         npcs.push({
@@ -1774,17 +1762,21 @@ function sanitizePostReplyTrackerDelta(delta, narration) {
 
 function sanitizePostReplyActorDelta(delta, narration, actorName = '') {
     const source = delta && typeof delta === 'object' ? delta : {};
-    const lastingEvidence = hasLastingInjuryEvidence(narration);
     const condition = normalizeTrackerDeltaCondition(source.condition);
     const sanitizedWoundsAdd = filterPersistentTrackerEffects(source.woundsAdd, narration, true);
     const sanitizedStatusAdd = filterPersistentTrackerEffects(source.statusAdd, narration, false);
+    const sanitizedWoundsRemove = filterResolvedTrackerEffects(source.woundsRemove, narration, actorName);
+    const sanitizedStatusRemove = filterResolvedTrackerEffects(source.statusRemove, narration, actorName);
     const actorHasPersistentDelta = sanitizedWoundsAdd.length || sanitizedStatusAdd.length;
     const actorHasConditionEvidence = hasActorScopedConditionEvidence(condition, narration, actorName);
+    const sanitizedCondition = sanitizePostReplyCondition(condition, narration, actorName, actorHasPersistentDelta, actorHasConditionEvidence);
     return {
         ...source,
-        condition: isInjuryCondition(condition) && (!lastingEvidence || (!actorHasPersistentDelta && !actorHasConditionEvidence)) ? 'unchanged' : condition,
+        condition: sanitizedCondition,
         woundsAdd: sanitizedWoundsAdd,
         statusAdd: sanitizedStatusAdd,
+        woundsRemove: sanitizedWoundsRemove,
+        statusRemove: sanitizedStatusRemove,
     };
 }
 
@@ -1792,10 +1784,40 @@ function isInjuryCondition(condition) {
     return ['bruised', 'wounded', 'badly_wounded', 'critical', 'dead'].includes(condition);
 }
 
+function sanitizePostReplyCondition(condition, narration, actorName, actorHasPersistentDelta, actorHasConditionEvidence) {
+    if (condition === 'healthy') {
+        return hasActorScopedResolvedEvidence(narration, actorName) ? 'healthy' : 'unchanged';
+    }
+    if (isInjuryCondition(condition)) {
+        const lastingEvidence = hasLastingInjuryEvidence(narration);
+        return (!lastingEvidence || (!actorHasPersistentDelta && !actorHasConditionEvidence)) ? 'unchanged' : condition;
+    }
+    return condition;
+}
+
 function filterPersistentTrackerEffects(items, narration, requireLastingEvidence) {
     if (!Array.isArray(items)) return [];
     const source = String(narration || '');
     return items.filter(item => isPersistentTrackerEffect(item, source, requireLastingEvidence));
+}
+
+function filterResolvedTrackerEffects(items, narration, actorName = '') {
+    if (!Array.isArray(items)) return [];
+    const source = String(narration || '');
+    return items.filter(item => isResolvedTrackerEffect(item, source, actorName));
+}
+
+function isResolvedTrackerEffect(item, narration, actorName = '') {
+    const text = cleanScalar(item).toLowerCase();
+    if (!text || isNoneValue(text)) return false;
+    if (hasTreatmentOnlyLanguage(text) && !hasResolvedInjuryEvidence(text)) return false;
+    const actorResolved = hasActorScopedResolvedEvidence(narration, actorName);
+    if (hasResolvedInjuryEvidence(text)) return actorResolved || hasResolvedInjuryEvidence(narration);
+    if (!actorResolved) return false;
+    const escaped = escapeRegExp(text);
+    if (!escaped) return false;
+    const resolvedNearEffect = new RegExp(`\\b(?:healed|heals|cured|cures|recovered|recovers|restored|restores|regenerated|regenerates|knitted\\s+closed|sealed|mended|gone|vanished|removed|cleared|no\\s+longer\\s+impairs?|fully\\s+functional|back\\s+to\\s+normal)\\b.{0,100}\\b${escaped}\\b|\\b${escaped}\\b.{0,100}\\b(?:healed|heals|cured|cures|recovered|recovers|restored|restores|regenerated|regenerates|knitted\\s+closed|sealed|mended|gone|vanished|removed|cleared|no\\s+longer\\s+impairs?|fully\\s+functional|back\\s+to\\s+normal)\\b`, 'i');
+    return resolvedNearEffect.test(narration) || hasResolvedEffectReference(text, narration);
 }
 
 function isPersistentTrackerEffect(item, narration, requireLastingEvidence) {
@@ -1815,6 +1837,65 @@ function hasTransientOnlyInjuryLanguage(value) {
 
 function hasLastingInjuryEvidence(value) {
     return /\b(bruis(?:e|ed|ing)|welt(?:ed|s)?|cut|cuts|gashed?|gash|bleed(?:ing|s)?|blood(?:ied|y)?|sprain(?:ed)?|strain(?:ed)?|break|breaks|broken|fractur(?:e|ed)|crack(?:ed)?\s+(?:rib|bone|skull)|cracked|dislocat(?:e|ed)|poison(?:ed|ing)?|venom|sicken(?:ed|ing)?|disease|fever|restrain(?:ed|t)|bound|pinned|immobili[sz]ed|paraly[sz]ed|exhaust(?:ed|ion)|unconscious|concuss(?:ed|ion)?|dazed|stunned|blinded|burn(?:ed|s)?|scarred|severed|amputated|crushed|mangled|torn|impaled|stabbed|pierced|bandag(?:e|ed)|splint(?:ed)?|ongoing\s+breath(?:ing)?\s+trouble|trouble\s+breathing|labou?red\s+breath(?:ing)?|shortness\s+of\s+breath|continu(?:ing|es?)\s+(?:pain|bleeding|dizziness|breath))/i.test(String(value || ''));
+}
+
+function hasTreatmentOnlyLanguage(value) {
+    return /\b(bandag(?:e|ed|ing)|splint(?:ed|ing)?|dress(?:ed|ing)?|clean(?:ed|ing)?|stitch(?:ed|ing)?|sutured?|wrapped|braced|salve|ointment|poultice|compress|stabili[sz](?:e|ed|ing)|treated|treatment|care|tended|first\s+aid|set\s+(?:the\s+)?(?:bone|fracture|limb))\b/i.test(String(value || ''));
+}
+
+function hasResolvedInjuryEvidence(value) {
+    return /\b(healed|heals|healing\s+finishes|fully\s+healed|cured|cures|fully\s+recovered|recovered|recovers|restored|restores|regenerated|regenerates|knitted\s+closed|sealed\s+shut|mended|gone|vanished|removed|cleared|no\s+longer\s+impairs?|no\s+longer\s+(?:hurts|bleeds|aches|limits|hinders)|fully\s+functional|back\s+to\s+normal|works?\s+normally\s+again)\b/i.test(String(value || ''));
+}
+
+function hasResolvedEffectReference(effectText, narration) {
+    const tokens = trackerEffectReferenceTokens(effectText);
+    if (!tokens.length) return false;
+    const source = String(narration || '');
+    const resolved = /\b(healed|heals|healing\s+finishes|fully\s+healed|cured|cures|fully\s+recovered|recovered|recovers|restored|restores|regenerated|regenerates|knitted\s+closed|sealed\s+shut|mended|gone|vanished|removed|cleared|no\s+longer\s+impairs?|no\s+longer\s+(?:hurts|bleeds|aches|limits|hinders)|fully\s+functional|back\s+to\s+normal|works?\s+normally\s+again)\b/i;
+    let matched = 0;
+    for (const token of tokens) {
+        if (nearPattern(source, resolved, new RegExp(`\\b${escapeRegExp(token)}\\b`, 'i'), 160)) matched += 1;
+    }
+    const required = tokens.length <= 2 ? 1 : 2;
+    return matched >= required;
+}
+
+function trackerEffectReferenceTokens(effectText) {
+    const stopWords = new Set([
+        'minor', 'moderate', 'severe', 'critical', 'badly', 'serious', 'seriously', 'gravely',
+        'light', 'heavy', 'deep', 'lasting', 'persistent', 'ongoing', 'temporary', 'current',
+        'left', 'right', 'upper', 'lower', 'body', 'overall', 'general', 'wound', 'wounds',
+        'injury', 'injuries', 'status', 'effect', 'effects', 'condition', 'conditions',
+        'impairment', 'impaired', 'impairs', 'limitation', 'limited', 'limiting', 'painful',
+    ]);
+    const tokens = String(effectText || '').toLowerCase().match(/[a-z]{3,}/g) || [];
+    return Array.from(new Set(tokens.filter(token => !stopWords.has(token)))).slice(0, 6);
+}
+
+function hasActorScopedResolvedEvidence(narration, actorName = '') {
+    const text = String(narration || '');
+    const resolved = resolvedInjuryPattern();
+    const actor = cleanScalar(actorName);
+    if (!actor || isNoneValue(actor)) return resolved.test(text);
+    if (actor.toLowerCase() === 'user') {
+        return hasActorClauseResolvedEvidence(text, /\b(?:you|your|yours|yourself|user|player|protagonist)\b/i, resolved);
+    }
+    return hasActorClauseResolvedEvidence(text, new RegExp(`\\b${escapeRegExp(actor)}\\b`, 'i'), resolved);
+}
+
+function resolvedInjuryPattern() {
+    return /\b(healed|heals|healing\s+finishes|fully\s+healed|cured|cures|fully\s+recovered|recovered|recovers|restored|restores|regenerated|regenerates|knitted\s+closed|sealed\s+shut|mended|gone|vanished|removed|cleared|no\s+longer\s+impairs?|no\s+longer\s+(?:hurts|bleeds|aches|limits|hinders)|fully\s+functional|back\s+to\s+normal|works?\s+normally\s+again)\b/i;
+}
+
+function hasActorClauseResolvedEvidence(text, actorPattern, resolvedPattern) {
+    const source = String(text || '');
+    const clauses = source.split(/(?<=[.!?;])\s+|\s+(?:but|while|though|although|however)\s+/i);
+    for (const clause of clauses) {
+        if (actorPattern.test(clause) && resolvedPattern.test(clause)) return true;
+        actorPattern.lastIndex = 0;
+        resolvedPattern.lastIndex = 0;
+    }
+    return false;
 }
 
 function hasActorScopedConditionEvidence(condition, narration, actorName = '') {
