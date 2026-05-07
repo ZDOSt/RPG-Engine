@@ -179,7 +179,7 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
     const chaos = runChaos(ledger, relationships.handoffs, resolution.packet, dice, audit);
     const name = runNameGeneration(ledger, audit, context, type);
     const proactivity = runProactivity(ledger, relationships.handoffs, resolution.packet, chaos.handoff, dice, audit);
-    const aggression = runAggression(ledger, trackerSnapshot, relationships.trackerUpdate, proactivity.results, resolution.packet, dice, audit);
+    const aggression = runAggression(ledger, trackerSnapshot, relationships.trackerUpdate, proactivity.results, resolution.packet, dice, audit, context);
     const trackerDeltas = runTrackerUpdates(ledger, trackerSnapshot, relationships.trackerUpdate, context, audit);
 
     const trackerUpdate = {
@@ -306,10 +306,15 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     };
     let resultLine = 'No roll';
     let hostilePhysical = false;
+    let userImpairment = noUserImpairment();
+    let npcImpairment = noNpcImpairment();
 
     if (hasStakes === 'N') {
+        userImpairment = evaluateUserImpairment(ledger, context, semantic, goal, null, hasStakes);
         audit.push('2.6 hasStakes=N');
         audit.push('2.6a actions=[a1]');
+        audit.push(`2.6a.1 UserImpairmentEngine=${compact(userImpairment)}`);
+        audit.push(`2.6a.2 NPCImpairmentEngine=${compact(npcImpairment)}`);
         audit.push(`2.6b resolveOutcome=${compact(outcome)}`);
     } else {
         actions = normalizeActionMarkers(semantic.actionCount);
@@ -350,15 +355,22 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
                 audit.push(`2.7l genStats=${compact(targetCore)}`);
                 audit.push(`2.7m targetCore=${compact(targetCore)}`);
                 if (generatedCoreSource.defaultFallback) {
-                    audit.push('2.7m.1 genStatsDefaultFallback=not persisted as explicit NPC stats');
+                audit.push('2.7m.1 genStatsDefaultFallback=not persisted as explicit NPC stats');
                 }
             }
         }
 
+        userImpairment = evaluateUserImpairment(ledger, context, semantic, goal, userStat, hasStakes);
+        const impairmentPenalty = Number(userImpairment?.AppliedToRoll === 'Y' ? userImpairment.RollPenalty : 0);
+        npcImpairment = oppStat !== 'ENV' && oppTargetsNpcFirst
+            ? evaluateNpcImpairment(oppTargetsNpcFirst, ledger, trackerSnapshot, semantic, goal, oppStat, hasStakes)
+            : noNpcImpairment('no opposing NPC roll');
+        const npcImpairmentPenalty = Number(npcImpairment?.AppliedToRoll === 'Y' ? npcImpairment.RollPenalty : 0);
         const atkDie = rollPool[0];
         const defDie = rollPool[1];
-        const atkTot = atkDie + statValue(userCore, userStat);
-        const defTot = oppStat === 'ENV' ? defDie : defDie + statValue(targetCore, oppStat);
+        const userStatValue = statValue(userCore, userStat);
+        const atkTot = atkDie + userStatValue + impairmentPenalty;
+        const defTot = oppStat === 'ENV' ? defDie : defDie + statValue(targetCore, oppStat) + npcImpairmentPenalty;
         const margin = atkTot - defTot;
         const hostileReferee = applyHostilePhysicalIntentHardRules(semantic, audit);
         const hostilePhysicalIntent = hostileReferee.value;
@@ -370,8 +382,12 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
             outcome = nonHostileOutcome(margin);
         }
 
+        audit.push(`2.7n.1 UserImpairmentEngine=${compact(userImpairment)}`);
+        audit.push(`2.7n.2 NPCImpairmentEngine=${compact(npcImpairment)}`);
         audit.push(`2.7o resolveOutcome=atkDie:${atkDie}, atkTot:${atkTot}, defDie:${defDie}, defTot:${defTot}, margin:${margin}, classifyHostilePhysicalIntent:${hostilePhysical ? 'Y' : 'N'} -> ${compact(outcome)}`);
-        resultLine = `1d20(${atkDie}) + ${userStat}(${statValue(userCore, userStat)}) = ${atkTot} vs 1d20(${defDie})${oppStat === 'ENV' ? '' : ` + ${oppStat}(${statValue(targetCore, oppStat)})`} = ${defTot} -> ${outcome.OutcomeTier}`;
+        const impairmentText = impairmentPenalty ? ` + impairment(${impairmentPenalty})` : '';
+        const npcImpairmentText = npcImpairmentPenalty ? ` + impairment(${npcImpairmentPenalty})` : '';
+        resultLine = `1d20(${atkDie}) + ${userStat}(${userStatValue})${impairmentText} = ${atkTot} vs 1d20(${defDie})${oppStat === 'ENV' ? '' : ` + ${oppStat}(${statValue(targetCore, oppStat)})${npcImpairmentText}`} = ${defTot} -> ${outcome.OutcomeTier}`;
     }
 
     const boundaryReferee = applyPhysicalBoundaryPressureHardRules(semantic, targets, {
@@ -396,6 +412,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         BenefitedObservers: showNone(targets.BenefitedObservers),
         HarmedObservers: showNone(targets.HarmedObservers),
         NPCInScene: showNone(npcInScene),
+        UserImpairment: userImpairment,
+        NPCImpairment: npcImpairment,
     };
 
     audit.push(`2.8 HANDOFF=${compact(packet)}`);
@@ -855,7 +873,7 @@ function buildDeterministicName({ mode, profile, gender, seed, registry, context
         return candidate;
     }
 
-    return mode === 'LOCATION' ? 'Morakora' : 'Ruvan';
+    return buildUniqueFallbackName(mode, used);
 }
 
 function buildNameCandidate({ mode, profile, gender, rng, attempt }) {
@@ -910,6 +928,25 @@ function rejectName(name, mode, used) {
     return false;
 }
 
+function buildUniqueFallbackName(mode, used) {
+    const bases = mode === 'LOCATION'
+        ? ['Morakora', 'Navarech', 'Suraesh', 'Tavahold', 'Koravale', 'Zanawatch', 'Davaresh', 'Ishmora', 'Navasai', 'Vorahold', 'Talanor', 'Kazhara']
+        : ['Ruvan', 'Kano', 'Mavi', 'Sena', 'Tavo', 'Vira', 'Dara', 'Niro', 'Zani', 'Aruen', 'Luma', 'Ivo'];
+    for (const base of bases) {
+        if (!rejectName(base, mode, used)) return base;
+    }
+    const syllables = ['ka', 'na', 'ra', 'shi', 'vo', 'li', 'ma', 'ru', 'ta', 'zen', 'ko', 'sa', 'mi', 'yor', 'ven', 'alo'];
+    for (const first of syllables) {
+        for (const second of syllables) {
+            const candidate = mode === 'LOCATION'
+                ? titleName(`mora${first}${second}`)
+                : titleName(`ruv${first}${second}`);
+            if (!used.has(normalizeNameKey(candidate)) && !rejectName(candidate, mode, used)) return candidate;
+        }
+    }
+    return mode === 'LOCATION' ? 'Morakora' : 'Ruvan';
+}
+
 function titleName(value) {
     const compactName = String(value || '').replace(/[^a-z]/gi, '').toLowerCase();
     return compactName ? compactName.charAt(0).toUpperCase() + compactName.slice(1) : 'Akarin';
@@ -957,6 +994,338 @@ function registerGeneratedName(context, name, meta) {
     };
     context.chatMetadata[NAME_REGISTRY_KEY] = root;
     if (typeof context.saveMetadataDebounced === 'function') context.saveMetadataDebounced();
+}
+
+const USER_IMPAIRMENT_STAGE = Object.freeze({
+    none: { rank: 0, penalty: 0 },
+    minor: { rank: 1, penalty: -1 },
+    moderate: { rank: 2, penalty: -2 },
+    severe: { rank: 3, penalty: -4 },
+    critical: { rank: 4, penalty: -6 },
+});
+
+function noUserImpairment(reason = 'no relevant tracked user condition, wound, or status effect') {
+    return {
+        Relevant: 'N',
+        Stage: 'none',
+        RollPenalty: 0,
+        AppliedToRoll: 'N',
+        Source: NONE,
+        SourceType: 'none',
+        AffectedFunction: NONE,
+        MatchedActionFunction: NONE,
+        Reason: reason,
+        NarrationRule: 'No tracked user impairment changes this action.',
+    };
+}
+
+function noNpcImpairment(reason = 'no relevant tracked NPC condition, wound, or status effect') {
+    return {
+        Relevant: 'N',
+        NPC: NONE,
+        Stage: 'none',
+        RollPenalty: 0,
+        AppliedToRoll: 'N',
+        Source: NONE,
+        SourceType: 'none',
+        AffectedFunction: NONE,
+        MatchedActionFunction: NONE,
+        Reason: reason,
+        NarrationRule: 'No tracked NPC impairment changes this action.',
+    };
+}
+
+function evaluateUserImpairment(ledger, context, semantic, goal, userStat, hasStakes) {
+    const user = getEffectiveUserImpairmentState(ledger, context);
+    const sources = collectImpairmentSources(user, true);
+    if (!sources.length) return noUserImpairment();
+
+    const actionText = [
+        semantic?.identifyGoal,
+        semantic?.identifyChallenge,
+        semantic?.explicitMeans,
+        goal,
+        getLatestUserTextFromContext(context),
+    ].filter(Boolean).join(' ');
+    const actionFunctions = classifyUserActionFunctions(actionText, userStat);
+    if (!actionFunctions.length) return noUserImpairment('current action has no classifiable injured function');
+
+    const matches = sources
+        .map(source => ({
+            source,
+            matched: matchedImpairmentFunctions(source.functions, actionFunctions),
+        }))
+        .filter(item => item.matched.length);
+    if (!matches.length) return noUserImpairment('tracked impairments do not affect this action');
+
+    matches.sort((a, b) => USER_IMPAIRMENT_STAGE[b.source.stage].rank - USER_IMPAIRMENT_STAGE[a.source.stage].rank);
+    const best = matches[0];
+    const penalty = USER_IMPAIRMENT_STAGE[best.source.stage]?.penalty ?? 0;
+    const applied = hasStakes === 'Y' && penalty < 0 ? 'Y' : 'N';
+    const matchedText = unique(best.matched).join(', ');
+    const affectedText = unique(best.source.functions).join(', ');
+
+    return {
+        Relevant: 'Y',
+        Stage: best.source.stage,
+        RollPenalty: applied === 'Y' ? penalty : 0,
+        AppliedToRoll: applied,
+        Source: best.source.label,
+        SourceType: best.source.type,
+        AffectedFunction: affectedText || NONE,
+        MatchedActionFunction: matchedText || NONE,
+        Reason: `${best.source.label} affects ${matchedText || 'the attempted action'}`,
+        NarrationRule: `User may attempt the action, but ${best.source.label} makes clean or easy execution inappropriate; narrate pain, limitation, compensation, instability, reduced speed, partial execution, or cost according to the computed outcome.`,
+    };
+}
+
+function evaluateNpcImpairment(npcName, ledger, trackerSnapshot, semantic, goal, npcStat, hasStakes) {
+    if (!isReal(npcName)) return noNpcImpairment('no NPC named');
+    const npc = getEffectiveNpcImpairmentState(npcName, ledger, trackerSnapshot);
+    const sources = collectImpairmentSources(npc, false);
+    if (!sources.length) return noNpcImpairment();
+
+    const actionText = [
+        semantic?.identifyGoal,
+        semantic?.identifyChallenge,
+        semantic?.explicitMeans,
+        goal,
+        npcStat,
+        npcStat === 'PHY' ? 'resist defend brace struggle physical exertion combat' : '',
+        npcStat === 'MND' ? 'focus resist think mental discipline concentration' : '',
+        npcStat === 'CHA' ? 'speak negotiate resist socially presence composure' : '',
+    ].filter(Boolean).join(' ');
+    const actionFunctions = classifyUserActionFunctions(actionText, npcStat);
+    if (!actionFunctions.length) return noNpcImpairment('current NPC opposition has no classifiable injured function');
+
+    const matches = sources
+        .map(source => ({
+            source,
+            matched: matchedImpairmentFunctions(source.functions, actionFunctions),
+        }))
+        .filter(item => item.matched.length);
+    if (!matches.length) return noNpcImpairment('tracked NPC impairments do not affect this roll');
+
+    matches.sort((a, b) => USER_IMPAIRMENT_STAGE[b.source.stage].rank - USER_IMPAIRMENT_STAGE[a.source.stage].rank);
+    const best = matches[0];
+    const penalty = USER_IMPAIRMENT_STAGE[best.source.stage]?.penalty ?? 0;
+    const applied = hasStakes === 'Y' && penalty < 0 ? 'Y' : 'N';
+    const matchedText = unique(best.matched).join(', ');
+    const affectedText = unique(best.source.functions).join(', ');
+
+    return {
+        Relevant: 'Y',
+        NPC: npcName,
+        Stage: best.source.stage,
+        RollPenalty: applied === 'Y' ? penalty : 0,
+        AppliedToRoll: applied,
+        Source: best.source.label,
+        SourceType: best.source.type,
+        AffectedFunction: affectedText || NONE,
+        MatchedActionFunction: matchedText || NONE,
+        Reason: `${npcName}'s ${best.source.label} affects ${matchedText || 'their roll'}`,
+        NarrationRule: `${npcName} may still act, but ${best.source.label} makes clean or easy execution inappropriate; narrate pain, limitation, compensation, instability, reduced speed, partial execution, or cost according to the computed outcome.`,
+    };
+}
+
+function evaluateNpcAggressionImpairment(npcName, trackerUpdate, trackerSnapshot, proactivityResult) {
+    if (!isReal(npcName)) return noNpcImpairment('no NPC named');
+    const state = normalizeTrackerEntry(trackerUpdate?.[npcName] || trackerSnapshot?.[npcName] || {});
+    const sources = collectImpairmentSources(state, false);
+    if (!sources.length) return noNpcImpairment();
+
+    const actionText = [
+        proactivityResult?.Intent,
+        proactivityResult?.Impulse,
+        'attack strike shove grab grapple weapon physical combat',
+    ].filter(Boolean).join(' ');
+    const actionFunctions = classifyUserActionFunctions(actionText, 'PHY');
+
+    const matches = sources
+        .map(source => ({
+            source,
+            matched: matchedImpairmentFunctions(source.functions, actionFunctions),
+        }))
+        .filter(item => item.matched.length);
+    if (!matches.length) return noNpcImpairment('tracked NPC impairments do not affect this attack');
+
+    matches.sort((a, b) => USER_IMPAIRMENT_STAGE[b.source.stage].rank - USER_IMPAIRMENT_STAGE[a.source.stage].rank);
+    const best = matches[0];
+    const penalty = USER_IMPAIRMENT_STAGE[best.source.stage]?.penalty ?? 0;
+    const matchedText = unique(best.matched).join(', ');
+    const affectedText = unique(best.source.functions).join(', ');
+
+    return {
+        Relevant: 'Y',
+        NPC: npcName,
+        Stage: best.source.stage,
+        RollPenalty: penalty,
+        AppliedToRoll: penalty < 0 ? 'Y' : 'N',
+        Source: best.source.label,
+        SourceType: best.source.type,
+        AffectedFunction: affectedText || NONE,
+        MatchedActionFunction: matchedText || NONE,
+        Reason: `${npcName}'s ${best.source.label} affects ${matchedText || 'their attack'}`,
+        NarrationRule: `${npcName} may still attack, but ${best.source.label} limits clean execution; narrate pain, compensation, instability, reduced force, partial execution, or cost according to the computed aggression result.`,
+    };
+}
+
+function evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult) {
+    const semantic = {
+        identifyGoal: resolutionPacket?.GOAL,
+        identifyChallenge: [
+            'defend evade dodge block brace resist survive avoid counterattack retaliation proactive attack',
+            proactivityResult?.Intent,
+            proactivityResult?.Impulse,
+        ].filter(Boolean).join(' '),
+        explicitMeans: [
+            'defensive reaction against NPC aggression',
+            resolutionPacket?.CounterPotential && resolutionPacket.CounterPotential !== 'none'
+                ? `counter potential ${resolutionPacket.CounterPotential}`
+                : '',
+        ].filter(Boolean).join(' '),
+    };
+    return evaluateUserImpairment(ledger, context, semantic, 'DefendAgainstNpcAggression', 'PHY', 'Y');
+}
+
+function getEffectiveUserImpairmentState(ledger, context) {
+    const saved = buildPlayerTrackerSnapshot(context);
+    const currentTurnDelta = ledger?.trackerUpdateEngine?.user;
+    if (!currentTurnDelta || typeof currentTurnDelta !== 'object') return saved;
+    return applyTrackerDeltaToState(saved, currentTurnDelta, true);
+}
+
+function getEffectiveNpcImpairmentState(npcName, ledger, trackerSnapshot) {
+    const saved = normalizeTrackerEntry(trackerSnapshot?.[npcName] || {});
+    const delta = (ledger?.trackerUpdateEngine?.npcs || []).find(item => sameName(item?.NPC, npcName));
+    if (!delta || typeof delta !== 'object') return saved;
+    return applyTrackerDeltaToState(saved, delta, false);
+}
+
+function collectImpairmentSources(state, includePlayerFields) {
+    const user = includePlayerFields
+        ? normalizeTrackerUserState(state || {})
+        : normalizeTrackerEntry(state || {});
+    const sources = [];
+    if (user.condition && user.condition !== 'healthy') {
+        sources.push({
+            type: 'condition',
+            label: user.condition,
+            stage: stageFromCondition(user.condition),
+            functions: user.condition === 'critical' || user.condition === 'dead'
+                ? ['whole_body', 'physical_exertion', 'stamina', 'focus']
+                : ['physical_exertion', 'stamina'],
+        });
+    }
+    for (const wound of user.wounds || []) {
+        const text = String(wound || '').trim();
+        if (!text) continue;
+        sources.push({
+            type: 'wound',
+            label: text,
+            stage: stageFromImpairmentText(text, 'wound'),
+            functions: functionsFromImpairmentText(text, 'wound'),
+        });
+    }
+    for (const status of user.statusEffects || []) {
+        const text = String(status || '').trim();
+        if (!text) continue;
+        sources.push({
+            type: 'status',
+            label: text,
+            stage: stageFromImpairmentText(text, 'status'),
+            functions: functionsFromImpairmentText(text, 'status'),
+        });
+    }
+    return sources.filter(source => source.stage !== 'none');
+}
+
+function stageFromCondition(condition) {
+    if (condition === 'bruised') return 'minor';
+    if (condition === 'wounded') return 'moderate';
+    if (condition === 'badly_wounded') return 'severe';
+    if (condition === 'critical' || condition === 'dead') return 'critical';
+    return 'none';
+}
+
+function stageFromImpairmentText(value, type) {
+    const text = String(value || '').toLowerCase();
+    if (/\b(dead|dying|fatal|severed|amputated|missing|shattered|crushed|paraly[sz]ed|paralysis|unconscious|ruptured|spine broken|broken spine|neck broken|broken neck)\b/.test(text)) return 'critical';
+    if (/\b(broken|fractured|dislocated|crippled|deep|heavy bleeding|bleeding heavily|gouged|impaled|stabbed|pierced|torn|mangled|burned badly|blinded)\b/.test(text)) return 'severe';
+    if (/\b(bleeding|sprained|strained|gashed|cut|burned|poisoned|sickened|dazed|stunned|concussed|concussion|head injury|exhausted|numb|wounded)\b/.test(text)) return 'moderate';
+    if (/\b(bruised|bruise|scratch|scratched|sore|shallow|minor|nick|aching|winded|fatigued)\b/.test(text)) return 'minor';
+    return type === 'status' ? 'moderate' : 'minor';
+}
+
+function functionsFromImpairmentText(value, type) {
+    const text = String(value || '').toLowerCase();
+    const functions = [];
+    const add = (...items) => items.forEach(item => functions.push(item));
+
+    if (/\b(leg|knee|ankle|foot|feet|thigh|calf|hip|shin)\b/.test(text)) add('lower_body', 'mobility', 'balance', 'physical_exertion');
+    if (/\b(arm|hand|wrist|elbow|shoulder|finger|thumb)\b/.test(text)) add('upper_body', 'grip', 'physical_exertion');
+    if (/\b(rib|ribs|chest|lung|lungs|breath|breathing)\b/.test(text)) add('torso', 'breath', 'stamina', 'physical_exertion');
+    if (/\b(back|spine|spinal|waist)\b/.test(text)) add('torso', 'mobility', 'balance', 'physical_exertion');
+    if (/\b(stomach|abdomen|gut|side)\b/.test(text)) add('torso', 'stamina', 'physical_exertion');
+    if (/\b(head|skull|brain|concussed|concussion|head injury|dazed|stunned|migraine|vertigo)\b/.test(text) || /\bconcuss/.test(text)) add('head', 'focus', 'balance');
+    if (/\b(eye|eyes|vision|blind|blinded)\b/.test(text)) add('vision', 'aim', 'combat');
+    if (/\b(ear|ears|hearing|deaf|deafened)\b/.test(text)) add('hearing');
+    if (/\b(jaw|mouth|tongue|throat|voice|vocal)\b/.test(text)) add('speech');
+    if (/\b(poison|poisoned|venom|sick|sickened|disease|fever|blood loss|bleeding|exhaust|fatigue|fatigued|drained)\b/.test(text)) add('systemic', 'stamina', 'focus');
+    if (/\b(paraly[sz]ed|paralysis|numb|frozen|bound|restrained|pinned|immobilized)\b/.test(text)) add('whole_body', 'mobility', 'physical_exertion');
+    if (!functions.length) add(type === 'status' ? 'systemic' : 'physical_exertion');
+    return unique(functions);
+}
+
+function classifyUserActionFunctions(actionText, userStat) {
+    const text = String(actionText || '').toLowerCase();
+    const functions = [];
+    const add = (...items) => items.forEach(item => functions.push(item));
+
+    if (/\b(jump|leap|vault|hop|clear the fence|clear a fence)\b/.test(text)) add('mobility', 'lower_body', 'balance', 'physical_exertion');
+    if (/\b(run|sprint|dash|chase|flee|dodge|evade|sidestep|lunge|charge|rush|walk|stand)\b/.test(text)) add('mobility', 'lower_body', 'balance', 'physical_exertion');
+    if (/\b(climb|scale|scramble|crawl)\b/.test(text)) add('mobility', 'upper_body', 'lower_body', 'grip', 'physical_exertion');
+    if (/\b(kick|knee|stomp)\b/.test(text)) add('lower_body', 'balance', 'combat', 'physical_exertion');
+    if (/\b(punch|strike|slash|stab|cut|swing|elbow|grab|grapple|wrestle|shove|push|pull|lift|carry|throw|shield|parry|block)\b/.test(text)) add('upper_body', 'grip', 'combat', 'physical_exertion');
+    if (/\b(aim|shoot|bow|crossbow|sling|throwing knife|firearm)\b/.test(text)) add('upper_body', 'grip', 'aim', 'vision', 'combat', 'physical_exertion');
+    if (/\b(sword|axe|spear|dagger|knife|mace|staff|weapon)\b/.test(text)) add('upper_body', 'grip', 'combat', 'physical_exertion');
+    if (/\b(cast|spell|magic|focus|concentrat|ritual|hex|curse|invoke|channel|enchant|mana|arcane|sigil|incantation)\b/.test(text)) add('focus');
+    if (/\b(speak|talk|persuad|convince|lie|bluff|intimidat|negotiate|sing|shout|whisper|call out)\b/.test(text)) add('speech');
+    if (/\b(look|see|watch|search|read|inspect|study|track)\b/.test(text)) add('vision', 'focus');
+    if (/\b(swim|hold breath|breathe|breath)\b/.test(text)) add('breath', 'stamina', 'physical_exertion');
+
+    if (!functions.length) {
+        if (userStat === 'PHY') add('physical_exertion');
+        else if (userStat === 'MND') add('focus');
+        else if (userStat === 'CHA') add('speech');
+    }
+
+    return unique(functions);
+}
+
+function matchedImpairmentFunctions(sourceFunctions, actionFunctions) {
+    const source = new Set(sourceFunctions || []);
+    const action = new Set(actionFunctions || []);
+    if (source.has('whole_body')) return Array.from(action);
+    const matched = Array.from(action).filter(item => source.has(item));
+    if (source.has('systemic')) {
+        for (const item of ['stamina', 'focus', 'physical_exertion', 'mobility', 'combat']) {
+            if (action.has(item) && !matched.includes(item)) matched.push(item);
+        }
+    }
+    if (source.has('stamina') && (action.has('physical_exertion') || action.has('mobility') || action.has('breath'))) {
+        if (!matched.includes('stamina')) matched.push('stamina');
+    }
+    if (source.has('vision') && (action.has('aim') || action.has('combat') || action.has('vision'))) {
+        if (!matched.includes('vision')) matched.push('vision');
+    }
+    if (source.has('focus') && (action.has('focus') || action.has('combat'))) {
+        if (!matched.includes('focus')) matched.push('focus');
+    }
+    if (source.has('speech') && action.has('speech')) {
+        if (!matched.includes('speech')) matched.push('speech');
+    }
+    return unique(matched);
 }
 
 function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, context, audit) {
@@ -1153,7 +1522,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
     return { results };
 }
 
-function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResults, resolutionPacket, dice, audit) {
+function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResults, resolutionPacket, dice, audit, context) {
     const userCore = getUserCoreStats(ledger);
     const counterPotential = resolutionPacket?.CounterPotential || 'none';
     const counterAllowed = ['light', 'medium', 'severe'].includes(counterPotential);
@@ -1215,16 +1584,22 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
 
     for (const [npc, proactivityResult] of aggressive) {
         const npcCore = normalizeCore(trackerUpdate[npc]?.currentCoreStats || trackerSnapshot[npc]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
+        const npcImpairment = evaluateNpcAggressionImpairment(npc, trackerUpdate, trackerSnapshot, proactivityResult);
+        const npcImpairmentPenalty = Number(npcImpairment?.AppliedToRoll === 'Y' ? npcImpairment.RollPenalty : 0);
+        const userImpairment = evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult);
+        const userImpairmentPenalty = Number(userImpairment?.AppliedToRoll === 'Y' ? userImpairment.RollPenalty : 0);
         const npcDie = dice.d20();
         const userDie = dice.d20();
-        const npcTotal = npcDie + npcCore.PHY + counterBonus;
-        const userTotal = userDie + userCore.PHY;
+        const npcTotal = npcDie + npcCore.PHY + counterBonus + npcImpairmentPenalty;
+        const userTotal = userDie + userCore.PHY + userImpairmentPenalty;
         const margin = npcTotal - userTotal;
         const ReactionOutcome = aggressionReactionOutcome(margin);
-        results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin };
+        results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin, NPCImpairment: npcImpairment, UserImpairment: userImpairment };
         audit.push(`7.5 ${npc}.npcCore=${compact(npcCore)}`);
-        audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}+${counterBonus}=${npcTotal}`);
-        audit.push(`7.5f userTotal=${userDie}+${userCore.PHY}=${userTotal}`);
+        audit.push(`7.5d ${npc}.NPCImpairmentEngine=${compact(npcImpairment)}`);
+        audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}+${counterBonus}${npcImpairmentPenalty ? `+impairment(${npcImpairmentPenalty})` : ''}=${npcTotal}`);
+        audit.push(`7.5f ${npc}.UserDefenseImpairmentEngine=${compact(userImpairment)}`);
+        audit.push(`7.5g userTotal=${userDie}+${userCore.PHY}${userImpairmentPenalty ? `+impairment(${userImpairmentPenalty})` : ''}=${userTotal}`);
         audit.push(`7.6 AGGRESSION_RESULT=${compact(results[npc])}`);
     }
 
@@ -1389,8 +1764,17 @@ function isVerbalIntimacyRequest(source) {
 }
 
 function hasUserInitiatedIntimateContact(source) {
+    if (isPureVerbalIntimacyPermissionRequest(source)) return false;
     return /\b(i|user|{{user}})\s+(?:try|tries|tried|attempt|attempts|attempted|lean|leans|leaned|move|moves|moved|reach|reaches|reached|press|presses|pressed|pull|pulls|pulled|grab|grabs|grabbed|touch|touches|touched|kiss|kisses|kissed|cup|cups|cupped|caress|caresses|caressed|grope|gropes|groped)\b/.test(source)
         && /\b(kiss|lips|mouth|touch|hold|embrace|body|waist|chin|face|cheek|neck|hair|hand|caress|grope|undress|clothes|shirt|dress|skirt|underwear)\b/.test(source);
+}
+
+function isPureVerbalIntimacyPermissionRequest(source) {
+    const text = String(source || '').toLowerCase();
+    const hasContactAction = /\b(i|user|{{user}})\s+(?:try|tries|tried|attempt|attempts|attempted|lean|leans|leaned|move|moves|moved|reach|reaches|reached|press|presses|pressed|pull|pulls|pulled|grab|grabs|grabbed|touch|touches|touched|kiss|kisses|kissed|cup|cups|cupped|caress|caresses|caressed|grope|gropes|groped)\b/.test(text)
+        && !/\b(?:can|could|may|might|would)\s+i\s+(?:kiss|touch|hold|embrace|sleep with|caress|grope)\b/.test(text);
+    const hasPermissionRequest = /\b(?:i\s+ask|i\s+request|i\s+say|i\s+whisper|i\s+tell|can\s+i|could\s+i|may\s+i|would\s+you\s+let\s+me|will\s+you\s+let\s+me|do\s+you\s+want\s+me\s+to|would\s+you\s+like\s+me\s+to)\b.{0,120}\b(?:kiss|touch|hold|embrace|sleep with|sex|intimacy|intimate|bed|caress)\b/.test(text);
+    return hasPermissionRequest && !hasContactAction;
 }
 
 function isObjectBoundaryContest(source) {

@@ -12,7 +12,7 @@ import {
     formatNarratorPromptContext,
     formatPreFlightDebug,
 } from './pre-flight.js';
-import { extractSemanticLedger, SEMANTIC_PREFLIGHT_STOP_SENTINEL, sendSemanticProfileTextRequest } from './semantic-extractor.js';
+import { extractPostReplyTrackerDelta, extractSemanticLedger, POST_REPLY_TRACKER_STOP_SENTINEL, SEMANTIC_PREFLIGHT_STOP_SENTINEL, sendSemanticProfileTextRequest } from './semantic-extractor.js';
 import { buildPlayerTrackerSnapshot, buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
 
 const EXTENSION_NAME = 'Structured Preflight Engines';
@@ -140,6 +140,7 @@ const state = {
     progressToast: null,
     progressToasts: new Set(),
     pendingRunCleanupTimer: null,
+    processingPostReplyTracker: false,
     playerSetupBusy: false,
 };
 
@@ -1059,6 +1060,123 @@ function buildTrackerUpdateForPersistence(displaySnapshot) {
         npcs: normalizeDisplayTrackerNpcs(displaySnapshot?.npcs || {}),
         user: normalizeTrackerUserState(displaySnapshot?.user || {}),
     };
+}
+
+function mergePostReplyTrackerDelta(snapshot, delta) {
+    if (!snapshot || !delta) return snapshot;
+    const merged = clone(snapshot);
+    merged.user = applyTrackerDeltaToUserState(merged.user || {}, delta.user || {});
+    const npcs = normalizeDisplayTrackerNpcs(merged.npcs || {});
+    for (const npcDelta of delta.npcs || []) {
+        const rawName = String(npcDelta?.NPC || '').trim();
+        if (!isRealName(rawName)) continue;
+        const name = findExistingTrackerName(npcs, rawName) || rawName;
+        const before = npcs[name] || {};
+        npcs[name] = normalizeTrackerEntry({
+            ...before,
+            ...applyTrackerDeltaToNpcState(before, npcDelta),
+        });
+    }
+    merged.npcs = npcs;
+    merged.postReplyTracker = {
+        updatedAt: Date.now(),
+        userChanged: trackerDeltaHasChanges(delta.user, true),
+        npcChanged: (delta.npcs || []).some(item => trackerDeltaHasChanges(item, false)),
+    };
+    return merged;
+}
+
+function findExistingTrackerName(npcs, wantedName) {
+    const wanted = String(wantedName || '').trim().toLowerCase();
+    if (!wanted) return '';
+    return Object.keys(npcs || {}).find(name => name.toLowerCase() === wanted) || '';
+}
+
+function trackerDeltaHasChanges(delta, includePlayerFields) {
+    if (!delta || typeof delta !== 'object') return false;
+    if (normalizeTrackerDeltaCondition(delta.condition) !== 'unchanged') return true;
+    const fields = includePlayerFields
+        ? ['woundsAdd', 'woundsRemove', 'statusAdd', 'statusRemove', 'gearAdd', 'gearRemove', 'inventoryAdd', 'inventoryRemove', 'tasksAdd', 'tasksRemove', 'commitmentsAdd', 'commitmentsRemove']
+        : ['woundsAdd', 'woundsRemove', 'statusAdd', 'statusRemove', 'gearAdd', 'gearRemove'];
+    return fields.some(field => Array.isArray(delta[field]) && delta[field].length > 0);
+}
+
+function applyTrackerDeltaToUserState(before, delta) {
+    const source = normalizeTrackerUserState(before || {});
+    const result = {
+        condition: source.condition,
+        wounds: [...source.wounds],
+        statusEffects: [...source.statusEffects],
+        gear: [...source.gear],
+        inventory: [...source.inventory],
+        tasks: [...source.tasks],
+        commitments: [...source.commitments],
+    };
+    const condition = normalizeTrackerDeltaCondition(delta?.condition);
+    if (condition !== 'unchanged') result.condition = condition;
+    result.wounds = applyTrackerListDelta(result.wounds, delta?.woundsAdd, delta?.woundsRemove);
+    result.statusEffects = applyTrackerListDelta(result.statusEffects, delta?.statusAdd, delta?.statusRemove);
+    result.gear = applyTrackerListDelta(result.gear, delta?.gearAdd, delta?.gearRemove);
+    result.inventory = applyTrackerListDelta(result.inventory, delta?.inventoryAdd, delta?.inventoryRemove);
+    result.tasks = applyTrackerListDelta(result.tasks, delta?.tasksAdd, delta?.tasksRemove);
+    result.commitments = applyTrackerListDelta(result.commitments, delta?.commitmentsAdd, delta?.commitmentsRemove);
+    return normalizeTrackerUserState(result);
+}
+
+function applyTrackerDeltaToNpcState(before, delta) {
+    const source = normalizeTrackerEntry(before || {});
+    const result = {
+        condition: source.condition,
+        wounds: [...source.wounds],
+        statusEffects: [...source.statusEffects],
+        gear: [...source.gear],
+    };
+    const condition = normalizeTrackerDeltaCondition(delta?.condition);
+    if (condition !== 'unchanged') result.condition = condition;
+    result.wounds = applyTrackerListDelta(result.wounds, delta?.woundsAdd, delta?.woundsRemove);
+    result.statusEffects = applyTrackerListDelta(result.statusEffects, delta?.statusAdd, delta?.statusRemove);
+    result.gear = applyTrackerListDelta(result.gear, delta?.gearAdd, delta?.gearRemove);
+    return result;
+}
+
+function normalizeTrackerDeltaCondition(value) {
+    const text = String(value ?? 'unchanged').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    return ['unchanged', 'healthy', 'bruised', 'wounded', 'badly_wounded', 'critical', 'dead'].includes(text) ? text : 'unchanged';
+}
+
+function applyTrackerListDelta(current, add, remove) {
+    const normalized = [];
+    const seen = new Set();
+    const push = item => {
+        const text = cleanTrackerDeltaText(item);
+        if (!text) return;
+        const key = text.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        normalized.push(text);
+    };
+    for (const item of current || []) push(item);
+    const removeKeys = new Set((Array.isArray(remove) ? remove : [])
+        .map(cleanTrackerDeltaText)
+        .filter(Boolean)
+        .map(text => text.toLowerCase()));
+    const filtered = normalized.filter(item => !removeKeys.has(item.toLowerCase()));
+    const filteredSeen = new Set(filtered.map(item => item.toLowerCase()));
+    for (const item of add || []) {
+        const text = cleanTrackerDeltaText(item);
+        if (!text) continue;
+        const key = text.toLowerCase();
+        if (filteredSeen.has(key)) continue;
+        filteredSeen.add(key);
+        filtered.push(text);
+    }
+    return filtered.slice(0, 40);
+}
+
+function cleanTrackerDeltaText(value) {
+    const text = String(value ?? '').trim().replace(/^\[/, '').replace(/\]$/, '').replace(/^["']|["']$/g, '').trim();
+    if (!text || ['(none)', 'none', 'null', 'n/a', 'unchanged'].includes(text.toLowerCase())) return '';
+    return text.slice(0, 140);
 }
 
 function applyDisplayPresenceCorrections(presentNames, trackedNames, latestUserText) {
@@ -2289,52 +2407,101 @@ async function prependComputedDebug(messageId, type) {
     }
 
     clearPendingRunCleanupTimer();
+    state.processingPostReplyTracker = true;
 
-    message.extra = message.extra || {};
+    try {
+        message.extra = message.extra || {};
 
-    const currentText = String(message.mes ?? '');
-    const displayText = message.extra.display_text == null ? null : String(message.extra.display_text);
-    const visibleText = stripComputedDebugPrefix(displayText ?? currentText);
-    const narrationText = sanitizeAssistantNarration(visibleText);
+        const currentText = String(message.mes ?? '');
+        const displayText = message.extra.display_text == null ? null : String(message.extra.display_text);
+        const visibleText = stripComputedDebugPrefix(displayText ?? currentText);
+        const narrationText = sanitizeAssistantNarration(visibleText);
+        const debugPrefix = state.lastDebugPrefix;
+        const pendingRun = state.pendingRun;
+        let postReplyTrackerWarning = null;
 
-    const root = getTrackerRoot(context);
-    if (root && state.pendingRun) {
-        const trackerDisplaySnapshot = buildDisplayTrackerSnapshot({
-            messageKey,
-            pendingRun: state.pendingRun,
-            report: state.pendingRun.report,
-        });
-        await saveTrackerUpdate(context, buildTrackerUpdateForPersistence(trackerDisplaySnapshot));
-        root.snapshots[messageKey] = {
-            before: clone(state.pendingRun.trackerBefore),
-            beforeUser: clone(state.pendingRun.userBefore),
-            after: clone(trackerDisplaySnapshot.npcs),
-            afterUser: clone(trackerDisplaySnapshot.user),
-            display: clone(trackerDisplaySnapshot),
-            type: state.pendingRun.type,
-            savedAt: Date.now(),
-        };
-        setMessageTrackerDisplaySnapshot(message, trackerDisplaySnapshot);
-        await persistMetadata(context);
-        state.pendingRun = null;
+        const root = getTrackerRoot(context);
+        if (root && pendingRun) {
+            let trackerDisplaySnapshot = buildDisplayTrackerSnapshot({
+                messageKey,
+                pendingRun,
+                report: pendingRun.report,
+            });
+            try {
+                const postReplyDelta = await withSemanticGenerationSettings(async settings => {
+                    const previousBypassPromptReady = state.bypassPromptReady;
+                    state.bypassPromptReady = true;
+                    if (!settings?.semanticProfileId) {
+                        addEphemeralStoppingString(POST_REPLY_TRACKER_STOP_SENTINEL);
+                    }
+                    try {
+                        return await extractPostReplyTrackerDelta(
+                            context,
+                            narrationText,
+                            trackerDisplaySnapshot,
+                            {
+                                semanticProfileId: settings?.semanticProfileId,
+                                semanticProfileName: settings?.semanticProfileName,
+                                semanticPreset: settings?.semanticPreset,
+                                latestUserText: pendingRun.latestUserText,
+                            },
+                        );
+                    } finally {
+                        if (!settings?.semanticProfileId) {
+                            flushEphemeralStoppingStrings();
+                        }
+                        state.bypassPromptReady = previousBypassPromptReady;
+                    }
+                });
+                trackerDisplaySnapshot = mergePostReplyTrackerDelta(trackerDisplaySnapshot, postReplyDelta);
+            } catch (error) {
+                postReplyTrackerWarning = error instanceof Error ? error.message : String(error);
+                console.warn(`[${EXTENSION_NAME}] post-reply tracker pass failed; keeping pre-reply tracker snapshot.`, error);
+                try {
+                    globalThis.toastr?.warning?.(
+                        'Post-reply tracker update failed; keeping the pre-reply tracker snapshot.',
+                        EXTENSION_NAME,
+                        { timeOut: 9000, extendedTimeOut: 9000 },
+                    );
+                } catch {
+                    // Toasts are best-effort only.
+                }
+            }
+            await saveTrackerUpdate(context, buildTrackerUpdateForPersistence(trackerDisplaySnapshot));
+            root.snapshots[messageKey] = {
+                before: clone(pendingRun.trackerBefore),
+                beforeUser: clone(pendingRun.userBefore),
+                after: clone(trackerDisplaySnapshot.npcs),
+                afterUser: clone(trackerDisplaySnapshot.user),
+                display: clone(trackerDisplaySnapshot),
+                type: pendingRun.type,
+                postReplyTrackerWarning,
+                savedAt: Date.now(),
+            };
+            setMessageTrackerDisplaySnapshot(message, trackerDisplaySnapshot);
+            await persistMetadata(context);
+            if (state.pendingRun === pendingRun) state.pendingRun = null;
+        }
+
+        message.mes = narrationText;
+        message.extra.display_text = `${debugPrefix}\n\n${narrationText}`;
+        state.lastDebugKey = messageKey;
+        state.lastDebugPrefix = '';
+
+        if (typeof context.updateMessageBlock === 'function') {
+            context.updateMessageBlock(messageId, message);
+        }
+        renderTrackerDisplayBlockForMessage(messageId, null, context);
+
+        if (typeof context.saveChat === 'function') {
+            await context.saveChat();
+        }
+
+        clearRuntimePrompts();
+        state.chatSignature = captureChatSignature(context);
+    } finally {
+        state.processingPostReplyTracker = false;
     }
-
-    message.mes = narrationText;
-    message.extra.display_text = `${state.lastDebugPrefix}\n\n${narrationText}`;
-    state.lastDebugKey = messageKey;
-    state.lastDebugPrefix = '';
-
-    if (typeof context.updateMessageBlock === 'function') {
-        context.updateMessageBlock(messageId, message);
-    }
-    renderTrackerDisplayBlockForMessage(messageId, null, context);
-
-    if (typeof context.saveChat === 'function') {
-        await context.saveChat();
-    }
-
-    clearRuntimePrompts();
-    state.chatSignature = captureChatSignature(context);
 }
 
 async function handleMessageDeleted(newLength) {
@@ -2415,9 +2582,10 @@ function handleGenerationLifecycleEnd() {
     state.pendingGeneration = null;
     clearRuntimePrompts();
 
-    if (state.pendingRun && !state.pendingRunCleanupTimer) {
+    if (state.pendingRun && !state.processingPostReplyTracker && !state.pendingRunCleanupTimer) {
         state.pendingRunCleanupTimer = setTimeout(() => {
             state.pendingRunCleanupTimer = null;
+            if (state.processingPostReplyTracker) return;
             if (!state.pendingRun) return;
             state.pendingRun = null;
             state.lastDebugPrefix = '';

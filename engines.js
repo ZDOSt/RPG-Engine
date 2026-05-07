@@ -508,9 +508,9 @@ function NameGenerationEngine(context, seed, explicitNameKnown, isLocation=false
     PURPOSE:
 'Use for any distinct NPC/entity or location that is newly introduced, present, mentioned, or about to be mentioned in the response. If no explicit proper name already exists, generate one immediately before output. Distinct unnamed entities must not remain generic if they are introduced as specific individuals or places.',
     SEED:
-'Seed is sacred. Name MUST start with this exact 3-letter seed. Never modify, reorder, or remove it. If seed is invalid, repair to nearest valid 3-letter form when possible; otherwise use fallback Aka.',
+'Seed is hidden deterministic entropy, not visible name text. Use it only to stabilize deterministic variation. It does NOT have to appear at the start of the final name.',
     STYLE:
-'Invent creative, pronounceable, real-but-unplaceable names. Use curated seed plus randomized phonotactic middle/ending syllables. Mix phonetic influence freely from East Asian, Polynesian, Caucasian, African, Mesoamerican, Turkic, Dravidian, and Uralic sound habits. Ban pure Western-European fantasy drift, Tolkien-esque elvish, stock fantasy/JRPG naming, and overly ordinary modern-Western names.',
+'Invent creative, pronounceable, real-but-unplaceable names. Use deterministic curated syllable pools plus seed-driven phonotactic variation. Mix phonetic influence freely from East Asian, Polynesian, Caucasian, African, Mesoamerican, Turkic, Dravidian, and Uralic sound habits. Ban pure Western-European fantasy drift, Tolkien-esque elvish, stock fantasy/JRPG naming, and overly ordinary modern-Western names.',
     SHAPE:
 'Append only pronounceable syllables. NO 3+ consecutive vowels. NO 3+ consecutive consonants. PERSON total length 5-10. LOCATION total length 7-14. LOCATION must feel geographic / compound / place-like and must not read like a person name.'
   });
@@ -524,8 +524,8 @@ function NameGenerationEngine(context, seed, explicitNameKnown, isLocation=false
     else -> N
 
   normalizeSeed(seed):
-    if seed is exact 3 letters -> keep
-    else -> repair to nearest valid 3-letter form without changing order when possible
+    if seed provides 3+ letters -> keep first stable 3-letter hint as hidden entropy
+    else -> repair to nearest valid 3-letter hint when possible
     if still invalid -> Aka
 
   detectMode(context, isLocation):
@@ -548,15 +548,14 @@ function NameGenerationEngine(context, seed, explicitNameKnown, isLocation=false
 
   buildName(mode, profile, gender, context, seed):
     if mode=PERSON:
-      generate exactly one person/entity name starting with exact seed
+      generate exactly one person/entity name from deterministic syllable pools using seed as hidden entropy
       use compact call-name shape; gender affects weighting only, never hard stereotype
     else:
-      generate exactly one location name starting with exact seed
+      generate exactly one location name from deterministic syllable pools using seed as hidden entropy
       use geographic / compound / place-like syllable shape
 
   reject(name, mode, seed):
     policy: FYW
-    if name does not start with exact seed -> Y
     if mode=PERSON and (length(name)<5 || length(name)>10) -> Y
     if mode=LOCATION and (length(name)<7 || length(name)>14) -> Y
     if name has 3+ consecutive vowels -> Y

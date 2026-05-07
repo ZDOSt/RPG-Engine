@@ -141,6 +141,8 @@ function buildReadableDeterministicDebug(handoff) {
         'resolutionPacket.CounterPotential=' + valueOrNone(resolution.CounterPotential),
         'resolutionPacket.classifyHostilePhysicalIntent=' + valueOrNone(resolution.classifyHostilePhysicalIntent),
         'resolutionPacket.classifyPhysicalBoundaryPressure=' + valueOrNone(resolution.classifyPhysicalBoundaryPressure),
+        'resolutionPacket.UserImpairment=' + inline(resolution.UserImpairment ?? {}),
+        'resolutionPacket.NPCImpairment=' + inline(resolution.NPCImpairment ?? {}),
         'resolutionPacket.ActionTargets=' + list(resolution.ActionTargets),
         'resolutionPacket.OppTargets.NPC=' + list(resolution.OppTargets?.NPC),
         'resolutionPacket.OppTargets.ENV=' + list(resolution.OppTargets?.ENV),
@@ -186,7 +188,7 @@ export function formatNarratorPromptContext(report) {
         '[STRUCTURED_PREFLIGHT_NARRATOR_CONTEXT v0.6 - MINIMAL AUTHORITATIVE]',
         'Private mechanics handoff. Do not quote, summarize, mention, label, list, or explain this handoff.',
         'Write only the final in-character narration. No analysis, bullet points, preamble, audit, or mechanics text.',
-        'Start the answer with BEGIN_FINAL_NARRATION and end with END_FINAL_NARRATION.',
+        'Wrap the answer with BEGIN_FINAL_NARRATION and END_FINAL_NARRATION. Inside those tags, start directly with scene prose.',
         'The GUIDE is mandatory and authoritative; follow it exactly when interpreting success, denial, proactivity, and aggression.',
         'Outcome names and mechanics labels are private. Never print private result categories, impact categories, roll data, action counts, dice math, margins, handoff field names, or system labels.',
         'Do not start with a mechanics heading, italicized result label, bracketed result label, or any visible success/failure category. Start directly with the scene prose.',
@@ -202,6 +204,8 @@ export function formatNarratorPromptContext(report) {
         'Intimacy Consent: ' + summary.consent,
         'Targets: ' + summary.targets,
         'Counter Potential: ' + summary.counter,
+        'User Impairment: ' + summary.userImpairment,
+        'NPC Impairment: ' + summary.npcImpairment,
         'NPC State: ' + summary.npc,
         'Chaos: ' + summary.chaos,
         'Proactivity: ' + summary.proactive,
@@ -243,15 +247,17 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         ].join('/')).join(';') || 'none';
 
     const aggressionText = Object.entries(handoff.aggressionResults ?? {}).map(([name, value]) =>
-        `${name}/${value.AttackType ?? 'Attack'}/${value.ReactionOutcome}/bonus:${value.CounterBonus ?? 0}/margin:${value.Margin}`,
+        `${name}/${value.AttackType ?? 'Attack'}/${value.ReactionOutcome}/bonus:${value.CounterBonus ?? 0}/margin:${value.Margin}/npcImpair:${npcImpairmentSummary(value.NPCImpairment)}/userDefenseImpair:${userImpairmentSummary(value.UserImpairment)}`,
     ).join(';') || 'none';
     const aggressionGuide = aggressionText === 'none'
         ? buildNoAggressionGuide(resolution, handoff)
         : buildAggressionGuide(handoff.aggressionResults);
     const generatedName = nameGenerationSummary(handoff.nameGeneration);
+    const userImpairment = userImpairmentSummary(resolution.UserImpairment);
+    const npcImpairment = npcImpairmentSummary(resolution.NPCImpairment);
 
     const result = naturalOutcomeSummary(resolution);
-    const guide = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText });
+    const guide = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText, userImpairment, npcImpairment });
 
     return {
         userAction,
@@ -261,6 +267,8 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         consent: intimacyConsentSummary(resolution),
         targets: targetSummary(resolution),
         counter: resolution.CounterPotential ?? 'none',
+        userImpairment,
+        npcImpairment,
         npc: npcText,
         chaos: chaosText,
         proactive: proactiveText,
@@ -269,6 +277,31 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         generatedName,
         guide,
     };
+}
+
+function userImpairmentSummary(impairment) {
+    if (!impairment || impairment.Relevant !== 'Y') return 'none';
+    return [
+        `source:${valueOrNone(impairment.Source)}`,
+        `stage:${valueOrNone(impairment.Stage)}`,
+        `penalty:${Number(impairment.RollPenalty ?? 0)}`,
+        `applied:${valueOrNone(impairment.AppliedToRoll)}`,
+        `affects:${humanizeImpairmentFunctions(impairment.MatchedActionFunction || impairment.AffectedFunction)}`,
+        `rule:${valueOrNone(impairment.NarrationRule)}`,
+    ].join('/');
+}
+
+function npcImpairmentSummary(impairment) {
+    if (!impairment || impairment.Relevant !== 'Y') return 'none';
+    return [
+        `npc:${valueOrNone(impairment.NPC)}`,
+        `source:${valueOrNone(impairment.Source)}`,
+        `stage:${valueOrNone(impairment.Stage)}`,
+        `penalty:${Number(impairment.RollPenalty ?? 0)}`,
+        `applied:${valueOrNone(impairment.AppliedToRoll)}`,
+        `affects:${humanizeImpairmentFunctions(impairment.MatchedActionFunction || impairment.AffectedFunction)}`,
+        `rule:${valueOrNone(impairment.NarrationRule)}`,
+    ].join('/');
 }
 
 function nameGenerationSummary(nameGeneration) {
@@ -304,7 +337,7 @@ function targetSummary(resolution) {
     return parts.join('; ') || 'none';
 }
 
-function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText }) {
+function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText, userImpairment, npcImpairment }) {
     const goal = resolution.GOAL ?? 'normal';
     const outcome = naturalOutcomeSummary(resolution);
     const primaryNpc = handoff.npcHandoffs?.[0];
@@ -331,49 +364,97 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
         ? ' Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance without inventing a landed attack.'
         : '';
     const nameInstruction = nameGenerationGuide(handoff.nameGeneration);
+    const impairmentInstruction = userImpairmentGuide(resolution.UserImpairment, userImpairment);
+    const npcImpairmentInstruction = npcImpairmentGuide(resolution.NPCImpairment, npcImpairment);
 
     if (intimacyDenied) {
         if (goal === 'IntimacyAdvancePhysical') {
-            return `The user action is ${userAction}; resolve it as ${outcome}. IntimacyGate=DENY: any successful physical attempt may land or create contact/positioning, but ${npcName} does not cooperate, reciprocate, or become willing; narrate rejection, recoil, pushing away, rebuke, resistance, flight, or escalation according to ${state}.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
+            return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction} IntimacyGate=DENY: any successful physical attempt may land or create contact/positioning, but ${npcName} does not cooperate, reciprocate, or become willing; narrate rejection, recoil, pushing away, rebuke, resistance, flight, or escalation according to ${state}.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
         }
-        return `The user action is ${userAction}; resolve it as ${outcome}. IntimacyGate=DENY: any successful verbal attempt may affect ${npcName}, but the request is refused; narrate a boundary, rebuke, annoyance, anger, fear, or refusal according to ${state}, never compliance with the intimacy request.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction} IntimacyGate=DENY: any successful verbal attempt may affect ${npcName}, but the request is refused; narrate a boundary, rebuke, annoyance, anger, fear, or refusal according to ${state}, never compliance with the intimacy request.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
     }
 
     if (aggressionText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}, then narrate the listed NPC attack result. Stop at the aggression guide boundary and do not invent any user follow-up.${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction} Then narrate the listed NPC attack result. Stop at the aggression guide boundary and do not invent any user follow-up.${nameInstruction}`;
     }
 
     if (proactiveText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote}${naturalProactiveNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${boundaryNote}${naturalProactiveNote}${nameInstruction}`;
     }
 
     if (isIntimacyAdvance) {
         const gateText = intimacyAllowed
             ? `${npcName} may receive it according to the current gate and relationship state`
             : `${npcName} refuses or sets a boundary because the intimacy gate is not allowing it`;
-        return `The user action is ${userAction}; resolve it as ${outcome}. ${gateText}.${chaosNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction} ${gateText}.${chaosNote}${nameInstruction}`;
     }
 
     if (resolution.STAKES === 'N') {
         const chaosNote = chaosText !== 'none' ? ' and include the listed chaos beat as a brief scene event' : '';
-        return `The user action is ${userAction}; no roll is needed. Keep ${npcName}'s response consistent with ${state}, with no invented hostility or extra mechanics${chaosNote}.${nameInstruction}`;
+        return `The user action is ${userAction}; no roll is needed.${impairmentInstruction}${npcImpairmentInstruction} Keep ${npcName}'s response consistent with ${state}, with no invented hostility or extra mechanics${chaosNote}.${nameInstruction}`;
     }
 
     if (resolution.classifyPhysicalBoundaryPressure === 'Y') {
-        return `The user action is ${userAction}; resolve it as ${outcome}. Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance according to ${state}, without inventing a landed attack.${chaosNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction} Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance according to ${state}, without inventing a landed attack.${chaosNote}${nameInstruction}`;
     }
 
     if (chaosText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote} Include the listed chaos beat while keeping NPC state anchored to ${state}.${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${boundaryNote} Include the listed chaos beat while keeping NPC state anchored to ${state}.${nameInstruction}`;
     }
 
-    return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote} Narrate the NPC response according to ${state} and the listed targets.${nameInstruction}`;
+    return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${boundaryNote} Narrate the NPC response according to ${state} and the listed targets.${nameInstruction}`;
 }
 
 function nameGenerationGuide(nameGeneration) {
     if (!nameGeneration || nameGeneration.nameRequired !== 'Y' || isNoneText(nameGeneration.generatedName)) return '';
     const noun = nameGeneration.detectMode === 'LOCATION' ? 'location' : 'person/entity';
     return ` If the narration introduces the unnamed ${noun}, use exactly "${nameGeneration.generatedName}" as its proper name. Do not invent, alter, translate, or replace this name.`;
+}
+
+function userImpairmentGuide(impairment, summaryText) {
+    if (!impairment || impairment.Relevant !== 'Y') return '';
+    const applied = impairment.AppliedToRoll === 'Y'
+        ? ` A ${impairment.Stage} user impairment penalty (${Number(impairment.RollPenalty ?? 0)}) has already been applied to the roll.`
+        : ` A ${impairment.Stage} user impairment is relevant even though no roll penalty was applied.`;
+    return `${applied} The user may still attempt the action; do not forbid the attempt. Narrate ${valueOrNone(impairment.Source)} affecting ${humanizeImpairmentFunctions(impairment.MatchedActionFunction || impairment.AffectedFunction)} through pain, limitation, compensation, instability, reduced speed, partial execution, or cost according to the computed outcome.`;
+}
+
+function npcImpairmentGuide(impairment, summaryText) {
+    if (!impairment || impairment.Relevant !== 'Y') return '';
+    const applied = impairment.AppliedToRoll === 'Y'
+        ? ` A ${impairment.Stage} impairment penalty (${Number(impairment.RollPenalty ?? 0)}) has already been applied to ${valueOrNone(impairment.NPC)}'s roll.`
+        : ` A ${impairment.Stage} impairment is relevant to ${valueOrNone(impairment.NPC)} even though no roll penalty was applied.`;
+    return `${applied} ${valueOrNone(impairment.NPC)} may still act; narrate ${valueOrNone(impairment.Source)} affecting ${humanizeImpairmentFunctions(impairment.MatchedActionFunction || impairment.AffectedFunction)} through pain, limitation, compensation, instability, reduced speed, partial execution, or cost according to the computed outcome.`;
+}
+
+function humanizeImpairmentFunctions(value) {
+    const text = String(value ?? '').trim();
+    if (!text || isNoneText(text)) return '(none)';
+    const labels = {
+        lower_body: 'lower body',
+        upper_body: 'upper body',
+        whole_body: 'whole body',
+        physical_exertion: 'physical exertion',
+        mobility: 'mobility',
+        balance: 'balance',
+        stamina: 'stamina',
+        focus: 'focus',
+        grip: 'grip',
+        torso: 'torso',
+        breath: 'breathing',
+        head: 'head',
+        vision: 'vision',
+        aim: 'aim',
+        combat: 'combat',
+        hearing: 'hearing',
+        speech: 'speech',
+        systemic: 'overall body condition',
+    };
+    return text.split(',')
+        .map(item => item.trim())
+        .filter(Boolean)
+        .map(item => labels[item] || item.replace(/_/g, ' '))
+        .join(', ') || '(none)';
 }
 
 function naturalOutcomeSummary(resolution) {
@@ -440,22 +521,25 @@ function buildAggressionGuide(aggressionResults) {
                 : value.AttackType === 'ProactiveAttack'
                     ? 'proactive attack from current hostile state'
                     : 'immediate NPC attack';
+        const userImpairment = userImpairmentGuide(value.UserImpairment, userImpairmentSummary(value.UserImpairment));
+        const npcImpairment = npcImpairmentGuide(value.NPCImpairment, npcImpairmentSummary(value.NPCImpairment));
+        const impairmentText = `${npcImpairment}${userImpairment}`;
         if (value.ReactionOutcome === 'npc_overpowers') {
-            return `${name}: ${attackType} strongly succeeds/overpowers; narrate clear NPC advantage. Do not narrate any follow-up action or dialogue by {{user}}.`;
+            return `${name}: ${attackType} strongly succeeds/overpowers; narrate clear NPC advantage.${impairmentText} Do not narrate any follow-up action or dialogue by {{user}}.`;
         }
         if (value.ReactionOutcome === 'npc_succeeds') {
-            return `${name}: ${attackType} succeeds modestly; narrate proportional effect. Do not narrate any follow-up action or dialogue by {{user}}.`;
+            return `${name}: ${attackType} succeeds modestly; narrate proportional effect.${impairmentText} Do not narrate any follow-up action or dialogue by {{user}}.`;
         }
         if (value.ReactionOutcome === 'stalemate') {
-            return `${name}: ${attackType} meets equal resistance; narrate a cinematic stalemate, clash, bind, or struggle. Stop in the deadlock. Do not narrate {{user}}'s counterattack, choices, thoughts, feelings, or dialogue.`;
+            return `${name}: ${attackType} meets equal resistance; narrate a cinematic stalemate, clash, bind, or struggle.${impairmentText} Stop in the deadlock. Do not narrate {{user}}'s counterattack, choices, thoughts, feelings, or dialogue.`;
         }
         if (value.ReactionOutcome === 'user_resists') {
-            return `${name}: ${attackType} is partly resisted; stop at the moment of impact/contact/near-contact. Do not narrate {{user}}'s counterattack, actions, reactions, thoughts, feelings, or dialogue.`;
+            return `${name}: ${attackType} is partly resisted; stop at the moment of impact/contact/near-contact.${impairmentText} Do not narrate {{user}}'s counterattack, actions, reactions, thoughts, feelings, or dialogue.`;
         }
         if (value.ReactionOutcome === 'user_dominates') {
-            return `${name}: ${attackType} fails or is controlled/evaded; stop at the moment of failed impact/contact/near-contact. Do not narrate {{user}}'s counterattack, actions, reactions, thoughts, feelings, or dialogue.`;
+            return `${name}: ${attackType} fails or is controlled/evaded; stop at the moment of failed impact/contact/near-contact.${impairmentText} Do not narrate {{user}}'s counterattack, actions, reactions, thoughts, feelings, or dialogue.`;
         }
-        return `${name}: use listed aggression result exactly.`;
+        return `${name}: use listed aggression result exactly.${impairmentText}`;
     });
 
     return parts.join(' ');
