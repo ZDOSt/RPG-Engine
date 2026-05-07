@@ -264,11 +264,12 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         .map(([name, value]) => [
             `${name}: ${value.Intent}`,
             `impulse:${value.Impulse}`,
+            `target:${value.ProactivityTarget ?? '(none)'}`,
             `triggersAggressionRoll:${value.triggersAggressionRoll}`,
         ].join('/')).join(';') || 'none';
 
     const aggressionText = Object.entries(handoff.aggressionResults ?? {}).map(([name, value]) =>
-        `${name}/${value.AttackType ?? 'Attack'}/${value.ReactionOutcome}/bonus:${value.CounterBonus ?? 0}/margin:${value.Margin}/npcImpair:${npcImpairmentSummary(value.NPCImpairment)}/userDefenseImpair:${userImpairmentSummary(value.UserImpairment)}`,
+        `${name}/${value.AttackType ?? 'Attack'}/${value.ReactionOutcome}/target:${value.ProactivityTarget ?? '{{user}}'}/bonus:${value.CounterBonus ?? 0}/margin:${value.Margin}/npcImpair:${npcImpairmentSummary(value.NPCImpairment)}/targetDefenseImpair:${userImpairmentSummary(value.TargetImpairment || value.UserImpairment)}`,
     ).join(';') || 'none';
     const aggressionGuide = aggressionText === 'none'
         ? buildNoAggressionGuide(resolution, handoff)
@@ -276,7 +277,10 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
     const generatedName = nameGenerationSummary(handoff.nameGeneration);
     const userImpairment = userImpairmentSummary(resolution.UserImpairment);
     const npcImpairment = npcImpairmentSummary(resolution.NPCImpairment);
-    const inflictedNpcInjury = inflictedNpcInjurySummary(resolution.InflictedInjuries);
+    const aggressionNpcInjury = inflictedAggressionNpcInjurySummary(handoff.aggressionResults ?? {});
+    const inflictedNpcInjury = [inflictedNpcInjurySummary(resolution.InflictedInjuries), aggressionNpcInjury]
+        .filter(item => item && item !== 'none')
+        .join('; ') || 'none';
     const inflictedUserInjury = inflictedUserInjurySummary(handoff.aggressionResults ?? {});
 
     const result = naturalOutcomeSummary(resolution);
@@ -391,11 +395,27 @@ function inflictedNpcInjurySummary(injuries) {
 
 function inflictedUserInjurySummary(aggressionResults) {
     const injuries = Object.entries(aggressionResults ?? {})
-        .map(([name, value]) => ({ name, injury: value?.InflictedUserInjury }))
+        .map(([name, value]) => ({ name, injury: value?.InflictedUserInjury || (value?.InflictedTargetInjury?.targetType === 'user' ? value.InflictedTargetInjury : null) }))
         .filter(item => item.injury);
     if (!injuries.length) return 'none';
     return injuries.map(({ name, injury }) => [
         `source:${valueOrNone(name)}`,
+        `condition:${valueOrNone(injury.condition)}`,
+        `severity:${valueOrNone(injury.severity)}`,
+        `wounds:${list(injury.woundsAdd)}`,
+        `status:${list(injury.statusAdd)}`,
+        `rule:${valueOrNone(injury.NarrationRule)}`,
+    ].join('/')).join('; ');
+}
+
+function inflictedAggressionNpcInjurySummary(aggressionResults) {
+    const injuries = Object.entries(aggressionResults ?? {})
+        .map(([name, value]) => ({ name, injury: value?.InflictedTargetInjury }))
+        .filter(item => item.injury?.targetType === 'npc');
+    if (!injuries.length) return 'none';
+    return injuries.map(({ name, injury }) => [
+        `source:${valueOrNone(name)}`,
+        `npc:${valueOrNone(injury.target)}`,
         `condition:${valueOrNone(injury.condition)}`,
         `severity:${valueOrNone(injury.severity)}`,
         `wounds:${list(injury.woundsAdd)}`,
@@ -468,43 +488,45 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const npcImpairmentInstruction = npcImpairmentGuide(resolution.NPCImpairment, npcImpairment);
     const inflictedNpcInstruction = inflictedNpcInjuryGuide(resolution.InflictedInjuries);
     const inflictedUserInstruction = inflictedUserInjuryGuide(handoff.aggressionResults);
+    const inflictedAggressionNpcInstruction = inflictedAggressionNpcInjuryGuide(handoff.aggressionResults);
+    const injuryInstruction = `${inflictedNpcInstruction}${inflictedUserInstruction}${inflictedAggressionNpcInstruction}`;
 
     if (intimacyDenied) {
         if (goal === 'IntimacyAdvancePhysical') {
-            return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction} IntimacyGate=DENY: any successful physical attempt may land or create contact/positioning, but ${npcName} does not cooperate, reciprocate, or become willing; narrate rejection, recoil, pushing away, rebuke, resistance, flight, or escalation according to ${state}.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
+            return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} IntimacyGate=DENY: any successful physical attempt may land or create contact/positioning, but ${npcName} does not cooperate, reciprocate, or become willing; narrate rejection, recoil, pushing away, rebuke, resistance, flight, or escalation according to ${state}.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
         }
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction} IntimacyGate=DENY: any successful verbal attempt may affect ${npcName}, but the request is refused; narrate a boundary, rebuke, annoyance, anger, fear, or refusal according to ${state}, never compliance with the intimacy request.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} IntimacyGate=DENY: any successful verbal attempt may affect ${npcName}, but the request is refused; narrate a boundary, rebuke, annoyance, anger, fear, or refusal according to ${state}, never compliance with the intimacy request.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
     }
 
     if (aggressionText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction} Then narrate the listed NPC attack result. Stop at the aggression guide boundary and do not invent any user follow-up.${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Then narrate the listed NPC attack result against its listed target. Stop at the aggression guide boundary and do not invent any user follow-up.${nameInstruction}`;
     }
 
     if (proactiveText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction}${boundaryNote}${naturalProactiveNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote}${naturalProactiveNote}${nameInstruction}`;
     }
 
     if (isIntimacyAdvance) {
         const gateText = intimacyAllowed
             ? `${npcName} may receive it according to the current gate and relationship state`
             : `${npcName} refuses or sets a boundary because the intimacy gate is not allowing it`;
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction} ${gateText}.${chaosNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} ${gateText}.${chaosNote}${nameInstruction}`;
     }
 
     if (resolution.STAKES === 'N') {
         const chaosNote = chaosText !== 'none' ? ' and include the listed chaos beat as a brief scene event' : '';
-        return `The user action is ${userAction}; no roll is needed.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction} Keep ${npcName}'s response consistent with ${state}, with no invented hostility or extra mechanics${chaosNote}.${nameInstruction}`;
+        return `The user action is ${userAction}; no roll is needed.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Keep ${npcName}'s response consistent with ${state}, with no invented hostility or extra mechanics${chaosNote}.${nameInstruction}`;
     }
 
     if (resolution.classifyPhysicalBoundaryPressure === 'Y') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction} Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance according to ${state}, without inventing a landed attack.${chaosNote}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance according to ${state}, without inventing a landed attack.${chaosNote}${nameInstruction}`;
     }
 
     if (chaosText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction}${boundaryNote} Include the listed chaos beat while keeping NPC state anchored to ${state}.${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Include the listed chaos beat while keeping NPC state anchored to ${state}.${nameInstruction}`;
     }
 
-    return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${inflictedNpcInstruction}${inflictedUserInstruction}${boundaryNote} Narrate the NPC response according to ${state} and the listed targets.${nameInstruction}`;
+    return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Narrate the NPC response according to ${state} and the listed targets.${nameInstruction}`;
 }
 
 function nameGenerationGuide(nameGeneration) {
@@ -538,11 +560,21 @@ function inflictedNpcInjuryGuide(injuries) {
 
 function inflictedUserInjuryGuide(aggressionResults) {
     const injuries = Object.entries(aggressionResults ?? {})
-        .map(([name, value]) => ({ name, injury: value?.InflictedUserInjury }))
+        .map(([name, value]) => ({ name, injury: value?.InflictedUserInjury || (value?.InflictedTargetInjury?.targetType === 'user' ? value.InflictedTargetInjury : null) }))
         .filter(item => item.injury);
     if (!injuries.length) return '';
     return ' ' + injuries.map(({ name, injury }) =>
         `The user receives ${valueOrNone(injury.condition)} condition from ${valueOrNone(name)} with ${list(injury.woundsAdd)}${list(injury.statusAdd) !== 'none' ? ` and ${list(injury.statusAdd)}` : ''}. This injury is mechanically persistent; narrate it as the concrete lasting result of the NPC attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
+    ).join(' ');
+}
+
+function inflictedAggressionNpcInjuryGuide(aggressionResults) {
+    const injuries = Object.entries(aggressionResults ?? {})
+        .map(([name, value]) => ({ name, injury: value?.InflictedTargetInjury }))
+        .filter(item => item.injury?.targetType === 'npc');
+    if (!injuries.length) return '';
+    return ' ' + injuries.map(({ name, injury }) =>
+        `${valueOrNone(injury.target)} receives ${valueOrNone(injury.condition)} condition from ${valueOrNone(name)} with ${list(injury.woundsAdd)}${list(injury.statusAdd) !== 'none' ? ` and ${list(injury.statusAdd)}` : ''}. This injury is mechanically persistent; narrate it as the concrete lasting result of the NPC attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
     ).join(' ');
 }
 
@@ -622,7 +654,8 @@ function formatProactivityForNarration(proactivity) {
             Proactive: value?.Proactive ?? 'N',
             Intent: value?.Intent ?? 'NONE',
             Impulse: value?.Impulse ?? 'NONE',
-            triggersAggressionRoll: value?.TargetsUser === 'Y' ? 'Y' : 'N',
+            ProactivityTarget: value?.ProactivityTarget ?? '(none)',
+            triggersAggressionRoll: value?.ProactivityTarget && value.ProactivityTarget !== '(none)' ? 'Y' : value?.TargetsUser === 'Y' ? 'Y' : 'N',
             ProactivityTier: value?.ProactivityTier,
             ProactivityDie: value?.ProactivityDie,
             Threshold: value?.Threshold,
@@ -667,7 +700,7 @@ function buildAggressionGuide(aggressionResults) {
 function buildNoAggressionGuide(resolution, handoff) {
     const hasAggressiveProactivity = Object.values(handoff.proactivityResults ?? {}).some(value =>
         value?.Proactive === 'Y'
-        && value?.TargetsUser === 'Y'
+        && ((value?.ProactivityTarget && value.ProactivityTarget !== '(none)') || value?.TargetsUser === 'Y')
         && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(value?.Intent));
 
     if (!hasAggressiveProactivity) return 'none';

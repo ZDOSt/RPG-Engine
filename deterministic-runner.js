@@ -1,6 +1,6 @@
 import {
     createDice,
-    hostilePhysicalOutcome,
+    combatOutcome,
     nonHostileOutcome,
     counterBonusFromPotential,
     aggressionReactionOutcome,
@@ -32,7 +32,6 @@ import {
     classifyProactivityTier,
     thresholdFromTier,
     selectIntent,
-    targetsUserFromIntent,
     isImmediateAttackIntent,
     isImmediateAttackIntentForType,
     buildNarrationGuidance,
@@ -52,6 +51,7 @@ import {
     statValue,
     normalizeMapStats,
     applyMapStatsHardRules,
+    isBodyAffectingMagic,
     parseFinalState,
     deriveLock,
     landedBool,
@@ -72,6 +72,7 @@ import {
 
 const NONE = '(none)';
 const NAME_REGISTRY_KEY = 'structuredPreflightNameRegistry';
+const USER_PROACTIVITY_TARGET = '{{user}}';
 
 const PHONOTACTIC_ONSETS = ['', 'b', 'd', 'g', 'h', 'k', 'l', 'm', 'n', 'r', 's', 't', 'v', 'y', 'z', 'kh', 'sh'];
 const PHONOTACTIC_VOWELS = ['a', 'e', 'i', 'o', 'u', 'ai', 'ei', 'ao'];
@@ -181,7 +182,7 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
     const injuryTrackerUpdate = applyInflictedNpcInjuriesToTrackerUpdate(resolution.packet, relationships.trackerUpdate, trackerSnapshot, audit);
     const proactivity = runProactivity(ledger, relationships.handoffs, resolution.packet, chaos.handoff, dice, audit);
     const aggression = runAggression(ledger, trackerSnapshot, injuryTrackerUpdate, proactivity.results, resolution.packet, dice, audit, context);
-    const trackerDeltas = runTrackerUpdates(ledger, trackerSnapshot, injuryTrackerUpdate, context, audit, aggression.userTrackerDelta);
+    const trackerDeltas = runTrackerUpdates(ledger, trackerSnapshot, injuryTrackerUpdate, context, audit, aggression.userTrackerDelta, aggression.npcTrackerDeltas);
 
     const trackerUpdate = {
         npcs: trackerDeltas.npcs,
@@ -307,6 +308,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     };
     let resultLine = 'No roll';
     let hostilePhysical = false;
+    let combatActionSequence = false;
     let userImpairment = noUserImpairment();
     let npcImpairment = noNpcImpairment();
 
@@ -376,16 +378,27 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         const hostileReferee = applyHostilePhysicalIntentHardRules(semantic, audit);
         const hostilePhysicalIntent = hostileReferee.value;
         hostilePhysical = userStat === 'PHY' && hostilePhysicalIntent;
+        combatActionSequence = classifyCombatActionSequence({
+            semantic,
+            goal,
+            targets,
+            actions,
+            hostilePhysical,
+            userStat,
+            oppStat,
+            injuryEffectEngine: ledger.injuryEffectEngine,
+        });
 
-        if (hostilePhysical) {
-            outcome = hostilePhysicalOutcome(margin, actions.length);
+        if (combatActionSequence) {
+            const actionLimit = Math.max(1, actions.length || 0);
+            outcome = combatOutcome(margin, actionLimit);
         } else {
             outcome = nonHostileOutcome(margin);
         }
 
         audit.push(`2.7n.1 UserImpairmentEngine=${compact(userImpairment)}`);
         audit.push(`2.7n.2 NPCImpairmentEngine=${compact(npcImpairment)}`);
-        audit.push(`2.7o resolveOutcome=atkDie:${atkDie}, atkTot:${atkTot}, defDie:${defDie}, defTot:${defTot}, margin:${margin}, classifyHostilePhysicalIntent:${hostilePhysical ? 'Y' : 'N'} -> ${compact(outcome)}`);
+        audit.push(`2.7o resolveOutcome=atkDie:${atkDie}, atkTot:${atkTot}, defDie:${defDie}, defTot:${defTot}, margin:${margin}, classifyHostilePhysicalIntent:${hostilePhysical ? 'Y' : 'N'}, classifyCombatActionSequence:${combatActionSequence ? 'Y' : 'N'} -> ${compact(outcome)}`);
         const impairmentText = impairmentPenalty ? ` + impairment(${impairmentPenalty})` : '';
         const npcImpairmentText = npcImpairmentPenalty ? ` + impairment(${npcImpairmentPenalty})` : '';
         resultLine = `1d20(${atkDie}) + ${userStat}(${userStatValue})${impairmentText} = ${atkTot} vs 1d20(${defDie})${oppStat === 'ENV' ? '' : ` + ${oppStat}(${statValue(targetCore, oppStat)})${npcImpairmentText}`} = ${defTot} -> ${outcome.OutcomeTier}`;
@@ -399,10 +412,9 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
 
     const inflictedInjuries = deriveInflictedNpcInjuries({
         semantic,
-        context,
+        injuryEffectEngine: ledger.injuryEffectEngine,
         targets,
         outcome,
-        hostilePhysical,
         hasStakes,
     });
 
@@ -416,6 +428,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         Outcome: outcome.Outcome,
         CounterPotential: outcome.CounterPotential,
         classifyHostilePhysicalIntent: hostilePhysical ? 'Y' : 'N',
+        classifyCombatActionSequence: combatActionSequence ? 'Y' : 'N',
         classifyPhysicalBoundaryPressure: boundaryReferee.value ? 'Y' : 'N',
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
@@ -1008,101 +1021,45 @@ function registerGeneratedName(context, name, meta) {
     if (typeof context.saveMetadataDebounced === 'function') context.saveMetadataDebounced();
 }
 
-function deriveInflictedNpcInjuries({ semantic, context, targets, outcome, hostilePhysical, hasStakes }) {
-    if (!hostilePhysical || hasStakes !== 'Y') return [];
+function deriveInflictedNpcInjuries({ injuryEffectEngine, targets, outcome, hasStakes }) {
+    if (hasStakes !== 'Y') return [];
+    if (!effectOutcomeLanded(outcome)) return [];
+
+    const injuries = normalizeInjuryEffectCandidates(injuryEffectEngine)
+        .filter(effect => injuryEffectTargetAllowed(effect, targets))
+        .map(effect => buildInflictedInjuryFromSemanticEffect(effect, outcome))
+        .filter(Boolean);
+    return mergeInflictedInjuries(injuries);
+}
+
+function effectOutcomeLanded(outcome) {
     const landedCount = Number(outcome?.LandedActions ?? 0);
-    if (!Number.isFinite(landedCount) || landedCount <= 0) return [];
-
-    const npcName = firstReal(targets?.OppTargets?.NPC) || firstReal(targets?.ActionTargets);
-    if (!isReal(npcName)) return [];
-
-    const source = [
-        semantic?.identifyGoal,
-        semantic?.identifyChallenge,
-        semantic?.explicitMeans,
-        getLatestUserTextFromContext(context),
-    ].filter(Boolean);
-    const sourceText = uniqueTextParts(source).join(' ');
-    const injury = inferInflictedInjuryFromAttackText(sourceText, outcome);
-    if (!injury) return [];
-
-    return [{
-        NPC: npcName,
-        condition: injury.condition,
-        woundsAdd: [injury.wound],
-        statusAdd: injury.status ? [injury.status] : [],
-        severity: injury.severity,
-        bodyPart: injury.bodyPart,
-        sourceAction: injury.sourceAction,
-        NarrationRule: `${npcName} suffers ${injury.wound}; narrate this as a lasting injury from the landed user attack, and let it impair later actions involving ${injury.functionText}.`,
-    }];
+    return Number.isFinite(landedCount) && landedCount > 0;
 }
 
-function inferInflictedInjuryFromAttackText(value, outcome) {
-    const text = String(value || '').toLowerCase();
-    if (!text.trim()) return null;
-    const explicitInjury = /\b(break|breaks|broken|fractur(?:e|es|ed|ing)|dislocat(?:e|es|ed|ing)|crippl(?:e|es|ed|ing)|injur(?:e|es|ed|ing)|wound(?:s|ed|ing)?|maim(?:s|ed|ing)?|cut(?:s|ting)?|slash(?:es|ed|ing)?|stab(?:s|bed|bing)?|pierce(?:s|d|ing)?|gash(?:es|ed|ing)?|tear(?:s|ing)?|torn|mangle(?:s|d|ing)?|crush(?:es|ed|ing)?|shatter(?:s|ed|ing)?|bleed(?:s|ing)?|burn(?:s|ed|ing)?|blind(?:s|ed|ing)?|concuss(?:es|ed|ing)?|poison(?:s|ed|ing)?|paraly[sz](?:e|es|ed|ing)?)\b/.test(text);
-    const targetBodyPart = inferTargetedBodyPart(text);
-    if (!explicitInjury && !targetBodyPart) return null;
-
-    const severity = severityFromOutcomeAndText(outcome, text);
-    const condition = conditionFromInflictedSeverity(severity);
-    const bodyPart = targetBodyPart || inferGenericBodyPart(text);
-    const injuryKind = injuryKindFromText(text, severity);
-    const wound = `${severity} ${bodyPart} ${injuryKind}`.replace(/\s+/g, ' ').trim();
-    const status = statusFromInflictedInjury(text, bodyPart, severity);
-
-    return {
-        severity,
-        condition,
-        bodyPart,
-        wound,
-        status,
-        sourceAction: compactAttackSource(value),
-        functionText: humanizeInjuryFunctions(functionsFromImpairmentText(wound, 'wound')),
-    };
+function classifyCombatActionSequence({ semantic, goal, targets, actions, hostilePhysical, userStat, oppStat, injuryEffectEngine }) {
+    if (hostilePhysical) return true;
+    const actionCount = Array.isArray(actions) ? actions.length : 1;
+    if (actionCount > 1 && userStat !== 'CHA') return true;
+    const hasLivingTarget = Boolean(firstReal(targets?.OppTargets?.NPC) || firstReal(targets?.ActionTargets));
+    if (!hasLivingTarget) return false;
+    if (userStat === 'MND' && isBodyAffectingMagic(semantic, goal, targets)) return true;
+    const hasSemanticInjuryEffect = normalizeInjuryEffectCandidates(injuryEffectEngine)
+        .some(effect => injuryEffectTargetAllowed(effect, targets));
+    if (hasSemanticInjuryEffect && userStat !== 'CHA') return true;
+    if (userStat === 'PHY' && oppStat !== 'ENV' && hasCombatActionLanguage(semanticSourceText(semantic))) return true;
+    return false;
 }
 
-function inferTargetedBodyPart(text) {
-    const patterns = [
-        ['knee', /\bknees?\b/],
-        ['leg', /\b(?:leg|thigh|shin|calf)\b/],
-        ['ankle', /\bankles?\b/],
-        ['foot', /\b(?:foot|feet)\b/],
-        ['hip', /\bhips?\b/],
-        ['arm', /\b(?:arm|forearm)\b/],
-        ['wrist', /\bwrists?\b/],
-        ['hand', /\bhands?\b/],
-        ['elbow', /\belbows?\b/],
-        ['shoulder', /\bshoulders?\b/],
-        ['ribs', /\bribs?\b/],
-        ['chest', /\bchest\b/],
-        ['stomach', /\b(?:stomach|abdomen|gut)\b/],
-        ['back', /\b(?:back|spine)\b/],
-        ['head', /\b(?:head|skull|temple)\b/],
-        ['neck', /\bneck\b/],
-        ['face', /\bface\b/],
-        ['eye', /\beyes?\b/],
-        ['throat', /\bthroat\b/],
-    ];
-    for (const [label, pattern] of patterns) {
-        if (pattern.test(text)) return label;
-    }
-    return '';
-}
-
-function inferGenericBodyPart(text) {
-    if (/\bkick(?:s|ed|ing)?|stomp(?:s|ed|ing)?|sweep(?:s|ing)?\b/.test(text)) return 'lower body';
-    if (/\bpunch(?:es|ed|ing)?|elbow(?:s|ed|ing)?|grab(?:s|bed|bing)?|strike(?:s|struck|striking)?\b/.test(text)) return 'upper body';
-    if (/\bstab(?:s|bed|bing)?|slash(?:es|ed|ing)?|cut(?:s|ting)?|pierce(?:s|d|ing)?\b/.test(text)) return 'body';
-    return 'body';
+function hasCombatActionLanguage(source) {
+    return /\b(attack|assault|strike|hit|punch|kick|slash|stab|cut|shoot|shot|fireball|lightning|blast|burn|poison|paraly[sz]e|blind|stun|curse|hex|bind|electrocut|sword|dagger|knife|axe|spear|arrow)\b/.test(String(source || '').toLowerCase());
 }
 
 function severityFromOutcomeAndText(outcome, text) {
-    if (/\b(sever(?:e|ely)|shatter(?:s|ed|ing)?|crush(?:es|ed|ing)?|mangle(?:s|d|ing)?|maim(?:s|ed|ing)?|crippl(?:e|es|ed|ing)|paraly[sz](?:e|es|ed|ing)?|amputat(?:e|es|ed|ing)|sever(?:s|ed|ing)?)\b/.test(text)) {
+    if (/\b(sever(?:e|ely)|shatter(?:s|ed|ing)?|crush(?:es|ed|ing)?|mangle(?:s|d|ing)?|maim(?:s|ed|ing)?|crippl(?:e|es|ed|ing)|paraly[sz](?:e|es|ed|ing)?|amputat(?:e|es|ed|ing)|sever(?:s|ed|ing)?|immobili[sz](?:e|es|ed|ing)|unconscious|life[-\s]?threatening)\b/.test(text)) {
         return outcome?.Outcome === 'light_impact' ? 'moderate' : 'severe';
     }
-    if (/\b(break|breaks|broken|fractur(?:e|es|ed|ing)|dislocat(?:e|es|ed|ing))\b/.test(text)) {
+    if (/\b(break|breaks|broken|fractur(?:e|es|ed|ing)|dislocat(?:e|es|ed|ing)|electrocut(?:e|es|ed|ing)|lightning|poison(?:s|ed|ing)?|disease|curse|hex|blind(?:s|ed|ing)?|stun(?:s|ned|ning)?|terrif(?:y|ies|ied)|panic(?:s|ked|king)?)\b/.test(text)) {
         return outcome?.Outcome === 'light_impact' ? 'moderate' : 'severe';
     }
     if (outcome?.Outcome === 'dominant_impact') return 'severe';
@@ -1110,36 +1067,251 @@ function severityFromOutcomeAndText(outcome, text) {
     return 'minor';
 }
 
+function normalizeInjuryEffectCandidates(value) {
+    const rawItems = Array.isArray(value?.effects)
+        ? value.effects
+        : Array.isArray(value)
+            ? value
+            : [];
+    return rawItems.map(item => {
+        const target = cleanText(item?.target || item?.NPC || item?.name);
+        const effectType = normalizeEffectType(item?.effectType || item?.type || item?.kind);
+        return {
+            target,
+            targetRole: normalizeEffectTargetRole(item?.targetRole || item?.role),
+            effectType,
+            bodyPart: cleanText(item?.bodyPart || item?.body || item?.affectedArea) || defaultBodyPartForEffect(effectType),
+            description: cleanText(item?.description || item?.effect || item?.injury || item?.status || effectType),
+            semanticSeverity: normalizeSemanticEffectSeverity(item?.severity || item?.severityFloor),
+            persistence: normalizeEffectPersistence(item?.persistence),
+            affectsAction: bool(item?.affectsAction ?? item?.impairs ?? item?.ongoing),
+        };
+    }).filter(effect =>
+        isReal(effect.target)
+        && effect.effectType !== 'none'
+        && effect.persistence === 'lasting'
+        && effect.affectsAction);
+}
+
+function injuryEffectTargetAllowed(effect, targets) {
+    const target = effect?.target;
+    if (!isReal(target)) return false;
+    const role = normalizeEffectTargetRole(effect?.targetRole);
+    const roleTargets = {
+        opptarget: toRealArray(targets?.OppTargets?.NPC),
+        opp_target: toRealArray(targets?.OppTargets?.NPC),
+        harmedobserver: toRealArray(targets?.HarmedObservers),
+        harmed_observer: toRealArray(targets?.HarmedObservers),
+        actiontarget: toRealArray(targets?.ActionTargets),
+        action_target: toRealArray(targets?.ActionTargets),
+    }[role];
+    if (roleTargets) return roleTargets.some(name => sameName(name, target));
+    return [
+        ...toRealArray(targets?.OppTargets?.NPC),
+        ...toRealArray(targets?.HarmedObservers),
+        ...toRealArray(targets?.ActionTargets),
+    ].some(name => sameName(name, target));
+}
+
+function buildInflictedInjuryFromSemanticEffect(effect, outcome) {
+    if (!effect) return null;
+    const severity = severityFromOutcomeAndSemanticFloor(outcome, effect.semanticSeverity);
+    const condition = conditionFromInflictedSeverity(severity);
+    const bodyPart = effect.bodyPart || defaultBodyPartForEffect(effect.effectType);
+    const label = semanticEffectLabel(effect, severity, bodyPart);
+    const status = statusFromSemanticEffect(effect, bodyPart, severity);
+    const functionText = humanizeInjuryFunctions(functionsFromImpairmentText(`${label} ${status}`, status ? 'status' : 'wound'));
+    return {
+        NPC: effect.target,
+        condition,
+        woundsAdd: effect.effectType === 'physical_injury' || effect.effectType === 'burn' || effect.effectType === 'electrical' ? [label] : [],
+        statusAdd: status ? [status] : [],
+        severity,
+        bodyPart,
+        effectType: effect.effectType,
+        sourceAction: compactAttackSource(effect.description),
+        NarrationRule: `${effect.target} suffers ${label}; narrate this as a lasting ${effect.effectType.replace(/_/g, ' ')} from the landed user action, and let it impair later actions involving ${functionText}.`,
+    };
+}
+
+function mergeInflictedInjuries(injuries) {
+    const merged = [];
+    for (const injury of injuries || []) {
+        if (!isReal(injury?.NPC)) continue;
+        const existing = merged.find(item => sameName(item.NPC, injury.NPC));
+        if (!existing) {
+            merged.push(injury);
+            continue;
+        }
+        existing.condition = worseTrackerCondition(existing.condition, injury.condition);
+        existing.woundsAdd = applyListDelta(existing.woundsAdd || [], injury.woundsAdd, []);
+        existing.statusAdd = applyListDelta(existing.statusAdd || [], injury.statusAdd, []);
+        existing.severity = maxSeverity(existing.severity, injury.severity);
+        existing.NarrationRule = `${existing.NarrationRule} ${injury.NarrationRule}`;
+    }
+    return merged;
+}
+
+function severityFromOutcomeAndSemanticFloor(outcome, floor) {
+    const outcomeSeverity = outcome?.Outcome === 'dominant_impact'
+        ? 'severe'
+        : outcome?.Outcome === 'solid_impact'
+            ? 'moderate'
+            : 'minor';
+    return maxSeverity(outcomeSeverity, floor || 'minor');
+}
+
+function maxSeverity(a, b) {
+    const order = ['minor', 'moderate', 'severe', 'critical'];
+    return order[Math.max(order.indexOf(a), order.indexOf(b), 0)] || 'minor';
+}
+
 function conditionFromInflictedSeverity(severity) {
+    if (severity === 'critical') return 'critical';
     if (severity === 'severe') return 'badly_wounded';
     if (severity === 'moderate') return 'wounded';
     if (severity === 'minor') return 'bruised';
     return 'unchanged';
 }
 
-function injuryKindFromText(text, severity) {
-    if (/\b(break|breaks|broken|fractur(?:e|es|ed|ing))\b/.test(text)) return severity === 'severe' ? 'fracture' : 'injury';
-    if (/\bdislocat(?:e|es|ed|ing)\b/.test(text)) return 'dislocation';
-    if (/\b(cut(?:s|ting)?|slash(?:es|ed|ing)?|gash(?:es|ed|ing)?|stab(?:s|bed|bing)?|pierce(?:s|d|ing)?)\b/.test(text)) return severity === 'minor' ? 'cut' : 'wound';
-    if (/\b(burn(?:s|ed|ing)?)\b/.test(text)) return 'burn';
-    if (/\b(concuss(?:es|ed|ing)?)\b/.test(text)) return 'concussion';
-    if (/\b(poison(?:s|ed|ing)?)\b/.test(text)) return 'poisoning';
-    if (/\b(blind(?:s|ed|ing)?)\b/.test(text)) return 'vision injury';
-    if (/\b(paraly[sz](?:e|es|ed|ing)?)\b/.test(text)) return 'paralysis';
-    if (severity === 'minor') return 'bruise';
-    return 'injury';
+function semanticEffectLabel(effect, severity, bodyPart) {
+    const description = cleanText(effect?.description);
+    if (description && description.toLowerCase() !== effect?.effectType) {
+        return `${severity} ${description}`.replace(/\s+/g, ' ').trim();
+    }
+    const base = {
+        physical_injury: `${bodyPart} injury`,
+        burn: `${bodyPart} burn`,
+        poison: 'poisoning',
+        paralysis: 'paralysis',
+        disease: 'sickness',
+        blindness: 'vision impairment',
+        stun: 'stunning',
+        fear: 'fear response',
+        restraint: 'restraint',
+        curse: 'affliction',
+        electrical: 'electrical injury',
+        exhaustion: 'exhaustion',
+        mental_status: 'mental status effect',
+        other_status: 'status effect',
+    }[effect?.effectType] || 'status effect';
+    return `${severity} ${base}`.replace(/\s+/g, ' ').trim();
 }
 
-function statusFromInflictedInjury(text, bodyPart, severity) {
+function statusFromSemanticEffect(effect, bodyPart, severity) {
     if (severity === 'minor') return '';
     if (/\b(knee|leg|ankle|foot|feet|hip|thigh|shin|calf|lower body)\b/.test(bodyPart)) return `${severity} mobility impairment`;
     if (/\b(arm|wrist|hand|elbow|shoulder|upper body)\b/.test(bodyPart)) return `${severity} grip/combat impairment`;
     if (/\b(rib|ribs|chest|lung|lungs)\b/.test(bodyPart)) return `${severity} breathing impairment`;
-    if (/\b(head|skull|temple)\b/.test(bodyPart) || /\bconcuss/.test(text)) return `${severity} focus/balance impairment`;
-    if (/\b(eye|eyes)\b/.test(bodyPart) || /\bblind/.test(text)) return `${severity} vision impairment`;
-    if (/\bpoison/.test(text)) return `${severity} systemic impairment`;
-    if (/\bparaly[sz]/.test(text)) return `${severity} mobility impairment`;
-    return `${severity} physical impairment`;
+    if (/\b(head|skull|temple)\b/.test(bodyPart)) return `${severity} focus/balance impairment`;
+    if (/\b(eye|eyes)\b/.test(bodyPart)) return `${severity} vision impairment`;
+    const map = {
+        poison: 'systemic impairment',
+        disease: 'systemic impairment',
+        curse: 'systemic impairment',
+        electrical: 'systemic impairment',
+        burn: 'systemic impairment',
+        paralysis: 'mobility impairment',
+        restraint: 'mobility impairment',
+        blindness: 'vision impairment',
+        stun: 'focus impairment',
+        fear: 'focus impairment',
+        exhaustion: 'stamina impairment',
+        mental_status: 'focus impairment',
+        other_status: 'systemic impairment',
+    };
+    return `${severity} ${map[effect?.effectType] || 'physical impairment'}`;
+}
+
+function statusFromInflictedInjury(source, bodyPart, severity) {
+    const effect = {
+        effectType: normalizeEffectType(aggressionEffectTypeFromSource(source)),
+    };
+    return statusFromSemanticEffect(effect, String(bodyPart || 'body').toLowerCase(), severity);
+}
+
+function aggressionEffectTypeFromSource(source) {
+    const text = String(source || '').toLowerCase();
+    if (/\b(poison|venom|toxin|numb(?:ing)?|sick(?:en|ness)|disease|plague)\b/.test(text)) return 'poison';
+    if (/\b(paraly[sz]e|paraly[sz]ed|paralysis|freeze|frozen|lock(?:s|ed)?\s+(?:up|limbs?|body))\b/.test(text)) return 'paralysis';
+    if (/\b(bind(?:ing)?|restrain|grapple|pin|immobili[sz]e|snare|net|chain|hold)\b/.test(text)) return 'restraint';
+    if (/\b(burn|fire|flame|scorch|sear)\b/.test(text)) return 'burn';
+    if (/\b(lightning|shock|electrocut|electric|thunderbolt)\b/.test(text)) return 'electrical';
+    if (/\b(blind|darken(?:s)?\s+vision|sight)\b/.test(text)) return 'blindness';
+    if (/\b(stun|daze|concuss|ring(?:ing)?\s+ears?)\b/.test(text)) return 'stun';
+    if (/\b(fear|panic|terror|horror|terrify)\b/.test(text)) return 'fear';
+    if (/\b(curse|hex|afflict)\b/.test(text)) return 'curse';
+    if (/\b(exhaust|drain|fatigue|weaken)\b/.test(text)) return 'exhaustion';
+    if (/\b(mind|mental|confus|disorient)\b/.test(text)) return 'mental_status';
+    return 'physical_injury';
+}
+
+function normalizeEffectType(value) {
+    const text = cleanText(value).toLowerCase().replace(/[\s-]+/g, '_');
+    const aliases = {
+        injury: 'physical_injury',
+        wound: 'physical_injury',
+        physical: 'physical_injury',
+        physical_injury: 'physical_injury',
+        burn: 'burn',
+        poison: 'poison',
+        poisoned: 'poison',
+        paralysis: 'paralysis',
+        paralyzed: 'paralysis',
+        disease: 'disease',
+        sickness: 'disease',
+        blindness: 'blindness',
+        blind: 'blindness',
+        stun: 'stun',
+        stunned: 'stun',
+        fear: 'fear',
+        panic: 'fear',
+        terror: 'fear',
+        restraint: 'restraint',
+        restrained: 'restraint',
+        immobilized: 'restraint',
+        curse: 'curse',
+        cursed: 'curse',
+        affliction: 'curse',
+        electrical: 'electrical',
+        lightning: 'electrical',
+        exhaustion: 'exhaustion',
+        mental: 'mental_status',
+        mental_status: 'mental_status',
+        status: 'other_status',
+        other_status: 'other_status',
+    };
+    return aliases[text] || 'none';
+}
+
+function normalizeEffectTargetRole(value) {
+    const text = cleanText(value).toLowerCase().replace(/[\s-]+/g, '_');
+    return ['opptarget', 'opp_target', 'harmedobserver', 'harmed_observer', 'actiontarget', 'action_target', 'user'].includes(text)
+        ? text
+        : 'unknown';
+}
+
+function normalizeSemanticEffectSeverity(value) {
+    const text = cleanText(value).toLowerCase().replace(/[\s-]+/g, '_');
+    return ['minor', 'moderate', 'severe', 'critical'].includes(text) ? text : 'minor';
+}
+
+function normalizeEffectPersistence(value) {
+    const text = cleanText(value).toLowerCase().replace(/[\s-]+/g, '_');
+    if (['lasting', 'persistent', 'ongoing', 'continuing', 'yes', 'y', 'true'].includes(text)) return 'lasting';
+    return 'none';
+}
+
+function defaultBodyPartForEffect(effectType) {
+    if (['poison', 'disease', 'curse', 'electrical', 'exhaustion', 'mental_status', 'other_status'].includes(effectType)) return 'body';
+    if (effectType === 'blindness') return 'eyes';
+    if (effectType === 'fear' || effectType === 'stun') return 'mind';
+    if (effectType === 'paralysis' || effectType === 'restraint') return 'body';
+    return 'body';
+}
+
+function cleanText(value) {
+    return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
 }
 
 function compactAttackSource(value) {
@@ -1156,6 +1328,17 @@ function uniqueTextParts(values) {
         if (seen.has(key)) continue;
         seen.add(key);
         result.push(text);
+    }
+    return result;
+}
+
+function uniqueRealNames(values) {
+    const result = [];
+    for (const value of values || []) {
+        const name = String(value || '').trim();
+        if (!isReal(name)) continue;
+        if (result.some(existing => sameName(existing, name))) continue;
+        result.push(name);
     }
     return result;
 }
@@ -1214,6 +1397,17 @@ function applyInflictedNpcInjuriesToNpcMap(npcs, trackerSnapshot, injuries) {
     }
 }
 
+function mergeNpcResultInjuryDelta(npcs, trackerSnapshot, npcName, injury) {
+    if (!isReal(npcName) || !injury) return;
+    const before = normalizeTrackerEntry(npcs[npcName] || trackerSnapshot?.[npcName] || {});
+    npcs[npcName] = normalizeTrackerEntry({
+        ...before,
+        condition: worseTrackerCondition(before.condition, injury.condition),
+        wounds: applyListDelta(before.wounds, injury.woundsAdd, []),
+        statusEffects: applyListDelta(before.statusEffects, injury.statusAdd, []),
+    });
+}
+
 function worseTrackerCondition(current, next) {
     const order = ['healthy', 'bruised', 'wounded', 'badly_wounded', 'critical', 'dead'];
     const currentIndex = Math.max(0, order.indexOf(normalizeTrackerCondition(current)));
@@ -1232,7 +1426,7 @@ function applyUserResultInjuryDeltaToState(before, delta) {
     return normalizeTrackerUserState(result);
 }
 
-function deriveInflictedUserInjuryFromAggression({ npc, proactivityResult, attackType, reactionOutcome, margin, resolutionPacket }) {
+function deriveInflictedTargetInjuryFromAggression({ npc, target, proactivityResult, attackType, reactionOutcome, margin, resolutionPacket }) {
     if (!['npc_overpowers', 'npc_succeeds'].includes(reactionOutcome)) return null;
     const source = [
         attackType,
@@ -1247,16 +1441,22 @@ function deriveInflictedUserInjuryFromAggression({ npc, proactivityResult, attac
     const injuryKind = aggressionInjuryKind(source);
     const wound = `${severity} ${bodyPart} ${injuryKind}`.replace(/\s+/g, ' ').trim();
     const status = statusFromInflictedInjury(source, bodyPart, severity);
+    const targetName = normalizeProactivityTarget(target);
+    const targetIsUser = isUserProactivityTarget({ ProactivityTarget: targetName });
 
     return {
         sourceNpc: npc,
+        target: targetName,
+        targetType: targetIsUser ? 'user' : 'npc',
         attackType,
         reactionOutcome,
         severity,
         condition: conditionFromInflictedSeverity(severity),
         woundsAdd: [wound],
         statusAdd: status ? [status] : [],
-        NarrationRule: `${npc}'s ${attackType} causes ${wound}; narrate it as a lasting user injury when describing the NPC attack result, and apply later impairment by severity and affected body function.`,
+        NarrationRule: targetIsUser
+            ? `${npc}'s ${attackType} causes ${wound}; narrate it as a lasting user injury when describing the NPC attack result, and apply later impairment by severity and affected body function.`
+            : `${npc}'s ${attackType} causes ${wound} to ${targetName}; narrate it as a lasting NPC injury when describing the NPC attack result, and apply later impairment by severity and affected body function.`,
     };
 }
 
@@ -1500,6 +1700,48 @@ function evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proact
     return evaluateUserImpairment(ledger, context, semantic, 'DefendAgainstNpcAggression', 'PHY', 'Y');
 }
 
+function evaluateNpcDefenseImpairment(npcName, trackerUpdate, trackerSnapshot, proactivityResult) {
+    if (!isReal(npcName)) return noNpcImpairment('no NPC defender named');
+    const state = normalizeTrackerEntry(trackerUpdate?.[npcName] || trackerSnapshot?.[npcName] || {});
+    const sources = collectImpairmentSources(state, false);
+    if (!sources.length) return noNpcImpairment();
+
+    const actionText = [
+        'defend evade dodge block brace resist survive avoid NPC aggression',
+        proactivityResult?.Intent,
+        proactivityResult?.Impulse,
+    ].filter(Boolean).join(' ');
+    const actionFunctions = classifyUserActionFunctions(actionText, 'PHY');
+
+    const matches = sources
+        .map(source => ({
+            source,
+            matched: matchedImpairmentFunctions(source.functions, actionFunctions),
+        }))
+        .filter(item => item.matched.length);
+    if (!matches.length) return noNpcImpairment('tracked NPC impairments do not affect this defense');
+
+    matches.sort((a, b) => USER_IMPAIRMENT_STAGE[b.source.stage].rank - USER_IMPAIRMENT_STAGE[a.source.stage].rank);
+    const best = matches[0];
+    const penalty = USER_IMPAIRMENT_STAGE[best.source.stage]?.penalty ?? 0;
+    const matchedText = unique(best.matched).join(', ');
+    const affectedText = unique(best.source.functions).join(', ');
+
+    return {
+        Relevant: 'Y',
+        NPC: npcName,
+        Stage: best.source.stage,
+        RollPenalty: penalty,
+        AppliedToRoll: penalty < 0 ? 'Y' : 'N',
+        Source: best.source.label,
+        SourceType: best.source.type,
+        AffectedFunction: affectedText || NONE,
+        MatchedActionFunction: matchedText || NONE,
+        Reason: `${npcName}'s ${best.source.label} affects ${matchedText || 'their defense'}`,
+        NarrationRule: `${npcName} may still defend, but ${best.source.label} limits clean defense; narrate pain, compensation, instability, reduced speed, partial resistance, or cost according to the computed aggression result.`,
+    };
+}
+
 function getEffectiveUserImpairmentState(ledger, context) {
     const saved = buildPlayerTrackerSnapshot(context);
     const currentTurnDelta = ledger?.trackerUpdateEngine?.user;
@@ -1640,7 +1882,7 @@ function matchedImpairmentFunctions(sourceFunctions, actionFunctions) {
     return unique(matched);
 }
 
-function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, context, audit, userResultDelta = null) {
+function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, context, audit, userResultDelta = null, npcResultDeltas = []) {
     const semantic = ledger.trackerUpdateEngine || {};
     const userBefore = buildPlayerTrackerSnapshot(context);
     let user = applyTrackerDeltaToState(userBefore, semantic.user, true);
@@ -1666,11 +1908,15 @@ function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, c
         });
     }
     applyInflictedNpcInjuriesToNpcMap(npcs, trackerSnapshot, relationshipTrackerUpdate?.__inflictedInjuries || []);
+    for (const item of npcResultDeltas || []) {
+        mergeNpcResultInjuryDelta(npcs, trackerSnapshot, item?.NPC, item?.injury);
+    }
 
     audit.push('STEP 6.5: EXECUTE TrackerUpdateEngine EXPLICIT DELTAS');
     audit.push(`6.5a user=${compact(user)}`);
     audit.push(`6.5b npcDeltas=${compact((semantic.npcs || []).map(delta => delta.NPC || NONE))}`);
     if (userResultDelta) audit.push(`6.5c deterministicUserInjuryDelta=${compact(userResultDelta)}`);
+    if (npcResultDeltas?.length) audit.push(`6.5d deterministicNpcAggressionInjuryDeltas=${compact(npcResultDeltas)}`);
     audit.push('---');
 
     return { user, npcs };
@@ -1776,6 +2022,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             Proactive: 'N',
             Intent: 'NONE',
             Impulse: 'NONE',
+            ProactivityTarget: NONE,
             TargetsUser: 'N',
             ProactivityTier: tier,
         };
@@ -1791,8 +2038,9 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
 
         if (tier === 'FORCED') {
             const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
-            const targetsUser = proactivityGuard ? 'N' : targetsUserFromIntent(intent);
-            candidates.push({ NPC: handoff.NPC, die: 20, tier, intent, impulse, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' });
+            const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
+            const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }) ? 'Y' : 'N';
+            candidates.push({ NPC: handoff.NPC, die: 20, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' });
             audit.push('6.4i FORCED candidate');
             continue;
         }
@@ -1809,12 +2057,13 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
 
         if (passes === 'Y') {
             const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
-            const targetsUser = proactivityGuard ? 'N' : targetsUserFromIntent(intent);
-            candidates.push({ NPC: handoff.NPC, die, tier, intent, impulse, TargetsUser: targetsUser, Threshold: threshold, passes });
+            const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
+            const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }) ? 'Y' : 'N';
+            candidates.push({ NPC: handoff.NPC, die, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: threshold, passes });
             audit.push(`6.5c selectIntent=${intent}`);
-            audit.push(`6.5e targetsUserFromIntent=${targetsUser}`);
+            audit.push(`6.5e ProactivityTarget=${proactivityTarget}; TargetsUser=${targetsUser}`);
         } else {
-            audit.push('6.5c Proactive=N -> Intent=NONE, Impulse=NONE, TargetsUser=N');
+            audit.push('6.5c Proactive=N -> Intent=NONE, Impulse=NONE, ProactivityTarget=(none), TargetsUser=N');
         }
     }
 
@@ -1827,6 +2076,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             Proactive: 'Y',
             Intent: candidate.intent,
             Impulse: candidate.impulse,
+            ProactivityTarget: candidate.ProactivityTarget,
             TargetsUser: candidate.TargetsUser,
             ProactivityTier: candidate.tier,
             ProactivityDie: candidate.die,
@@ -1839,6 +2089,38 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
     return { results };
 }
 
+function normalizeProactivityTarget(value) {
+    const text = String(value || '').trim();
+    if (!text || ['none', '(none)', 'null', 'n/a'].includes(text.toLowerCase())) return NONE;
+    if (text === USER_PROACTIVITY_TARGET) return USER_PROACTIVITY_TARGET;
+    if (/^\{\{\s*user\s*\}\}$/i.test(text)) return USER_PROACTIVITY_TARGET;
+    if (/^(?:user|player|protagonist|you|yourself)$/i.test(text)) return USER_PROACTIVITY_TARGET;
+    return text;
+}
+
+function isUserProactivityTarget(result) {
+    return normalizeProactivityTarget(result?.ProactivityTarget) === USER_PROACTIVITY_TARGET
+        || result?.TargetsUser === 'Y';
+}
+
+function isNpcProactivityTarget(result) {
+    const target = normalizeProactivityTarget(result?.ProactivityTarget);
+    return isReal(target) && target !== USER_PROACTIVITY_TARGET;
+}
+
+function hasAggressionProactivityTarget(result) {
+    return isUserProactivityTarget(result) || isNpcProactivityTarget(result);
+}
+
+function deriveProactivityTarget(handoff, resolutionPacket, intent) {
+    if (!isImmediateAttackIntent(intent)) return NONE;
+    const relation = handoff?.RelationToUserAction || relationToUserAction(handoff?.NPC, resolutionPacket);
+    if (relation?.isOpp || relation?.isDirect || relation?.isHarmed) return USER_PROACTIVITY_TARGET;
+    const harmed = firstReal(resolutionPacket?.HarmedObservers);
+    if (isReal(harmed) && !sameName(harmed, handoff?.NPC)) return harmed;
+    return USER_PROACTIVITY_TARGET;
+}
+
 function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResults, resolutionPacket, dice, audit, context) {
     const userCore = getUserCoreStats(ledger);
     const counterPotential = resolutionPacket?.CounterPotential || 'none';
@@ -1848,7 +2130,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     const retaliationAllowed = resolutionPacket?.classifyHostilePhysicalIntent === 'Y';
     const proactiveAttackAllowed = Object.values(proactivityResults || {}).some(result =>
         result?.Proactive === 'Y'
-        && result?.TargetsUser === 'Y'
+        && hasAggressionProactivityTarget(result)
         && result?.Intent === 'ESCALATE_VIOLENCE');
     const attackType = criticalSuccess
         ? 'None'
@@ -1863,7 +2145,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
         attackType !== 'None'
         &&
         result.Proactive === 'Y'
-        && result.TargetsUser === 'Y'
+        && hasAggressionProactivityTarget(result)
         && isImmediateAttackIntentForType(result.Intent, attackType));
     const counterTarget = counterAllowed ? firstReal(resolutionPacket?.OppTargets?.NPC) || firstReal(resolutionPacket?.ActionTargets) : null;
     const aggressive = counterAllowed && !criticalSuccess && counterTarget
@@ -1871,6 +2153,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
             Proactive: 'Y',
             Intent: 'BOUNDARY_PHYSICAL',
             Impulse: 'ANGER',
+            ProactivityTarget: USER_PROACTIVITY_TARGET,
             TargetsUser: 'Y',
             ProactivityTier: 'FORCED',
             ProactivityDie: 20,
@@ -1879,6 +2162,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
         : proactiveAggressive;
     const results = {};
     let userTrackerDelta = null;
+    const npcTrackerDeltas = [];
 
     audit.push('STEP 7: EXECUTE NPCAggressionResolution');
     audit.push(`7.1 counterPotential=${counterPotential}`);
@@ -1895,47 +2179,64 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
             else audit.push('7.2a no immediate counterattack/retaliation trigger');
         audit.push('7.2a AGGRESSION_RESULTS={}');
         audit.push('---');
-        return { results, userTrackerDelta };
+        return { results, userTrackerDelta, npcTrackerDeltas };
     }
 
     audit.push(`7.3 getUserCoreStats=${compact(userCore)}`);
 
     for (const [npc, proactivityResult] of aggressive) {
+        const target = normalizeProactivityTarget(proactivityResult?.ProactivityTarget || USER_PROACTIVITY_TARGET);
+        const targetIsUser = target === USER_PROACTIVITY_TARGET;
         const npcCore = normalizeCore(trackerUpdate[npc]?.currentCoreStats || trackerSnapshot[npc]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
         const npcImpairment = evaluateNpcAggressionImpairment(npc, trackerUpdate, trackerSnapshot, proactivityResult);
         const npcImpairmentPenalty = Number(npcImpairment?.AppliedToRoll === 'Y' ? npcImpairment.RollPenalty : 0);
-        const userImpairment = evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult);
-        const userImpairmentPenalty = Number(userImpairment?.AppliedToRoll === 'Y' ? userImpairment.RollPenalty : 0);
+        const targetImpairment = targetIsUser
+            ? evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult)
+            : evaluateNpcDefenseImpairment(target, trackerUpdate, trackerSnapshot, proactivityResult);
+        const targetImpairmentPenalty = Number(targetImpairment?.AppliedToRoll === 'Y' ? targetImpairment.RollPenalty : 0);
+        const defenderCore = targetIsUser
+            ? userCore
+            : normalizeCore(trackerUpdate[target]?.currentCoreStats || trackerSnapshot[target]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
         const npcDie = dice.d20();
-        const userDie = dice.d20();
+        const defenderDie = dice.d20();
         const npcTotal = npcDie + npcCore.PHY + counterBonus + npcImpairmentPenalty;
-        const userTotal = userDie + userCore.PHY + userImpairmentPenalty;
-        const margin = npcTotal - userTotal;
+        const defenderTotal = defenderDie + statValue(defenderCore, 'PHY') + targetImpairmentPenalty;
+        const margin = npcTotal - defenderTotal;
         const ReactionOutcome = aggressionReactionOutcome(margin);
-        const inflictedUserInjury = deriveInflictedUserInjuryFromAggression({
+        const inflictedTargetInjury = deriveInflictedTargetInjuryFromAggression({
             npc,
+            target,
             proactivityResult,
             attackType,
             reactionOutcome: ReactionOutcome,
             margin,
             resolutionPacket,
         });
+        const inflictedUserInjury = inflictedTargetInjury?.targetType === 'user' ? inflictedTargetInjury : null;
+        const inflictedNpcInjury = inflictedTargetInjury?.targetType === 'npc' && isReal(target)
+            ? inflictedTargetInjury
+            : null;
         if (inflictedUserInjury) {
             userTrackerDelta = mergeUserResultInjuryDelta(userTrackerDelta, inflictedUserInjury);
         }
-        results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin, NPCImpairment: npcImpairment, UserImpairment: userImpairment, InflictedUserInjury: inflictedUserInjury || null };
+        if (inflictedNpcInjury) {
+            npcTrackerDeltas.push({ NPC: target, injury: inflictedNpcInjury });
+        }
+        results[npc] = { AttackType: attackType, AttackIntent: proactivityResult.Intent, ProactivityTarget: target, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin, NPCImpairment: npcImpairment, UserImpairment: targetIsUser ? targetImpairment : null, TargetImpairment: targetImpairment, InflictedUserInjury: inflictedUserInjury || null, InflictedTargetInjury: inflictedTargetInjury || null };
         audit.push(`7.5 ${npc}.npcCore=${compact(npcCore)}`);
         audit.push(`7.5d ${npc}.NPCImpairmentEngine=${compact(npcImpairment)}`);
         audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}+${counterBonus}${npcImpairmentPenalty ? `+impairment(${npcImpairmentPenalty})` : ''}=${npcTotal}`);
-        audit.push(`7.5f ${npc}.UserDefenseImpairmentEngine=${compact(userImpairment)}`);
-        audit.push(`7.5g userTotal=${userDie}+${userCore.PHY}${userImpairmentPenalty ? `+impairment(${userImpairmentPenalty})` : ''}=${userTotal}`);
+        audit.push(`7.5f ${npc}.TargetDefenseImpairmentEngine=${compact(targetImpairment)}`);
+        audit.push(`7.5g targetTotal=${defenderDie}+${statValue(defenderCore, 'PHY')}${targetImpairmentPenalty ? `+impairment(${targetImpairmentPenalty})` : ''}=${defenderTotal}`);
         audit.push(`7.5h ${npc}.InflictedUserInjury=${compact(inflictedUserInjury || {})}`);
+        audit.push(`7.5i ${npc}.InflictedTargetInjury=${compact(inflictedTargetInjury || {})}`);
+        audit.push(`7.5j ${npc}.ProactivityTarget=${target}`);
         audit.push(`7.6 AGGRESSION_RESULT=${compact(results[npc])}`);
     }
 
     audit.push(`7.7 AGGRESSION_RESULTS=${compact(results)}`);
     audit.push('---');
-    return { results, userTrackerDelta };
+    return { results, userTrackerDelta, npcTrackerDeltas };
 }
 
 

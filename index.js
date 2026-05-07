@@ -2604,15 +2604,6 @@ async function prependComputedDebug(messageId, type) {
             } catch (error) {
                 postReplyTrackerWarning = error instanceof Error ? error.message : String(error);
                 console.warn(`[${EXTENSION_NAME}] post-reply tracker pass failed; keeping pre-reply tracker snapshot.`, error);
-                try {
-                    globalThis.toastr?.warning?.(
-                        'Post-reply tracker update failed; keeping the pre-reply tracker snapshot.',
-                        EXTENSION_NAME,
-                        { timeOut: 9000, extendedTimeOut: 9000 },
-                    );
-                } catch {
-                    // Toasts are best-effort only.
-                }
             }
             await saveTrackerUpdate(context, buildTrackerUpdateForPersistence(trackerDisplaySnapshot));
             root.snapshots[messageKey] = {

@@ -43,7 +43,7 @@ function ResolutionEngine(input) {
     rule: examples include snatching a scroll from under an NPC's hand, taking a guarded purse, forcing past a guard through a doorway, wrenching an object away, pushing into a protected space, or catching/holding an NPC's wrist/arm/sleeve only to stop them leaving or force attention
     rule: return false if classifyHostilePhysicalIntent=true
     rule: return false for casual proximity, ordinary movement, normal item handling, conversation, non-forceful requests, pure social pressure, or any no-stakes action
-    rule: this is not combat and must not produce LandedActions, CounterPotential, or H4 by itself
+    rule: this is not combat and must not produce multi-action LandedActions, CounterPotential, or H4 by itself
 
   identifyTargets(input, challenge, finalGoal, context):
     policy: LOCKED, EXPLICIT-ONLY
@@ -75,9 +75,11 @@ function ResolutionEngine(input) {
 
   actionCount(input, challenge):
     policy: LOCKED, EXPLICIT-ONLY, MAX 3 ACTIONS
-    rule: only applies to explicit hostile/combat attack sequences
+    rule: every resolved action has at least one action marker
+    rule: non-combat actions return exactly one action marker: [a1]
+    rule: combat sequences may return up to three action markers
     rule: do not count setup, movement, repositioning, defense, recovery, or non-attack flavor as additional actions
-    rule: each individual attack within a sequence counts as one action
+    rule: each individual combat attack/effect within a sequence counts as one action, including physical attacks, spells, status effects, or mixed sequences
     rule: return one action marker per attack: [a1], [a1,a2], or [a1,a2,a3]
 
   mapStats(input, finalGoal, challenge, targets, context):
@@ -135,9 +137,10 @@ function ResolutionEngine(input) {
 
   resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore):
     policy: LOCKED
-    comment: LandedActions and CounterPotential only apply to explicit hostile PHY actions with classifyHostilePhysicalIntent=true.
-    comment: For all other actions, resolution is Success, Stalemate/struggle, or Failure.
-    comment: CounterPotential = how open {{user}} is to a counter after failing a hostile PHY action.
+    comment: LandedActions applies to all resolved actions.
+    comment: Non-combat success has LandedActions:1; stalemate/failure has LandedActions:0.
+    comment: Combat sequences can have LandedActions up to 3, capped by actionCount.
+    comment: CounterPotential = how open {{user}} is to a counter after failing a combat action.
     atkDie = 1d20
     atkTot = atkDie + userCore[stats.USER]
     if stats.OPP=ENV:
@@ -147,7 +150,7 @@ function ResolutionEngine(input) {
       defDie = 1d20
       defTot = defDie + targetCore[stats.OPP]
     margin = atkTot - defTot
-    if stats.USER=PHY and classifyHostilePhysicalIntent=true:
+    if classifyCombatActionSequence=true:
       tierTable:
         margin >= 8 -> OutcomeTier:Critical_Success LandedActions:3 Outcome:dominant_impact CounterPotential:none
         margin >= 5 -> OutcomeTier:Moderate_Success LandedActions:2 Outcome:solid_impact CounterPotential:none
@@ -159,9 +162,9 @@ function ResolutionEngine(input) {
       LandedActions = min(LandedActions, actions.length)
       return {OutcomeTier, LandedActions, Outcome, CounterPotential}
     else:
-      if margin >= 1 -> OutcomeTier:Success LandedActions:(none) Outcome:success CounterPotential:none
-      if margin = 0 -> OutcomeTier:Stalemate LandedActions:(none) Outcome:struggle CounterPotential:none
-      else -> OutcomeTier:Failure LandedActions:(none) Outcome:failure CounterPotential:none
+      if margin >= 1 -> OutcomeTier:Success LandedActions:1 Outcome:success CounterPotential:none
+      if margin = 0 -> OutcomeTier:Stalemate LandedActions:0 Outcome:struggle CounterPotential:none
+      else -> OutcomeTier:Failure LandedActions:0 Outcome:failure CounterPotential:none
       return {OutcomeTier, LandedActions, Outcome, CounterPotential}
 
   execution:
@@ -587,7 +590,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     FYW:
 'FIRST-YES-WINS. Single-pass.',
     UNIVERSAL:
-'Determine NPC initiative only: whether they act, what intent they take, whether they target {{user}}, and the proactivity roll result. Do not resolve physical attack/counter outcomes here.'
+'Determine NPC initiative only: whether they act, what intent they take, who their immediate target is, and the proactivity roll result. Do not resolve physical attack/counter outcomes here.'
   });
 
   parseFinalState(finalState):
@@ -607,9 +610,8 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if resolutionPacket.STAKES=N -> Normal_Interaction
     if g=IntimacyAdvancePhysical -> Intimacy_Physical
     if g=IntimacyAdvanceVerbal -> Intimacy_Verbal
-    if resolutionPacket.classifyHostilePhysicalIntent=Y -> Combat
-    if resolutionPacket.LandedActions > 0 -> Combat
-    if resolutionPacket.ActionTargets contains >=1 living entity && resolutionPacket.LandedActions=(none) -> Social
+    if resolutionPacket.classifyCombatActionSequence=Y -> Combat
+    if resolutionPacket.ActionTargets contains >=1 living entity -> Social
     if resolutionPacket.OppTargets.ENV != [(none)] -> Skill
     else -> Normal_Interaction
 
@@ -690,9 +692,15 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       if kind in [Skill, Social] -> SUPPORT_ACT
       else -> PLAN_OR_BANTER
 
-  targetsUserFromIntent(intent):
+  proactivityTarget(handoff, resolutionPacket, intent):
     policy: FYW
-    if intent in [ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, THREAT_OR_POSTURE] -> Y
+    if intent not in [ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, THREAT_OR_POSTURE] -> (none)
+    if handoff.RelationToUserAction.isOpp || handoff.RelationToUserAction.isDirect || handoff.RelationToUserAction.isHarmed -> {{user}}
+    if resolutionPacket.HarmedObservers has a named NPC not equal to acting NPC -> that NPC
+    else -> {{user}}
+
+  targetsUserFromProactivityTarget(ProactivityTarget):
+    if ProactivityTarget={{user}} -> Y
     else -> N
 
   execution:
@@ -706,19 +714,21 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode, handoff.Target)
       guard = proactivityRefereeGuard(handoff, resolutionPacket)
       if guard exists -> tier = DORMANT else tier = classifyProactivityTier(handoff, chaosBand, counterPotential)
-      provisionalResult = {NPC, Proactive:N, Intent:NONE, Impulse:NONE, TargetsUser:N, ProactivityTier:tier}
+      provisionalResult = {NPC, Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N, ProactivityTier:tier}
       if tier=FORCED:
         intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode)
-        candidate = {NPC,die:20,tier:FORCED,intent:intent,impulse:impulse,TargetsUser:targetsUserFromIntent(intent),Threshold:AUTO,passes:Y}
+        target = proactivityTarget(handoff, resolutionPacket, intent)
+        candidate = {NPC,die:20,tier:FORCED,intent:intent,impulse:impulse,ProactivityTarget:target,TargetsUser:targetsUserFromProactivityTarget(target),Threshold:AUTO,passes:Y}
       else:
         roll proactivityDie, thresholdFromTier, passes
       if passes=Y:
         intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode)
+        target = proactivityTarget(handoff, resolutionPacket, intent)
         store candidate
-      if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, TargetsUser:N
+      if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N
     sort candidates by die descending
     promote up to cap candidates to proactive results
-    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|NONE],Impulse:[ANGER|FEAR|BOND],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?}...}
+    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?}...}
 }
 ----------------
 function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSnapshot, trackerUpdate, diceBudget) {
@@ -739,7 +749,7 @@ function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSn
     if resolutionPacket.OutcomeTier=Critical_Success -> None
     if resolutionPacket.CounterPotential in [light,medium,severe] -> CounterAttack
     if resolutionPacket.classifyHostilePhysicalIntent=Y -> Retaliation
-    if any proactivityResult has Proactive=Y, TargetsUser=Y, and Intent=ESCALATE_VIOLENCE -> ProactiveAttack
+    if any proactivityResult has Proactive=Y, ProactivityTarget not (none), and Intent=ESCALATE_VIOLENCE -> ProactiveAttack
     rule: ProactiveAttack is only created by ESCALATE_VIOLENCE. BOUNDARY_PHYSICAL and THREAT_OR_POSTURE may be narrated as proactivity, but they do not create an NPC attack roll unless CounterAttack or Retaliation already applies.
     else -> None
 
@@ -765,10 +775,10 @@ function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSn
     counterBonus = counterBonusFromPotential(counterPotential)
     attackType = determineAttackType(resolutionPacket)
     if attackType=None -> return {}
-    aggressive = NPCs with Proactive=Y, TargetsUser=Y, and isImmediateAttackIntent(Intent)=Y
+    aggressive = NPCs with Proactive=Y, ProactivityTarget not (none), and isImmediateAttackIntent(Intent)=Y
     if attackType=CounterAttack and resolutionPacket.OutcomeTier!=Critical_Success:
       counterTarget = immediateCounterTarget(resolutionPacket)
-      if counterTarget exists and not already aggressive -> force counterTarget as {Proactive:Y,Intent:BOUNDARY_PHYSICAL,Impulse:ANGER,TargetsUser:Y,ProactivityTier:FORCED,ProactivityDie:20,Threshold:AUTO}
+      if counterTarget exists and not already aggressive -> force counterTarget as {Proactive:Y,Intent:BOUNDARY_PHYSICAL,Impulse:ANGER,ProactivityTarget:{{user}},TargetsUser:Y,ProactivityTier:FORCED,ProactivityDie:20,Threshold:AUTO}
     FOR EACH aggressive NPC:
       npcCore = getCurrentCoreStats(NPC) from trackerUpdate or trackerSnapshot
       userCore = getUserCoreStats()
@@ -792,7 +802,7 @@ export function createDice() {
     };
 }
 
-export function hostilePhysicalOutcome(margin, actionLength) {
+export function combatOutcome(margin, actionLength) {
     let outcome;
     if (margin >= 8) outcome = { OutcomeTier: 'Critical_Success', LandedActions: 3, Outcome: 'dominant_impact', CounterPotential: 'none' };
     else if (margin >= 5) outcome = { OutcomeTier: 'Moderate_Success', LandedActions: 2, Outcome: 'solid_impact', CounterPotential: 'none' };
@@ -805,10 +815,12 @@ export function hostilePhysicalOutcome(margin, actionLength) {
     return outcome;
 }
 
+export const hostilePhysicalOutcome = combatOutcome;
+
 export function nonHostileOutcome(margin) {
-    if (margin >= 1) return { OutcomeTier: 'Success', LandedActions: '(none)', Outcome: 'success', CounterPotential: 'none' };
-    if (margin === 0) return { OutcomeTier: 'Stalemate', LandedActions: '(none)', Outcome: 'struggle', CounterPotential: 'none' };
-    return { OutcomeTier: 'Failure', LandedActions: '(none)', Outcome: 'failure', CounterPotential: 'none' };
+    if (margin >= 1) return { OutcomeTier: 'Success', LandedActions: 1, Outcome: 'success', CounterPotential: 'none' };
+    if (margin === 0) return { OutcomeTier: 'Stalemate', LandedActions: 0, Outcome: 'struggle', CounterPotential: 'none' };
+    return { OutcomeTier: 'Failure', LandedActions: 0, Outcome: 'failure', CounterPotential: 'none' };
 }
 
 export function counterBonusFromPotential(counterPotential) {
@@ -1372,9 +1384,8 @@ export function classifyAction(packet) {
     if (packet.STAKES === 'N') return 'Normal_Interaction';
     if (packet.GOAL === 'IntimacyAdvancePhysical') return 'Intimacy_Physical';
     if (packet.GOAL === 'IntimacyAdvanceVerbal') return 'Intimacy_Verbal';
-    if (packet.classifyHostilePhysicalIntent === 'Y') return 'Combat';
-    if (landedBool(packet.LandedActions)) return 'Combat';
-    if (toRealArray(packet.ActionTargets).length >= 1 && packet.LandedActions === '(none)') return 'Social';
+    if (packet.classifyCombatActionSequence === 'Y') return 'Combat';
+    if (toRealArray(packet.ActionTargets).length >= 1) return 'Social';
     if (toRealArray(packet.OppTargets?.ENV).length >= 1) return 'Skill';
     return 'Normal_Interaction';
 }
