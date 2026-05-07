@@ -851,6 +851,16 @@ function applyHostilePhysicalIntentHardRules(semantic, audit) {
     const semanticValue = bool(semantic.classifyHostilePhysicalIntent);
     const source = semanticSourceText(semantic);
 
+    if (semanticValue && isBodyBoundaryPressure(source) && !hasDirectBodilyAggression(source)) {
+        audit.push(`2.7o.1 deterministicHostilePhysicalIntentReferee=${compact({
+            hardRule: 'ResolutionEngine.classifyHostilePhysicalIntent: grabbing/catching/holding a wrist/arm/clothing only to stop, delay, or force attention is boundary pressure, not hostile physical intent',
+            from: 'Y',
+            to: 'N',
+            evidence: source.slice(0, 220),
+        })}`);
+        return { value: false };
+    }
+
     if (semanticValue && isObjectBoundaryContest(source) && !hasDirectBodilyAggression(source)) {
         audit.push(`2.7o.1 deterministicHostilePhysicalIntentReferee=${compact({
             hardRule: 'ResolutionEngine.classifyHostilePhysicalIntent: forceful object/possession/space contest is not hostile physical intent unless the NPC body is attacked/restrained/controlled',
@@ -871,7 +881,7 @@ function applyPhysicalBoundaryPressureHardRules(semantic, targets, options, audi
     const hardBoundary = options.hasStakes === 'Y'
         && !options.hostilePhysical
         && hasLivingOpposition
-        && isObjectBoundaryContest(source)
+        && (isObjectBoundaryContest(source) || isBodyBoundaryPressure(source))
         && !hasDirectBodilyAggression(source);
 
     if (value && (options.hasStakes !== 'Y' || options.hostilePhysical || !hasLivingOpposition)) {
@@ -886,7 +896,7 @@ function applyPhysicalBoundaryPressureHardRules(semantic, targets, options, audi
         value = false;
     } else if (!value && hardBoundary) {
         audit.push(`2.7p deterministicPhysicalBoundaryPressureReferee=${compact({
-            hardRule: 'ResolutionEngine.classifyPhysicalBoundaryPressure: forceful object/possession/space contest against resisting NPC applies boundary pressure',
+            hardRule: 'ResolutionEngine.classifyPhysicalBoundaryPressure: forceful object/space/departure/body-boundary contest against resisting NPC applies boundary pressure',
             from: 'N',
             to: 'Y',
             evidence: source.slice(0, 220),
@@ -921,8 +931,15 @@ function isObjectBoundaryContest(source) {
     return forcefulObject && objectOrBoundary;
 }
 
+function isBodyBoundaryPressure(source) {
+    const gentleGrab = /\b(?:catch(?:es|ing|ed)?|grab(?:s|bed|bing)?|hold(?:s|ing|held)?|seize(?:s|d|ing)?|take(?:s|n)?|caught)\b.{0,50}\b(?:wrist|arm|forearm|hand|shoulder|sleeve|cloak|collar|clothing|shirt|coat)\b/.test(source)
+        || /\b(?:wrist|arm|forearm|hand|shoulder|sleeve|cloak|collar|clothing|shirt|coat)\b.{0,50}\b(?:catch(?:es|ing|ed)?|grab(?:s|bed|bing)?|hold(?:s|ing|held)?|seize(?:s|d|ing)?|caught)\b/.test(source);
+    const stopOrAttention = /\b(?:before|stop(?:s|ped|ping)?|keep(?:s|ing)?|prevent(?:s|ed|ing)?|delay(?:s|ed|ing)?|halt(?:s|ed|ing)?|wait|listen|attention|turn(?:s|ed|ing)? back|walk(?:s|ed|ing)? away|leave(?:s|ing)?|leaving|depart(?:s|ed|ing)?|go(?:es|ing)? away|run(?:s|ning)? away|block(?:s|ed|ing)? departure)\b/.test(source);
+    return gentleGrab && stopOrAttention;
+}
+
 function hasDirectBodilyAggression(source) {
-    return /\b(punch(?:es|ed|ing)?|kick(?:s|ed|ing)?|strike(?:s|struck|striking)?|hit(?:s|ting)?|slash(?:es|ed|ing)?|stab(?:s|bed|bing)?|cut(?:s|ting)?|choke(?:s|d|ing)?|tackle(?:s|d|ing)?|slam(?:s|med|ming)?|shove(?:s|d|ing)?\s+(?:him|her|them|npc|guard|bandit|woman|man)|grab(?:s|bed|bing)?\s+(?:him|her|them|npc|guard|bandit|woman|man|wrist|arm|hand|throat|neck|shoulder|body|waist|hair|face|leg|ankle)\b|restrain(?:s|ed|ing)?|pin(?:s|ned|ning)?|immobiliz(?:e|es|ed|ing)|drag(?:s|ged|ging)?\s+(?:him|her|them|npc|guard|bandit|woman|man)|force(?:s|d|ing)?\s+(?:him|her|them|npc|guard|bandit|woman|man)\b|block(?:s|ed|ing)?\s+(?:his|her|their)?\s*(?:escape|movement))\b/.test(source);
+    return /\b(punch(?:es|ed|ing)?|kick(?:s|ed|ing)?|strike(?:s|struck|striking)?|hit(?:s|ting)?|slash(?:es|ed|ing)?|stab(?:s|bed|bing)?|cut(?:s|ting)?|injur(?:e|es|ed|ing)?|hurt(?:s|ing)?|choke(?:s|d|ing)?|tackle(?:s|d|ing)?|slam(?:s|med|ming)?|twist(?:s|ed|ing)?|crush(?:es|ed|ing)?|shove(?:s|d|ing)?\s+(?:him|her|them|npc|guard|bandit|woman|man)|grab(?:s|bed|bing)?\s+(?:him|her|them|npc|guard|bandit|woman|man|throat|neck|body|waist|hair|face|leg|ankle)\b|restrain(?:s|ed|ing)?|pin(?:s|ned|ning)?|immobiliz(?:e|es|ed|ing)|drag(?:s|ged|ging)?\s+(?:him|her|them|npc|guard|bandit|woman|man)|force(?:s|d|ing)?\s+(?:him|her|them|npc|guard|bandit|woman|man)\b|block(?:s|ed|ing)?\s+(?:his|her|their)?\s*(?:escape|movement)|violent(?:ly)?|rough(?:ly)?|hard enough|until it hurt|until it hurts)\b/.test(source);
 }
 
 
@@ -1000,7 +1017,6 @@ function addLivingName(set, name) {
     const normalized = normalizeNameKey(name);
     if (normalized) set.add(normalized);
 }
-
 
 
 

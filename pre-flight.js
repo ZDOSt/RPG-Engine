@@ -183,6 +183,8 @@ export function formatNarratorPromptContext(report) {
         'Write only the final in-character narration. No analysis, bullet points, preamble, audit, or mechanics text.',
         'Start the answer with BEGIN_FINAL_NARRATION and end with END_FINAL_NARRATION.',
         'The GUIDE is mandatory and authoritative; follow it exactly when interpreting success, denial, proactivity, and aggression.',
+        'Outcome names and mechanics labels are private. Never print private result categories, impact categories, roll data, action counts, dice math, margins, handoff field names, or system labels.',
+        'Do not start with a mechanics heading, italicized result label, bracketed result label, or any visible success/failure category. Start directly with the scene prose.',
         'For intimacy, IntimacyGate=DENY means no cooperation, reciprocation, or compliance even when the roll succeeds.',
         'Never narrate voluntary {{user}} actions, counterattacks, thoughts, feelings, decisions, or dialogue beyond the explicit user input.',
         'Involuntary reflexive physical reactions caused directly by computed external impact/restraint are allowed; keep them immediate/passive and do not turn them into choices, tactics, counters, or dialogue.',
@@ -241,7 +243,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         ? buildNoAggressionGuide(resolution, handoff)
         : buildAggressionGuide(handoff.aggressionResults);
 
-    const result = handoff.resultLine ?? `${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}`;
+    const result = naturalOutcomeSummary(resolution);
     const guide = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText });
 
     return {
@@ -288,7 +290,7 @@ function targetSummary(resolution) {
 
 function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText }) {
     const goal = resolution.GOAL ?? 'normal';
-    const outcome = `${resolution.OutcomeTier ?? 'NONE'}/${resolution.Outcome ?? 'no_roll'}`;
+    const outcome = naturalOutcomeSummary(resolution);
     const primaryNpc = handoff.npcHandoffs?.[0];
     const npcName = primaryNpc?.NPC || list(resolution.ActionTargets) || 'the NPC';
     const state = primaryNpc ? `${primaryNpc.Behavior}/${primaryNpc.Target}` : npcText;
@@ -349,6 +351,22 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     return `The user action is ${userAction}; resolve it as ${outcome}.${boundaryNote} Narrate the NPC response according to ${state} and the listed targets.`;
+}
+
+function naturalOutcomeSummary(resolution) {
+    const tier = String(resolution?.OutcomeTier ?? 'NONE');
+    const outcome = String(resolution?.Outcome ?? 'no_roll');
+    if (resolution?.STAKES === 'N' || tier === 'NONE' || outcome === 'no_roll') return 'no roll; ordinary scene continuity';
+    if (outcome === 'dominant_impact') return 'a decisive user-favoring result with strong visible impact';
+    if (outcome === 'solid_impact') return 'a clear user-favoring result with solid visible impact';
+    if (outcome === 'light_impact') return 'a narrow user-favoring result with limited visible impact';
+    if (outcome === 'success') return 'a user-favoring result';
+    if (outcome === 'struggle') return 'a contested struggle with no clear winner';
+    if (outcome === 'checked') return 'a slight opposing check against the user action';
+    if (outcome === 'deflected') return 'a clear opposing defense against the user action';
+    if (outcome === 'avoided') return 'a decisive opposing avoidance or reversal against the user action';
+    if (outcome === 'failure') return 'an opposing result where the user action does not succeed';
+    return 'the computed outcome, expressed only as natural scene prose';
 }
 
 function strongestIntimacyGate(handoff, resolution) {
@@ -428,7 +446,7 @@ function buildNoAggressionGuide(resolution, handoff) {
 
     if (!hasAggressiveProactivity) return 'none';
     if (resolution.OutcomeTier === 'Critical_Success') {
-        return 'Critical user success: do not narrate an immediate NPC attack. Show only survival, pain, guard, stagger, retreat, or failed preparation.';
+        return 'The user result is strong enough that no immediate NPC attack is resolved. Show only survival, pain, guard, stagger, retreat, or failed preparation.';
     }
 
     return 'No aggression result was produced; do not invent a resolved NPC hit.';

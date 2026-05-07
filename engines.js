@@ -31,14 +31,16 @@ function ResolutionEngine(input) {
 
   classifyHostilePhysicalIntent(input, finalGoal, targets):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
-    rule: return true only if {{user}} explicitly uses direct physical aggression against a living entity's body: attack, assault, strike, shove, tackle, choke, cut, stab, harmful grab, restraint, pin, immobilization, forced movement, physical domination, blocking escape with bodily force, preventing casting/action with bodily force, or other non-consensual bodily control
-    rule: return false for taking, grabbing, pulling, snatching, opening, moving, or contesting an object/possession/space/access point, even when an NPC opposes it, unless {{user}} also attacks, harms, restrains, pins, shoves, drags, or controls the NPC's body
+    rule: return true only if {{user}} explicitly uses direct physical aggression against a living entity's body: attack, assault, strike, shove, tackle, choke, cut, stab, injure, twist/hurt/crush a grabbed body part, violent restraint, pin, immobilization, dragging/forced movement, physical domination, blocking escape with bodily force, preventing casting/action with bodily force, or other harmful bodily control
+    rule: a grab/catch/hold is hostilePhysicalIntent only when it explicitly includes harm, attack, violent restraint, pinning, dragging, forced movement, twisting/crushing, choking, domination, or preventing bodily action by force
+    rule: return false for grabbing/catching/holding an NPC's wrist, arm, shoulder, sleeve, cloak, or clothing only to stop/delay/get attention/block departure/contest immediate movement, unless explicit harm, attack, violent restraint, pinning, dragging, forced movement, twisting/crushing, choking, domination, or bodily injury is also stated
+    rule: return false for taking, grabbing, pulling, snatching, opening, moving, or contesting an object/possession/space/access point, even when an NPC opposes it, unless {{user}} also attacks, harms, violently restrains, pins, shoves, drags, or controls the NPC's body
     rule: return false for consensual/helpful touch, healing, examination, rescue, ordinary movement, environmental force, social pressure, or purely mental/social/magical actions with no explicit physical force by {{user}}'s body
 
   classifyPhysicalBoundaryPressure(input, finalGoal, targets):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
-    rule: return true only if {{user}} uses forceful physical action to contest an NPC's possession, guarded object, immediate personal space, path, access, or non-bodily boundary while that living NPC has stakes and opposes/resists
-    rule: examples include snatching a scroll from under an NPC's hand, taking a guarded purse, forcing past a guard through a doorway, wrenching an object away, or pushing into a protected space
+    rule: return true only if {{user}} uses forceful physical action to contest an NPC's possession, guarded object, immediate personal space, path, access, departure, or body-adjacent boundary while that living NPC has stakes and opposes/resists
+    rule: examples include snatching a scroll from under an NPC's hand, taking a guarded purse, forcing past a guard through a doorway, wrenching an object away, pushing into a protected space, or catching/holding an NPC's wrist/arm/sleeve only to stop them leaving or force attention
     rule: return false if classifyHostilePhysicalIntent=true
     rule: return false for casual proximity, ordinary movement, normal item handling, conversation, non-forceful requests, pure social pressure, or any no-stakes action
     rule: this is not combat and must not produce LandedActions, CounterPotential, or H4 by itself

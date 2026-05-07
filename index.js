@@ -920,7 +920,10 @@ function buildDisplayTrackerSnapshot({ messageKey, pendingRun, report }) {
         ...(pendingRun?.trackerBefore || {}),
         ...(pendingRun?.trackerAfter || {}),
     });
-    const rawPresentNpcNames = toRealNameArray(pendingRun?.presentNpcNames || resolutionPacket.NPCInScene);
+    const rawPresentNpcNames = uniqueNames([
+        ...(pendingRun?.presentNpcNames || []),
+        ...currentResolutionNpcNames(pendingRun?.resolutionPacket || resolutionPacket),
+    ]);
     const promotionResult = applyExplicitNamePromotions(trackerAfter, rawPresentNpcNames, {
         messageKey,
         latestUserText: pendingRun?.latestUserText,
@@ -952,7 +955,7 @@ function applyTrackerPresenceMetadata(npcs, presentNames, { messageKey, latestUs
         const previousPresence = entry.presence || 'Present';
         const isPresent = presentSet.has(key) && !explicitAbsentSet.has(key);
         const isExplicitlyAbsent = explicitAbsentSet.has(key);
-        const presence = isPresent ? 'Present' : isExplicitlyAbsent ? 'Absent' : previousPresence;
+        const presence = isPresent && !isExplicitlyAbsent ? 'Present' : 'Absent';
 
         stamped[name] = {
             ...entry,
@@ -1055,6 +1058,28 @@ function applyDisplayPresenceCorrections(presentNames, trackedNames, latestUserT
     return presentNames.filter(name => !explicitlyAbsent.has(name.toLowerCase()));
 }
 
+function currentResolutionNpcNames(packet = {}) {
+    return uniqueNames([
+        ...toRealNameArray(packet.NPCInScene),
+        ...toRealNameArray(packet.ActionTargets),
+        ...toRealNameArray(packet.OppTargets?.NPC),
+        ...toRealNameArray(packet.BenefitedObservers),
+        ...toRealNameArray(packet.HarmedObservers),
+    ]);
+}
+
+function uniqueNames(names) {
+    const result = [];
+    const seen = new Set();
+    for (const name of toRealNameArray(names)) {
+        const key = name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(name);
+    }
+    return result;
+}
+
 function inferPersistenceTier(name) {
     const text = String(name ?? '').trim();
     if (!text) return 'Temporary';
@@ -1089,10 +1114,21 @@ function hasExplicitAbsenceForName(text, name) {
     if (index < 0) return false;
 
     const window = text.slice(Math.max(0, index - 180), Math.min(text.length, index + name.length + 240));
+    if (hasPreventedDepartureForName(window, name)) return false;
     const departureIndex = getExplicitDepartureIndex(window);
     if (departureIndex < 0) return false;
     const presenceIndex = getExplicitPresenceIndex(window, name);
     return presenceIndex < 0 || presenceIndex < departureIndex;
+}
+
+function hasPreventedDepartureForName(window, name) {
+    const escapedName = escapeRegExp(name);
+    const patterns = [
+        new RegExp(`\\b(?:catch|catches|caught|grab|grabs|grabbed|hold|holds|held|stop|stops|stopped|block|blocks|blocked|prevent|prevents|prevented)\\b.{0,100}\\b${escapedName}\\b.{0,140}\\b(?:before|from)\\b.{0,80}\\b(?:walk|leave|go|run|depart|exit|move)\\b.{0,30}\\b(?:away|out|off|leaving)?\\b`),
+        new RegExp(`\\b${escapedName}\\b.{0,140}\\b(?:catch|catches|caught|grab|grabs|grabbed|hold|holds|held|stop|stops|stopped|block|blocks|blocked|prevent|prevents|prevented)\\b.{0,140}\\b(?:before|from)\\b.{0,80}\\b(?:walk|leave|go|run|depart|exit|move)\\b.{0,30}\\b(?:away|out|off|leaving)?\\b`),
+        new RegExp(`\\b(?:before|from)\\b.{0,80}\\b${escapedName}\\b.{0,120}\\b(?:walk|leave|go|run|depart|exit|move)\\b.{0,30}\\b(?:away|out|off|leaving)?\\b`),
+    ];
+    return patterns.some(pattern => pattern.test(window));
 }
 
 function hasExplicitPresenceForName(window, name) {
@@ -1997,7 +2033,7 @@ function captureChatSignature(context = getContext()) {
 }
 
 function getLatestReportPresentNpcNames(report) {
-    return toRealNameArray(report?.finalNarrativeHandoff?.resolutionPacket?.NPCInScene);
+    return currentResolutionNpcNames(report?.finalNarrativeHandoff?.resolutionPacket || {});
 }
 
 function getLatestUserText(chat) {
@@ -2046,8 +2082,30 @@ function sanitizeAssistantNarration(text) {
 
     const tagged = original.match(/BEGIN_FINAL_NARRATION\s*([\s\S]*?)\s*END_FINAL_NARRATION/i);
     const source = tagged ? tagged[1].trim() : stripNarratorMetaPrefix(original);
-    const cleaned = stripStructuredArtifacts(source).trim();
+    const cleaned = stripVisibleMechanicsLabels(stripStructuredArtifacts(source)).trim();
     return cleaned || original;
+}
+
+function stripVisibleMechanicsLabels(text) {
+    let cleaned = String(text ?? '').trimStart();
+    const label = '(?:Critical|Moderate|Minor)\\s+(?:Success|Failure)|Success|Failure|Stalemate|No\\s+Roll|Dominant\\s+Impact|Solid\\s+Impact|Light\\s+Impact|Checked|Deflected|Avoided|Struggle';
+    const patterns = [
+        new RegExp(`^\\s*(?:[*_~]{1,3})?\\s*(?:[\\[(])?\\s*${label}\\s*(?:[\\])])?\\s*(?:[*_~]{1,3})?\\s*(?:[-:\\u2013\\u2014]+)\\s*`, 'i'),
+        new RegExp(`^\\s*(?:Result|Outcome|OutcomeTier)\\s*[:=]\\s*(?:[*_~]{1,3})?\\s*(?:[\\[(])?\\s*${label}\\s*(?:[\\])])?\\s*(?:[*_~]{1,3})?\\s*(?:[-:\\u2013\\u2014]+)?\\s*`, 'i'),
+        new RegExp(`^\\s*(?:[*_~]{1,3})\\s*${label}\\s*(?:[-:\\u2013\\u2014]+)?\\s*(?:[*_~]{1,3})\\s*`, 'i'),
+    ];
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const pattern of patterns) {
+            const next = cleaned.replace(pattern, '');
+            if (next !== cleaned) {
+                cleaned = next.trimStart();
+                changed = true;
+            }
+        }
+    }
+    return cleaned;
 }
 
 function stripNarratorMetaPrefix(text) {
@@ -2400,6 +2458,7 @@ async function handleChatCompletionPromptReady(eventData) {
             type: state.pendingGeneration.type || 'normal',
             trackerBefore: trackerSnapshot,
             trackerAfter: report.trackerUpdate?.npcs || {},
+            resolutionPacket: report.finalNarrativeHandoff?.resolutionPacket || {},
             presentNpcNames: getLatestReportPresentNpcNames(report),
             userCoreStats: report.semanticLedger?.engineContext?.userCoreStats || null,
             latestUserText: getLatestUserText(eventData.chat),
