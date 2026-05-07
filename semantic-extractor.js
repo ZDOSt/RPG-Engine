@@ -292,6 +292,11 @@ async function generateSemanticToolCallWithProfile(context, prompt, responseLeng
     return { raw, ledger };
 }
 
+export async function sendSemanticProfileTextRequest(prompt, responseLength, options = {}, overridePayload = {}) {
+    const result = await sendChatCompletionProfileRequest(prompt, responseLength, options, overridePayload, true);
+    return result?.content ?? String(result ?? '');
+}
+
 async function sendChatCompletionProfileRequest(prompt, responseLength, options = {}, overridePayload = {}, extractData = true) {
     if (!options?.semanticProfileId) {
         throw new SemanticToolTransportError('Semantic connection profile id is missing.');

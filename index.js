@@ -2,6 +2,8 @@ import { ENGINE_PROMPT_TEXT, classifyDisposition, normalizeTrackerEntry } from '
 import { saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings } from '../../../../scripts/extensions.js';
 import { addEphemeralStoppingString, flushEphemeralStoppingStrings } from '../../../../scripts/power-user.js';
+import { persona_description_positions, power_user } from '../../../../scripts/power-user.js';
+import { setPersonaDescription, user_avatar } from '../../../../scripts/personas.js';
 import { getPresetManager } from '../../../../scripts/preset-manager.js';
 import { rotateSecret, SECRET_KEYS, secret_state } from '../../../../scripts/secrets.js';
 import { SlashCommandParser } from '../../../../scripts/slash-commands/SlashCommandParser.js';
@@ -10,7 +12,7 @@ import {
     formatNarratorPromptContext,
     formatPreFlightDebug,
 } from './pre-flight.js';
-import { extractSemanticLedger, SEMANTIC_PREFLIGHT_STOP_SENTINEL } from './semantic-extractor.js';
+import { extractSemanticLedger, SEMANTIC_PREFLIGHT_STOP_SENTINEL, sendSemanticProfileTextRequest } from './semantic-extractor.js';
 import { buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
 
 const EXTENSION_NAME = 'Structured Preflight Engines';
@@ -22,6 +24,62 @@ const PROFILE_NONE = '<None>';
 const TRACKER_DISPLAY_EXTRA_KEY = 'structured_preflight_tracker_display';
 const TRACKER_DISPLAY_BLOCK_CLASS = 'structured-preflight-tracker-block';
 const TRACKER_DISPLAY_VERSION = 1;
+const PLAYER_SETUP_KEY = 'structuredPreflightPlayer';
+const PLAYER_SETUP_VERSION = 1;
+const PLAYER_SETUP_CARD_ID = 'structured_preflight_player_setup_card';
+const PLAYER_SETUP_STYLE_ID = 'structured_preflight_player_setup_styles';
+const PLAYER_STATS = Object.freeze(['PHY', 'MND', 'CHA']);
+const PLAYER_RACE_CHOICES = Object.freeze([
+    'Human',
+    'Elf',
+    'Half-Elf',
+    'Dwarf',
+    'Halfling',
+    'Gnome',
+    'Orc',
+    'Half-Orc',
+    'Oni',
+    'Goblin',
+    'Hobgoblin',
+    'Kobold',
+    'Lizardfolk',
+    'Lamian',
+    'Harpy',
+    'Arachne',
+    'Centaur',
+    'Minotaur',
+    'Satyr',
+    'Merfolk',
+    'Naga',
+    'Slimekin',
+    'Mushroomfolk',
+    'Automaton',
+    'Homunculus',
+    'Vampire',
+    'Dhampir',
+    'Werewolf',
+    'Catfolk',
+    'Wolfkin',
+    'Foxkin',
+    'Rabbitfolk',
+    'Bearkin',
+    'Dragonkin',
+    'Tiefling',
+    'Aasimar',
+    'Demon',
+    'Half-Demon',
+    'Angelkin',
+    'Fae',
+    'Fairy',
+    'Dryad',
+    'Spirit-Touched',
+    'Undead',
+    'Revenant',
+    'Hybrid',
+    'Random',
+]);
+const PLAYER_SETUP_ANALYSIS_RESPONSE_LENGTH = 900;
+const PLAYER_SETUP_SHEET_RESPONSE_LENGTH = 3600;
 const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,
     semanticConnectionProfile: '',
@@ -80,7 +138,9 @@ const state = {
     subscribed: false,
     pendingGeneration: null,
     progressToast: null,
+    progressToasts: new Set(),
     pendingRunCleanupTimer: null,
+    playerSetupBusy: false,
 };
 
 function getContext() {
@@ -352,6 +412,24 @@ function refreshSettingsControls() {
 
     if (profileSelect) profileSelect.disabled = !enabled;
     if (presetSelect) presetSelect.disabled = !enabled;
+
+    const playerStatus = document.getElementById('structured_preflight_player_setup_status');
+    if (playerStatus) {
+        const context = getContext();
+        const root = getPlayerRoot(context);
+        const personaStats = getPersonaCoreStats(context);
+        const rootStats = root?.stats;
+        const status = root?.forceCreator
+            ? 'Character creator forced for this chat.'
+            : root?.ready
+            ? `Ready for this chat (${formatStatsTable(rootStats)}).`
+            : personaStats
+                ? `Active persona already has stats (${formatStatsTable(personaStats)}).`
+                : root?.disabled
+                    ? 'Disabled for this chat.'
+                    : 'Player setup required for this chat.';
+        playerStatus.textContent = status;
+    }
 }
 
 function renderSettingsPanel() {
@@ -388,6 +466,13 @@ function renderSettingsPanel() {
                     <small class="flex1">Leave preset blank to use the selected profile's preset. Settings are restored after the semantic pass.</small>
                     <button id="structured_preflight_refresh_semantic_settings" class="menu_button">Refresh</button>
                 </div>
+                <hr>
+                <div class="flex-container alignitemscenter">
+                    <small id="structured_preflight_player_setup_status" class="flex1"></small>
+                    <button id="structured_preflight_show_player_setup" class="menu_button">Show Player Setup</button>
+                    <button id="structured_preflight_force_player_setup" class="menu_button">Run Character Creator</button>
+                    <button id="structured_preflight_reset_player_setup" class="menu_button">Reset Chat Setup</button>
+                </div>
             </div>
         </div>`;
     host.prepend(container);
@@ -407,8 +492,66 @@ function renderSettingsPanel() {
         saveExtensionSettings();
     });
     document.getElementById('structured_preflight_refresh_semantic_settings')?.addEventListener('click', refreshSettingsControls);
+    document.getElementById('structured_preflight_show_player_setup')?.addEventListener('click', () => {
+        const context = getContext();
+        const root = getPlayerRoot(context);
+        if (root && !root.ready && !getPersonaCoreStats(context)) {
+            root.disabled = false;
+            root.creator = root.creator || { stage: 'offer' };
+            persistMetadata(context);
+        }
+        renderPlayerSetupCard(context);
+        refreshSettingsControls();
+    });
+    document.getElementById('structured_preflight_force_player_setup')?.addEventListener('click', async () => {
+        const context = getContext();
+        const root = getPlayerRoot(context);
+        if (root) {
+            root.ready = false;
+            root.disabled = false;
+            root.forceCreator = true;
+            root.sheet = null;
+            root.stats = null;
+            root.creator = { stage: 'offer' };
+            await persistMetadata(context);
+        }
+        renderPlayerSetupCard(context);
+        refreshSettingsControls();
+        closeExtensionsDrawer();
+    });
+    document.getElementById('structured_preflight_reset_player_setup')?.addEventListener('click', async () => {
+        const context = getContext();
+        const root = getPlayerRoot(context);
+        if (root) {
+            root.ready = false;
+            root.disabled = false;
+            root.forceCreator = false;
+            root.sheet = null;
+            root.stats = null;
+            root.creator = { stage: 'offer' };
+            await persistMetadata(context);
+        }
+        renderPlayerSetupCard(context);
+        refreshSettingsControls();
+    });
 
     refreshSettingsControls();
+}
+
+function closeExtensionsDrawer() {
+    const drawer = document.getElementById('extensions-settings-button');
+    if (!drawer) return;
+
+    const content = drawer.querySelector('.drawer-content');
+    const icon = drawer.querySelector('.drawer-icon');
+    if (content?.classList?.contains('openDrawer')) {
+        drawer.querySelector('.drawer-toggle')?.click();
+    }
+    content?.classList?.remove('openDrawer');
+    content?.classList?.add('closedDrawer');
+    icon?.classList?.remove('openIcon');
+    icon?.classList?.add('closedIcon');
+    setTimeout(() => document.getElementById(PLAYER_SETUP_CARD_ID)?.scrollIntoView?.({ block: 'center' }), 50);
 }
 
 function injectRuntimeSentinel() {
@@ -439,7 +582,11 @@ function clearRuntimePrompts() {
 function showProgress(message) {
     try {
         if (globalThis.toastr?.info) {
-            return globalThis.toastr.info(message, EXTENSION_NAME, { timeOut: 0, extendedTimeOut: 0 });
+            clearAllProgress();
+            const toast = globalThis.toastr.info(message, EXTENSION_NAME, { timeOut: 0, extendedTimeOut: 0 });
+            state.progressToast = toast || null;
+            if (toast) state.progressToasts.add(toast);
+            return toast;
         }
     } catch {
         // Progress UI is optional; generation must not depend on it.
@@ -452,9 +599,27 @@ function clearProgress(toast) {
         if (toast && globalThis.toastr?.clear) {
             globalThis.toastr.clear(toast);
         }
+        if (toast) {
+            state.progressToasts.delete(toast);
+            if (state.progressToast === toast) state.progressToast = null;
+        }
     } catch {
         // Non-fatal.
     }
+}
+
+function clearAllProgress() {
+    const toasts = [...(state.progressToasts || [])];
+    if (state.progressToast && !toasts.includes(state.progressToast)) {
+        toasts.push(state.progressToast);
+    }
+
+    for (const toast of toasts) {
+        clearProgress(toast);
+    }
+
+    state.progressToast = null;
+    state.progressToasts.clear();
 }
 
 function clearPendingRunCleanupTimer() {
@@ -491,6 +656,236 @@ function getTrackerRoot(context = getContext()) {
     root.npcs = root.npcs || {};
     root.snapshots = root.snapshots || {};
     return root;
+}
+
+function getPlayerRoot(context = getContext()) {
+    if (!context?.chatMetadata) return null;
+    context.chatMetadata[PLAYER_SETUP_KEY] = context.chatMetadata[PLAYER_SETUP_KEY] || {};
+    const root = context.chatMetadata[PLAYER_SETUP_KEY];
+    root.version = PLAYER_SETUP_VERSION;
+    root.ready = Boolean(root.ready);
+    root.disabled = Boolean(root.disabled);
+    root.forceCreator = Boolean(root.forceCreator);
+    root.sheet = root.sheet || null;
+    root.stats = isValidCoreStats(root.stats) ? normalizeCoreStats(root.stats) : null;
+    root.creator = root.creator && typeof root.creator === 'object' ? root.creator : { stage: 'offer' };
+    if (!root.ready && !root.disabled && !root.creator.stage) {
+        root.creator.stage = 'offer';
+    }
+    return root;
+}
+
+function getCharacterCardFieldsSafe(context = getContext()) {
+    try {
+        return typeof context?.getCharacterCardFields === 'function' ? context.getCharacterCardFields() : {};
+    } catch (error) {
+        console.warn(`[${EXTENSION_NAME}] could not read character/persona fields for player setup.`, error);
+        return {};
+    }
+}
+
+function getPersonaText(context = getContext()) {
+    const fields = getCharacterCardFieldsSafe(context);
+    return String(fields.persona || '').trim();
+}
+
+function getPersonaCoreStats(context = getContext()) {
+    const persona = String(getCharacterCardFieldsSafe(context).persona || '').trim();
+    return parseCoreStatsBlock(persona);
+}
+
+function getPlayerCoreStats(context = getContext()) {
+    const root = getPlayerRoot(context);
+    if (root?.ready && isValidCoreStats(root.stats)) {
+        return normalizeCoreStats(root.stats);
+    }
+    return getPersonaCoreStats(context);
+}
+
+function playerSetupNeeded(context = getContext()) {
+    const root = getPlayerRoot(context);
+    if (!root || root.disabled) return false;
+    if (root.forceCreator) return true;
+    if (root.ready) return false;
+    return !getPersonaCoreStats(context);
+}
+
+function applyPlayerCoreStatsOverride(semanticLedger, context = getContext()) {
+    const stats = getPlayerCoreStats(context);
+    if (!semanticLedger || !isValidCoreStats(stats)) return semanticLedger;
+
+    semanticLedger.engineContext = semanticLedger.engineContext || {};
+    semanticLedger.engineContext.userCoreStats = {
+        ...(semanticLedger.engineContext.userCoreStats || {}),
+        Rank: 'none',
+        MainStat: 'none',
+        ...normalizeCoreStats(stats),
+    };
+    semanticLedger.deterministicOverrides = {
+        ...(semanticLedger.deterministicOverrides || {}),
+        userCoreStats: {
+            source: 'structuredPreflightPlayer/persona',
+            ...normalizeCoreStats(stats),
+        },
+    };
+    return semanticLedger;
+}
+
+function isValidCoreStats(stats) {
+    return PLAYER_STATS.every(stat => {
+        const value = Number(stats?.[stat]);
+        return Number.isInteger(value) && value >= 1 && value <= 10;
+    });
+}
+
+function normalizeCoreStats(stats) {
+    return {
+        PHY: clampNumber(stats?.PHY, 1, 10, 1),
+        MND: clampNumber(stats?.MND, 1, 10, 1),
+        CHA: clampNumber(stats?.CHA, 1, 10, 1),
+    };
+}
+
+function parseCoreStatsBlock(text) {
+    const source = String(text ?? '');
+    if (!source.trim()) return null;
+
+    const stats = {};
+    for (const stat of PLAYER_STATS) {
+        const match = source.match(new RegExp(`\\b${stat}\\s*[:=\\-]?\\s*(10|[1-9])\\b`, 'i'));
+        if (!match) return null;
+        stats[stat] = Number(match[1]);
+    }
+    return isValidCoreStats(stats) ? normalizeCoreStats(stats) : null;
+}
+
+function clampNumber(value, min, max, fallback) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.max(min, Math.min(max, Math.round(numeric)));
+}
+
+function rollD10() {
+    return Math.floor(Math.random() * 10) + 1;
+}
+
+function rollStatPair() {
+    const rolls = [rollD10(), rollD10()];
+    return { rolls, value: Math.max(...rolls) };
+}
+
+function shuffleArray(values) {
+    const copy = [...values];
+    for (let index = copy.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+    }
+    return copy;
+}
+
+function buildNewCharacterRollState() {
+    const statPools = {};
+    const stats = {};
+    for (const stat of PLAYER_STATS) {
+        const roll = rollStatPair();
+        statPools[stat] = roll.rolls;
+        stats[stat] = roll.value;
+    }
+    return {
+        stage: 'reroll',
+        flow: 'new',
+        createdAt: Date.now(),
+        statPools,
+        stats,
+        rerollValue: rollD10(),
+        rerollApplied: null,
+        rerollSkipped: false,
+        swapApplied: null,
+        identity: {
+            raceMode: 'random',
+            pickedRace: 'Human',
+            specifiedRace: '',
+            specifiedRaceDescriptionMode: 'system',
+            specifiedRaceDescription: '',
+            appearance: '',
+        },
+    };
+}
+
+function buildPersonaRollState(analysis) {
+    const primary = PLAYER_STATS.includes(analysis?.PrimaryStat) ? analysis.PrimaryStat : 'PHY';
+    const rolls = [rollStatPair(), rollStatPair(), rollStatPair()].sort((a, b) => b.value - a.value);
+    const otherStats = shuffleArray(PLAYER_STATS.filter(stat => stat !== primary));
+    const stats = {
+        [primary]: rolls[0].value,
+        [otherStats[0]]: rolls[1].value,
+        [otherStats[1]]: rolls[2].value,
+    };
+    return {
+        stage: 'reroll',
+        flow: 'persona',
+        createdAt: Date.now(),
+        statPools: {
+            [primary]: rolls[0].rolls,
+            [otherStats[0]]: rolls[1].rolls,
+            [otherStats[1]]: rolls[2].rolls,
+        },
+        stats,
+        rerollValue: rollD10(),
+        rerollApplied: null,
+        rerollSkipped: false,
+        swapApplied: null,
+        personaAnalysis: analysis,
+    };
+}
+
+function getActivePersonaDescriptor() {
+    if (!power_user) return null;
+    power_user.persona_descriptions = power_user.persona_descriptions || {};
+    const avatarId = String(user_avatar || '').trim();
+    if (!avatarId) return null;
+    if (!power_user.persona_descriptions[avatarId]) {
+        power_user.persona_descriptions[avatarId] = {
+            description: power_user.persona_description || '',
+            position: power_user.persona_description_position ?? persona_description_positions.IN_PROMPT,
+            depth: power_user.persona_description_depth,
+            role: power_user.persona_description_role,
+            lorebook: power_user.persona_description_lorebook,
+        };
+    }
+    return power_user.persona_descriptions[avatarId];
+}
+
+async function writePlayerSheetToPersona(sheetText, context = getContext()) {
+    const descriptor = getActivePersonaDescriptor();
+    if (!descriptor) {
+        throw new Error('No active SillyTavern persona is selected, so the generated character sheet could not be inserted into persona.');
+    }
+
+    const current = String(power_user.persona_description || descriptor.description || '').trim();
+    const cleanSheet = String(sheetText || '').trim();
+    if (!cleanSheet) {
+        throw new Error('Generated character sheet is empty; persona was not changed.');
+    }
+
+    const nextDescription = cleanSheet;
+
+    power_user.persona_description = nextDescription;
+    descriptor.description = nextDescription;
+    descriptor.position = descriptor.position ?? power_user.persona_description_position ?? persona_description_positions.IN_PROMPT;
+    if (descriptor.depth === undefined && power_user.persona_description_depth !== undefined) descriptor.depth = power_user.persona_description_depth;
+    if (descriptor.role === undefined && power_user.persona_description_role !== undefined) descriptor.role = power_user.persona_description_role;
+    if (descriptor.lorebook === undefined && power_user.persona_description_lorebook !== undefined) descriptor.lorebook = power_user.persona_description_lorebook;
+
+    setPersonaDescription?.();
+    saveExtensionSettings();
+    if (typeof context?.saveMetadataDebounced === 'function') context.saveMetadataDebounced();
+    return { previous: current, next: nextDescription };
+}
+
+function formatStatsTable(stats) {
+    const normalized = normalizeCoreStats(stats || {});
+    return PLAYER_STATS.map(stat => `${stat}: ${normalized[stat]}`).join(' | ');
 }
 
 function clone(value) {
@@ -958,6 +1353,639 @@ function renderAllTrackerDisplayBlocks(context = getContext()) {
     });
 }
 
+function ensurePlayerSetupStyles() {
+    if (document.getElementById(PLAYER_SETUP_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = PLAYER_SETUP_STYLE_ID;
+    style.textContent = `
+        #${PLAYER_SETUP_CARD_ID} {
+            margin: 0.75rem auto;
+            padding: 0.85rem;
+            width: min(760px, calc(100% - 1.2rem));
+            border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.18));
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #000) 34%, transparent);
+            box-shadow: 0 10px 26px rgba(0,0,0,0.22);
+            line-height: 1.45;
+        }
+        #${PLAYER_SETUP_CARD_ID} .spe-player-title {
+            font-weight: 700;
+            font-size: 1rem;
+            margin-bottom: 0.35rem;
+        }
+        #${PLAYER_SETUP_CARD_ID} .spe-player-muted {
+            opacity: 0.78;
+            font-size: 0.9rem;
+        }
+        #${PLAYER_SETUP_CARD_ID} .spe-player-row,
+        #${PLAYER_SETUP_CARD_ID} .spe-player-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+            align-items: center;
+            margin-top: 0.55rem;
+        }
+        #${PLAYER_SETUP_CARD_ID} .spe-player-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.45rem;
+            margin-top: 0.6rem;
+        }
+        #${PLAYER_SETUP_CARD_ID} .spe-player-stat {
+            border-left: 2px solid var(--SmartThemeQuoteColor, rgba(255,255,255,0.28));
+            padding: 0.45rem 0.55rem;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #000) 18%, transparent);
+            border-radius: 6px;
+        }
+        #${PLAYER_SETUP_CARD_ID} textarea,
+        #${PLAYER_SETUP_CARD_ID} input,
+        #${PLAYER_SETUP_CARD_ID} select {
+            width: 100%;
+        }
+        #${PLAYER_SETUP_CARD_ID} textarea {
+            min-height: 5.5rem;
+            resize: vertical;
+        }
+        #${PLAYER_SETUP_CARD_ID} pre {
+            white-space: pre-wrap;
+            max-height: 26rem;
+            overflow: auto;
+            padding: 0.65rem;
+            border-radius: 6px;
+            background: rgba(0,0,0,0.24);
+        }
+        #${PLAYER_SETUP_CARD_ID} .spe-player-error {
+            margin-top: 0.55rem;
+            color: var(--SmartThemeQuoteColor, #ffb4b4);
+            font-weight: 600;
+        }
+        @media (max-width: 520px) {
+            #${PLAYER_SETUP_CARD_ID} .spe-player-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    `;
+    document.head.append(style);
+}
+
+function renderPlayerSetupCard(context = getContext()) {
+    if (typeof document === 'undefined') return;
+    const existing = document.getElementById(PLAYER_SETUP_CARD_ID);
+    if (!playerSetupNeeded(context)) {
+        existing?.remove();
+        return;
+    }
+
+    ensurePlayerSetupStyles();
+    const chat = document.getElementById('chat') || document.querySelector('#chat_container') || document.body;
+    if (!chat) return;
+
+    const root = getPlayerRoot(context);
+    const card = existing || document.createElement('div');
+    card.id = PLAYER_SETUP_CARD_ID;
+    card.innerHTML = buildPlayerSetupCardHtml(root);
+    if (!existing) {
+        chat.append(card);
+    }
+    bindPlayerSetupCardEvents(card, context);
+}
+
+function buildPlayerSetupCardHtml(root) {
+    const creator = root?.creator || { stage: 'offer' };
+    const stage = creator.stage || 'offer';
+    const busy = state.playerSetupBusy;
+    const error = creator.error ? `<div class="spe-player-error">${escapeHtml(creator.error)}</div>` : '';
+    const busyLine = busy ? '<div class="spe-player-muted">Working...</div>' : '';
+    const body = stage === 'reroll'
+        ? buildPlayerRerollHtml(creator)
+        : stage === 'swap'
+            ? buildPlayerSwapHtml(creator)
+            : stage === 'identity'
+                ? buildPlayerIdentityHtml(creator)
+                : stage === 'review'
+                    ? buildPlayerReviewHtml(creator)
+                    : stage === 'persona-sheet'
+                        ? buildPlayerPersonaSheetHtml(creator)
+                    : buildPlayerOfferHtml();
+
+    return `
+        <div class="spe-player-title">Player Setup</div>
+        <div class="spe-player-muted">This chat has no valid PHY/MND/CHA player stats yet. Complete setup once, then the creator stays out of the way for this story.</div>
+        ${busyLine}
+        ${body}
+        ${error}
+    `;
+}
+
+function buildPlayerOfferHtml() {
+    const hasPersona = Boolean(getPersonaText(getContext()));
+    return `
+        <div class="spe-player-actions">
+            <button class="menu_button" data-spe-player-action="start-new">Create Character</button>
+            <button class="menu_button" data-spe-player-action="use-persona" ${hasPersona ? '' : 'disabled'}>Use Existing Persona</button>
+            <button class="menu_button" data-spe-player-action="skip-chat">Disable For This Chat</button>
+        </div>
+        <div class="spe-player-muted">Create rolls a new character. Use Existing Persona only asks the model which stat should be highest; the extension still rolls the actual values.</div>
+    `;
+}
+
+function buildStatsGridHtml(creator) {
+    const stats = normalizeCoreStats(creator.stats || {});
+    const pools = creator.statPools || {};
+    return `
+        <div class="spe-player-grid">
+            ${PLAYER_STATS.map(stat => {
+                const pair = Array.isArray(pools[stat]) ? pools[stat].join(', ') : '-';
+                return `<div class="spe-player-stat"><b>${stat}</b><br><code>${stats[stat]}</code><br><span class="spe-player-muted">rolls: ${escapeHtml(pair)}</span></div>`;
+            }).join('')}
+        </div>
+    `;
+}
+
+function buildPlayerRerollHtml(creator) {
+    const analysis = creator.flow === 'persona' && creator.personaAnalysis
+        ? `<div class="spe-player-muted">Persona read: highest stat should be <code>${escapeHtml(creator.personaAnalysis.PrimaryStat || 'PHY')}</code>. ${escapeHtml(creator.personaAnalysis.Evidence || '')}</div>`
+        : '';
+    return `
+        ${analysis}
+        ${buildStatsGridHtml(creator)}
+        <div class="spe-player-muted">Optional reroll: choose one stat. The hidden 1d10 reroll is compared against the current value and the higher value is kept.</div>
+        <div class="spe-player-actions">
+            ${PLAYER_STATS.map(stat => `<button class="menu_button" data-spe-player-action="reroll" data-stat="${stat}">Reroll ${stat}</button>`).join('')}
+            <button class="menu_button" data-spe-player-action="skip-reroll">Keep These</button>
+        </div>
+    `;
+}
+
+function buildPlayerSwapHtml(creator) {
+    const rerollLine = creator.rerollApplied
+        ? `<div class="spe-player-muted">Reroll used on <code>${escapeHtml(creator.rerollApplied.stat)}</code>: hidden roll <code>${escapeHtml(creator.rerollApplied.roll)}</code>, kept <code>${escapeHtml(creator.rerollApplied.value)}</code>.</div>`
+        : '<div class="spe-player-muted">No reroll used.</div>';
+    return `
+        ${buildStatsGridHtml(creator)}
+        ${rerollLine}
+        <div class="spe-player-row">
+            <label class="flex1">First stat
+                <select id="spe_player_swap_a" class="text_pole">${PLAYER_STATS.map(stat => `<option value="${stat}">${stat}</option>`).join('')}</select>
+            </label>
+            <label class="flex1">Second stat
+                <select id="spe_player_swap_b" class="text_pole">${PLAYER_STATS.map(stat => `<option value="${stat}" ${stat === 'MND' ? 'selected' : ''}>${stat}</option>`).join('')}</select>
+            </label>
+        </div>
+        <div class="spe-player-actions">
+            <button class="menu_button" data-spe-player-action="apply-swap">Swap Selected</button>
+            <button class="menu_button" data-spe-player-action="skip-swap">No Swap</button>
+        </div>
+    `;
+}
+
+function buildPlayerIdentityHtml(creator) {
+    const identity = creator.identity || {};
+    const raceMode = identity.raceMode || 'random';
+    return `
+        ${buildStatsGridHtml(creator)}
+        <div class="spe-player-row">
+            <label class="flex1">Race
+                <select id="spe_player_race_mode" class="text_pole">
+                    <option value="random" ${raceMode === 'random' ? 'selected' : ''}>Random</option>
+                    <option value="pick" ${raceMode === 'pick' ? 'selected' : ''}>Pick From List</option>
+                    <option value="specify" ${raceMode === 'specify' ? 'selected' : ''}>Specify</option>
+                </select>
+            </label>
+            <label class="flex1">Pick
+                <select id="spe_player_race_pick" class="text_pole">
+                    ${PLAYER_RACE_CHOICES.filter(race => race !== 'Random').map(race => `<option value="${escapeHtml(race)}" ${identity.pickedRace === race ? 'selected' : ''}>${escapeHtml(race)}</option>`).join('')}
+                </select>
+            </label>
+        </div>
+        <div class="spe-player-row">
+            <label class="flex1">Specify race or ancestry
+                <input id="spe_player_race_specify" class="text_pole" value="${escapeHtml(identity.specifiedRace || '')}" placeholder="Optional">
+            </label>
+        </div>
+        <div class="spe-player-row">
+            <label class="flex1">Specified race details
+                <select id="spe_player_race_description_mode" class="text_pole">
+                    <option value="system" ${(identity.specifiedRaceDescriptionMode || 'system') === 'system' ? 'selected' : ''}>Let system describe it</option>
+                    <option value="user" ${identity.specifiedRaceDescriptionMode === 'user' ? 'selected' : ''}>Describe it myself</option>
+                </select>
+            </label>
+        </div>
+        <div class="spe-player-row">
+            <label class="flex1">Your race description
+                <textarea id="spe_player_race_description" class="text_pole" placeholder="Optional unless you choose Describe it myself.">${escapeHtml(identity.specifiedRaceDescription || '')}</textarea>
+            </label>
+        </div>
+        <div class="spe-player-row">
+            <label class="flex1">Appearance notes
+                <textarea id="spe_player_appearance" class="text_pole" placeholder="Optional. Leave blank for model-generated appearance.">${escapeHtml(identity.appearance || '')}</textarea>
+            </label>
+        </div>
+        <div class="spe-player-actions">
+            <button class="menu_button" data-spe-player-action="generate-sheet">Generate Character Sheet</button>
+            <button class="menu_button" data-spe-player-action="back-to-swap">Back</button>
+        </div>
+    `;
+}
+
+function buildPlayerReviewHtml(creator) {
+    const retry = '<button class="menu_button" data-spe-player-action="retry-sheet">Retry Details</button>';
+    return `
+        <div class="spe-player-muted">Review the sheet below. Approve inserts it into the active SillyTavern persona field and locks setup for this chat.</div>
+        <pre>${escapeHtml(creator.sheetText || buildPersonaStatsSheet(creator))}</pre>
+        <div class="spe-player-actions">
+            <button class="menu_button" data-spe-player-action="approve-sheet">Approve And Insert Into Persona</button>
+            ${retry}
+            <button class="menu_button" data-spe-player-action="back-to-identity">Back</button>
+        </div>
+    `;
+}
+
+function buildPlayerPersonaSheetHtml(creator) {
+    const analysis = creator.personaAnalysis || {};
+    return `
+        ${buildStatsGridHtml(creator)}
+        <div class="spe-player-muted">Existing persona conversion: highest-stat reading <code>${escapeHtml(analysis.PrimaryStat || 'PHY')}</code>. The model will reformat the current persona into the character-sheet template and copy the locked stats exactly.</div>
+        <div class="spe-player-actions">
+            <button class="menu_button" data-spe-player-action="generate-persona-sheet">Generate Persona Sheet</button>
+            <button class="menu_button" data-spe-player-action="back-to-swap">Back</button>
+        </div>
+    `;
+}
+
+function bindPlayerSetupCardEvents(card, context = getContext()) {
+    if (!card) return;
+    const runButtonAction = async button => {
+        if (!button || state.playerSetupBusy) return;
+        const action = button.getAttribute('data-spe-player-action');
+        const stat = button.getAttribute('data-stat');
+        await handlePlayerSetupAction(action, { stat, card }, getContext() || context);
+    };
+    card.querySelectorAll('[data-spe-player-action]').forEach(button => {
+        button.onclick = async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            await runButtonAction(button);
+        };
+    });
+    card.onclick = async event => {
+        const button = event.target?.closest?.('[data-spe-player-action]');
+        if (!button || !card.contains(button)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        await runButtonAction(button);
+    };
+}
+
+async function handlePlayerSetupAction(action, details = {}, context = getContext()) {
+    if (state.playerSetupBusy) return;
+    const root = getPlayerRoot(context);
+    if (!root) return;
+    root.creator = root.creator || { stage: 'offer' };
+    delete root.creator.error;
+
+    try {
+        if (action === 'start-new') {
+            root.creator = buildNewCharacterRollState();
+        } else if (action === 'use-persona') {
+            state.playerSetupBusy = true;
+            renderPlayerSetupCard(context);
+            const analysis = await analyzePersonaForPrimaryStat(context);
+            root.creator = buildPersonaRollState(analysis);
+        } else if (action === 'skip-chat') {
+            root.disabled = true;
+            root.forceCreator = false;
+        } else if (action === 'reroll') {
+            applyPlayerReroll(root.creator, details.stat);
+        } else if (action === 'skip-reroll') {
+            root.creator.rerollSkipped = true;
+            root.creator.stage = 'swap';
+        } else if (action === 'apply-swap') {
+            const a = document.getElementById('spe_player_swap_a')?.value;
+            const b = document.getElementById('spe_player_swap_b')?.value;
+            applyPlayerSwap(root.creator, a, b);
+        } else if (action === 'skip-swap') {
+            root.creator.swapApplied = null;
+            advanceAfterSwap(root.creator);
+        } else if (action === 'back-to-swap') {
+            root.creator.stage = 'swap';
+        } else if (action === 'generate-persona-sheet') {
+            state.playerSetupBusy = true;
+            renderPlayerSetupCard(context);
+            root.creator.sheetText = await generateExistingPersonaCharacterSheet(root.creator, context);
+            root.creator.stage = 'review';
+        } else if (action === 'generate-sheet') {
+            syncIdentityInputs(root.creator);
+            state.playerSetupBusy = true;
+            renderPlayerSetupCard(context);
+            root.creator.sheetText = await generateNewPlayerCharacterSheet(root.creator, context);
+            root.creator.stage = 'review';
+        } else if (action === 'retry-sheet') {
+            state.playerSetupBusy = true;
+            renderPlayerSetupCard(context);
+            root.creator.sheetText = root.creator.flow === 'persona'
+                ? await generateExistingPersonaCharacterSheet(root.creator, context)
+                : await generateNewPlayerCharacterSheet(root.creator, context);
+            root.creator.stage = 'review';
+        } else if (action === 'back-to-identity') {
+            root.creator.stage = root.creator.flow === 'new' ? 'identity' : 'swap';
+        } else if (action === 'approve-sheet') {
+            await approvePlayerSheet(root, context);
+        }
+        await persistMetadata(context);
+    } catch (error) {
+        root.creator.error = error instanceof Error ? error.message : String(error);
+        console.error(`[${EXTENSION_NAME}] player setup action failed`, error);
+        await persistMetadata(context);
+    } finally {
+        state.playerSetupBusy = false;
+        renderPlayerSetupCard(context);
+        refreshSettingsControls();
+    }
+}
+
+function applyPlayerReroll(creator, stat) {
+    if (!PLAYER_STATS.includes(stat)) throw new Error('Choose a valid stat to reroll.');
+    const current = normalizeCoreStats(creator.stats || {})[stat];
+    const roll = clampNumber(creator.rerollValue, 1, 10, rollD10());
+    const value = Math.max(current, roll);
+    creator.stats = { ...normalizeCoreStats(creator.stats || {}), [stat]: value };
+    creator.rerollApplied = { stat, roll, previous: current, value };
+    creator.stage = 'swap';
+}
+
+function applyPlayerSwap(creator, statA, statB) {
+    if (!PLAYER_STATS.includes(statA) || !PLAYER_STATS.includes(statB) || statA === statB) {
+        throw new Error('Choose two different stats to swap.');
+    }
+    const stats = normalizeCoreStats(creator.stats || {});
+    [stats[statA], stats[statB]] = [stats[statB], stats[statA]];
+    creator.stats = stats;
+    creator.swapApplied = { from: statA, to: statB };
+    advanceAfterSwap(creator);
+}
+
+function advanceAfterSwap(creator) {
+    if (creator.flow === 'persona') {
+        creator.sheetText = '';
+        creator.stage = 'persona-sheet';
+    } else {
+        creator.stage = 'identity';
+    }
+}
+
+function syncIdentityInputs(creator) {
+    creator.identity = creator.identity || {};
+    creator.identity.raceMode = document.getElementById('spe_player_race_mode')?.value || creator.identity.raceMode || 'random';
+    creator.identity.pickedRace = document.getElementById('spe_player_race_pick')?.value || creator.identity.pickedRace || 'Human';
+    creator.identity.specifiedRace = String(document.getElementById('spe_player_race_specify')?.value || creator.identity.specifiedRace || '').trim();
+    creator.identity.specifiedRaceDescriptionMode = document.getElementById('spe_player_race_description_mode')?.value || creator.identity.specifiedRaceDescriptionMode || 'system';
+    creator.identity.specifiedRaceDescription = String(document.getElementById('spe_player_race_description')?.value || creator.identity.specifiedRaceDescription || '').trim();
+    creator.identity.appearance = String(document.getElementById('spe_player_appearance')?.value || creator.identity.appearance || '').trim();
+}
+
+async function approvePlayerSheet(root, context = getContext()) {
+    const creator = root.creator || {};
+    const sheetText = String(creator.sheetText || buildPersonaStatsSheet(creator)).trim();
+    if (!isValidCoreStats(creator.stats)) {
+        throw new Error('Cannot approve player setup because the stat block is invalid.');
+    }
+    const personaWrite = await writePlayerSheetToPersona(sheetText, context);
+    root.ready = true;
+    root.disabled = false;
+    root.forceCreator = false;
+    root.stats = normalizeCoreStats(creator.stats);
+    root.personaBeforeSetup = root.personaBeforeSetup || personaWrite.previous || '';
+    root.sheet = {
+        text: sheetText,
+        source: creator.flow === 'persona' ? 'existing_persona_conversion' : 'generated_character',
+        approvedAt: Date.now(),
+    };
+    root.creator = { stage: 'approved' };
+    globalThis.toastr?.success?.('Player sheet inserted into the active persona.', EXTENSION_NAME, { timeOut: 6000 });
+}
+
+function buildPersonaStatsSheet(creator) {
+    const stats = normalizeCoreStats(creator.stats || {});
+    const analysis = creator.personaAnalysis || {};
+    return [
+        '## CHARACTER SHEET',
+        '',
+        '# STATS',
+        `PHY: ${stats.PHY}`,
+        `MND: ${stats.MND}`,
+        `CHA: ${stats.CHA}`,
+        '',
+        '# NOTES',
+        'Stats were generated by Structured Preflight Engines from the existing persona.',
+        `Highest-stat reading: ${analysis.PrimaryStat || 'PHY'}.`,
+        analysis.Evidence ? `Evidence: ${analysis.Evidence}` : '',
+    ].filter(line => line !== '').join('\n');
+}
+
+async function analyzePersonaForPrimaryStat(context = getContext()) {
+    const persona = getPersonaText(context);
+    if (!persona) {
+        throw new Error('The active persona has no description to analyze.');
+    }
+    const prompt = [
+        {
+            role: 'system',
+            content:
+                'You classify a SillyTavern user persona for a deterministic RPG extension. ' +
+                'Do not assign numbers. Do not roll. Choose only which stat should receive the highest rolled value. ' +
+                'PHY means physical force, agility, endurance, stealth movement, combat skill, or bodily execution. ' +
+                'MND means thought, knowledge, perception, focus, will, magic, or deliberate mental/supernatural exertion. ' +
+                'CHA means persuasion, deception, intimidation, negotiation, emotional influence, presence, or interpersonal skill.',
+        },
+        {
+            role: 'user',
+            content:
+                'Return only this compact block. No markdown, no prose before or after it.\n' +
+                'BEGIN_PLAYER_PERSONA_ANALYSIS\n' +
+                'PrimaryStat=PHY|MND|CHA\n' +
+                'Evidence=one short sentence from explicit persona facts\n' +
+                'Race=explicit race/species or unknown\n' +
+                'UserNonHuman=Y|N|unknown\n' +
+                'END_PLAYER_PERSONA_ANALYSIS\n\n' +
+                `PERSONA:\n${clipText(persona, 6000)}`,
+        },
+    ];
+    const raw = await requestPlayerSetupText(prompt, PLAYER_SETUP_ANALYSIS_RESPONSE_LENGTH, {
+        temperature: 0.1,
+        stop: ['END_PLAYER_PERSONA_ANALYSIS'],
+        stopping_strings: ['END_PLAYER_PERSONA_ANALYSIS'],
+        stop_sequence: ['END_PLAYER_PERSONA_ANALYSIS'],
+    });
+    return parsePersonaAnalysis(raw);
+}
+
+function parsePersonaAnalysis(raw) {
+    const text = String(raw || '');
+    const fields = {};
+    for (const line of text.split(/\r?\n/)) {
+        const match = line.match(/^\s*([A-Za-z]+)\s*=\s*(.*?)\s*$/);
+        if (match) fields[match[1]] = match[2];
+    }
+    const primary = String(fields.PrimaryStat || '').trim().toUpperCase();
+    if (!PLAYER_STATS.includes(primary)) {
+        throw new Error(`Persona analysis did not return a valid PrimaryStat. Raw response: ${text.slice(0, 240)}`);
+    }
+    return {
+        PrimaryStat: primary,
+        Evidence: String(fields.Evidence || '').trim(),
+        Race: String(fields.Race || 'unknown').trim(),
+        UserNonHuman: String(fields.UserNonHuman || 'unknown').trim(),
+    };
+}
+
+async function generateNewPlayerCharacterSheet(creator, context = getContext()) {
+    const stats = normalizeCoreStats(creator.stats || {});
+    const identity = creator.identity || {};
+    const raceInstruction = buildNewCharacterRaceInstruction(identity);
+    const appearanceInstruction = identity.appearance
+        ? `Use these user appearance notes as hard constraints: ${identity.appearance}.`
+        : 'Generate a fitting appearance from the chosen race and concept.';
+    const prompt = [
+        {
+            role: 'system',
+            content:
+                'You generate a SillyTavern user persona character sheet for a fantasy roleplay. ' +
+                'The numeric stats are locked and must be copied exactly. Do not reroll, rebalance, or assign new numbers. ' +
+                'Generate flavorful but grounded details. Avoid overpowered abilities. Keep inventory appropriate to the character and setting.',
+        },
+        {
+            role: 'user',
+            content:
+                'Return only the finished character sheet in markdown. No preface and no questions.\n\n' +
+                `LOCKED STATS:\nPHY: ${stats.PHY}\nMND: ${stats.MND}\nCHA: ${stats.CHA}\n\n` +
+                `${raceInstruction}\n${appearanceInstruction}\n\n` +
+                'Required sections:\n' +
+                '# BASIC INFO: Name, Race, Bloodline if relevant, UserNonHuman Y/N, Gender, Age, and a brief identity note if relevant.\n' +
+                '# APPEARANCE: height, build, hair, eyes, skin, distinctive traits, voice.\n' +
+                '# STATS: PHY, MND, CHA copied exactly.\n' +
+                '# RACIAL TRAITS (ALWAYS ACTIVE): exactly two passive traits that enhance existing human faculties; do not add impossible new senses or active powers.\n' +
+                '# ABILITIES (REQUIRE ACTIVATION): exactly two activated abilities. Each ability must clearly come from the chosen race, ancestry, physiology, passive traits, or stated character concept. Do not invent unrelated powers. Keep them useful, character-defining, and not overpowered.\n' +
+                '# INVENTORY: setting-appropriate gear, no currency amount unless requested, no weapon unless justified by background.\n' +
+                '# NOTES: concise character notes, limits, background hooks, secrecy rules, or fighting style if relevant.',
+        },
+    ];
+    return sanitizeGeneratedSheet(await requestPlayerSetupText(prompt, PLAYER_SETUP_SHEET_RESPONSE_LENGTH, {
+        temperature: 0.7,
+    }));
+}
+
+function buildNewCharacterRaceInstruction(identity = {}) {
+    if (identity.raceMode === 'specify') {
+        const raceName = String(identity.specifiedRace || '').trim();
+        if (!raceName) {
+            throw new Error('Specify mode needs a race or ancestry name.');
+        }
+
+        if (identity.specifiedRaceDescriptionMode === 'user') {
+            const description = String(identity.specifiedRaceDescription || '').trim();
+            if (!description) {
+                throw new Error('Describe it myself needs a race description.');
+            }
+            return [
+                `Use this race/ancestry name exactly: ${raceName}.`,
+                'The user-described race details below are locked canon. Preserve their meaning exactly.',
+                'Do not replace, reinterpret, soften, intensify, or invent over them. You may organize them into the character sheet and fill only truly missing minor presentation details when needed.',
+                `LOCKED USER RACE DESCRIPTION:\n${description}`,
+            ].join('\n');
+        }
+
+        return [
+            `Use this race/ancestry name exactly: ${raceName}.`,
+            'The user provided the name only. Invent a fitting, playable race description for that name, including appearance implications and passive racial flavor.',
+            'Keep it useful for roleplay and avoid making the character automatically overpowered.',
+        ].join('\n');
+    }
+
+    if (identity.raceMode === 'pick') {
+        return `Use this race/ancestry: ${identity.pickedRace || 'Human'}.`;
+    }
+
+    return 'Randomly choose a fantasy humanoid, demi-human, monster-humanoid, undead, construct, spirit-touched, or hybrid race. Keep the result playable as {{user}} unless the chosen race explicitly demands otherwise.';
+}
+
+async function generateExistingPersonaCharacterSheet(creator, context = getContext()) {
+    const stats = normalizeCoreStats(creator.stats || {});
+    const persona = getPersonaText(context);
+    if (!persona) {
+        throw new Error('The active persona has no description to convert.');
+    }
+    const analysis = creator.personaAnalysis || {};
+    const prompt = [
+        {
+            role: 'system',
+            content:
+                'You convert an existing SillyTavern user persona into a clean character sheet for fantasy roleplay. ' +
+                'Preserve explicit persona facts exactly in meaning. Do not rewrite the character, add new biography, invent missing facts, or contradict the persona. ' +
+                'You may rearrange and label information for formatting only. Copy factual wording where practical. Do not embellish, interpret, strengthen, weaken, or replace any detail. If a required field is not stated, write "Not specified". ' +
+                'The only new information you may insert is the locked stat block. Do not reroll, rebalance, or assign new numbers.',
+        },
+        {
+            role: 'user',
+            content:
+                'Return only the finished character sheet in markdown. No preface and no questions.\n\n' +
+                `LOCKED STATS:\nPHY: ${stats.PHY}\nMND: ${stats.MND}\nCHA: ${stats.CHA}\n\n` +
+                `PERSONA PRIMARY STAT READING: ${analysis.PrimaryStat || 'PHY'}\n` +
+                `EVIDENCE: ${analysis.Evidence || 'none'}\n` +
+                `EXPLICIT RACE/SPECIES IF KNOWN: ${analysis.Race || 'unknown'}\n` +
+                `USER NON-HUMAN IF KNOWN: ${analysis.UserNonHuman || 'unknown'}\n\n` +
+                'Template requirements:\n' +
+                '# BASIC INFO: Name, Race, Bloodline if relevant, UserNonHuman Y/N, Gender, Age, and origin/mind notes. Use explicit persona facts only; otherwise write Not specified.\n' +
+                '# APPEARANCE: preserve explicit appearance facts only; otherwise write Not specified.\n' +
+                '# STATS: PHY, MND, CHA copied exactly.\n' +
+                '# RACIAL TRAITS (ALWAYS ACTIVE): preserve explicit passive traits only. If none are explicit, write Not specified.\n' +
+                '# ABILITIES (REQUIRE ACTIVATION): preserve explicit active abilities only. If none are explicit, write Not specified.\n' +
+                '# INVENTORY: preserve explicit gear/inventory only. If none is explicit, write Not specified.\n' +
+                '# NOTES: preserve all important persona notes, origin facts, limits, fighting style, and secrecy rules.\n\n' +
+                `EXISTING PERSONA:\n${clipText(persona, 9000)}`,
+        },
+    ];
+    return sanitizeGeneratedSheet(await requestPlayerSetupText(prompt, PLAYER_SETUP_SHEET_RESPONSE_LENGTH, {
+        temperature: 0.1,
+    }));
+}
+
+function sanitizeGeneratedSheet(raw) {
+    const text = String(raw || '')
+        .replace(/^```(?:markdown|md|text)?\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+    if (!text) throw new Error('Character sheet generation returned empty text.');
+    return text;
+}
+
+async function requestPlayerSetupText(prompt, responseLength, overridePayload = {}) {
+    const context = getContext();
+    state.bypassPromptReady = true;
+    try {
+        return await withSemanticGenerationSettings(async settings => {
+            if (settings?.semanticProfileId) {
+                return await sendSemanticProfileTextRequest(prompt, responseLength, settings, overridePayload);
+            }
+            if (!context?.generateRawData) {
+                throw new Error('SillyTavern generateRawData API is unavailable for player setup.');
+            }
+            const textPrompt = Array.isArray(prompt)
+                ? prompt.map(message => `${String(message.role || 'user').toUpperCase()}:\n${String(message.content || '')}`).join('\n\n')
+                : String(prompt || '');
+            return await context.generateRawData({ prompt: textPrompt, responseLength });
+        });
+    } finally {
+        state.bypassPromptReady = false;
+    }
+}
+
+function clipText(value, maxLength) {
+    const text = String(value ?? '').trim();
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength)}\n[truncated]`;
+}
+
 function captureChatSignature(context = getContext()) {
     if (!Array.isArray(context?.chat)) return [];
     return context.chat.map(message => [
@@ -1248,19 +2276,23 @@ async function handleMessageSwiped(messageId) {
 
 function handleChatChanged() {
     clearPendingRunCleanupTimer();
+    clearAllProgress();
     const context = getContext();
+    getPlayerRoot(context);
     restoreTrackerFromLatestDisplaySnapshot(context);
     state.lastDebugKey = null;
     state.lastDebugPrefix = '';
     state.pendingRun = null;
     state.chatSignature = captureChatSignature();
     clearRuntimePrompts();
-    setTimeout(() => renderAllTrackerDisplayBlocks(context), 0);
+    setTimeout(() => {
+        renderAllTrackerDisplayBlocks(context);
+        renderPlayerSetupCard(context);
+    }, 0);
 }
 
 function handleGenerationLifecycleEnd() {
-    clearProgress(state.progressToast);
-    state.progressToast = null;
+    clearAllProgress();
     state.pendingGeneration = null;
     clearRuntimePrompts();
 
@@ -1312,6 +2344,22 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         return true;
     }
 
+    if (playerSetupNeeded(context)) {
+        const root = getPlayerRoot(context);
+        root.creator = root.creator || { stage: 'offer' };
+        await persistMetadata(context);
+        renderPlayerSetupCard(context);
+        clearRuntimePrompts();
+        clearAllProgress();
+        try {
+            globalThis.toastr?.info?.('Complete Player Setup before roleplay generation can continue.', EXTENSION_NAME, { timeOut: 7000 });
+        } catch {
+            // Toasts are optional.
+        }
+        if (typeof abort === 'function') abort(true);
+        return true;
+    }
+
     state.chatSignature = captureChatSignature(context);
     restoreTrackerForRegeneration(type);
     state.pendingGeneration = {
@@ -1321,7 +2369,7 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         createdAt: Date.now(),
     };
     state.activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    state.progressToast = showProgress('Computing structured pre-flight...');
+    showProgress('Computing structured pre-flight...');
 
     return false;
 };
@@ -1343,6 +2391,7 @@ async function handleChatCompletionPromptReady(eventData) {
             state.pendingGeneration.type,
             trackerSnapshot,
         );
+        applyPlayerCoreStatsOverride(semanticLedger, context);
         const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, state.pendingGeneration.type);
 
         const audit = formatPreFlightDebug(report);
@@ -1360,13 +2409,11 @@ async function handleChatCompletionPromptReady(eventData) {
         sanitizeFinalPromptHistory(eventData.chat);
         appendEngineSentinelToPrompt(eventData.chat);
         appendNarratorContextToPrompt(eventData.chat, narratorContext);
-        clearProgress(state.progressToast);
-        state.progressToast = null;
+        clearAllProgress();
     } catch (error) {
         state.lastDebugPrefix = '';
         state.pendingRun = null;
-        clearProgress(state.progressToast);
-        state.progressToast = null;
+        clearAllProgress();
         clearRuntimePrompts();
         showBlockingError(error);
         abortGenerationAfterPromptReady(context);
@@ -1433,6 +2480,7 @@ function abortGenerationAfterPromptReady(context) {
 
 export function onDisable() {
     const context = getContext();
+    clearAllProgress();
     if (context?.extensionPrompts) {
         delete context.extensionPrompts[ENGINE_PROMPT_KEY];
         delete context.extensionPrompts[NARRATOR_PROMPT_KEY];
@@ -1464,15 +2512,19 @@ if (typeof jQuery === 'function') {
     jQuery(() => {
         renderSettingsPanel();
         setTimeout(() => {
+            getPlayerRoot();
             restoreTrackerFromLatestDisplaySnapshot();
             renderAllTrackerDisplayBlocks();
+            renderPlayerSetupCard();
         }, 0);
     });
 } else {
     renderSettingsPanel();
     setTimeout(() => {
+        getPlayerRoot();
         restoreTrackerFromLatestDisplaySnapshot();
         renderAllTrackerDisplayBlocks();
+        renderPlayerSetupCard();
     }, 0);
 }
 clearRuntimePrompts();
