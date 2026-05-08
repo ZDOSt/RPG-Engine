@@ -16,6 +16,8 @@ const SETTINGS_KEY = 'structuredPreflightEngines';
 const SETTINGS_CONTAINER_ID = 'structured_preflight_settings_container';
 const ENGINE_PROMPT_KEY = 'structured_preflight_engines';
 const NARRATOR_PROMPT_KEY = 'structured_preflight_narrator_context';
+const WRITING_STYLE_PROMPT_KEY = 'structured_preflight_writing_style';
+const PROSE_RULES_PROMPT_KEY = 'structured_preflight_prose_rules';
 const PROFILE_NONE = '<None>';
 const TRACKER_DISPLAY_EXTRA_KEY = 'structured_preflight_tracker_display';
 const TRACKER_DISPLAY_BLOCK_CLASS = 'structured-preflight-tracker-block';
@@ -79,11 +81,337 @@ const PLAYER_RACE_CHOICES = Object.freeze([
 ]);
 const PLAYER_SETUP_ANALYSIS_RESPONSE_LENGTH = 900;
 const PLAYER_SETUP_SHEET_RESPONSE_LENGTH = 3600;
+const DEFAULT_WRITING_STYLE_PROMPT = String.raw`**WRITING STYLE** 
+
+**ARCHETYPE:** Cormac McCarthy physical prose x R.A. Salvatore action x Tessa Bailey explicit erotica x serious ecchi framing.
+
+**CORE LAW:**
+- Physical reality first. No metaphors. No internal monologue.
+- Emotion through breath, posture, distance, gaze, contact, hesitation, pressure, recoil, and bodily response.
+- Sweat, skin, blood, steel, fabric, breath, heat, friction, and impact all matter equally.
+- Tone is serious, grounded, heavy, and physically charged.
+
+**ACTION MODE:**
+- Use clear technical choreography: footwork, leverage, spacing, timing, momentum, impact.
+- Every strike, dodge, grab, fall, and reversal must be spatially legible.
+- If erotic tension is present, weave it through contact, imbalance, exposure, and breath without losing clarity.
+
+**TENSION MODE:**
+- In quiet or aftermath scenes, keep prose lean and heavy.
+- Focus on stillness, breathing, wounds, sweat, stance, silence, clothing, exposed skin, and proximity.
+
+**EROTIC MODE:**
+- When the scene is sexually charged or explicit, be direct, anatomical, and physical.
+- Choreograph grip, angle, pressure, rhythm, thrust, spread, drag, recoil, and weight clearly.
+- Treat exposure as a material event: fabric sticks, peels, drags, bunches, slips, tears, or falls away.
+- If exposure is explicit and unobstructed, describe anatomy directly.
+- Use crude terms in explicit scenes: pussy, cunt, cock, shaft.
+- Arousal, fluids, sound, climax, and aftermath must stay bodily, messy, and concrete.
+
+**ECCHI OVERLAY:**
+- Use close physical framing: thighs, hips, chest, mouth, hands, abdomen, damp fabric, exposed skin.
+- Clothing strain, slippage, transparency, damage, bounce, and wardrobe failure are physical consequences, not jokes.
+- Keep ecchi serious, not comedic.
+
+**MODE PRIORITY:**
+- Core Law always applies.
+- Action Mode for combat/struggle/pursuit.
+- Tension Mode for stillness/aftermath/restraint.
+- Erotic Mode only when intimacy, arousal, exposure, or sex is actually present.
+- Ecchi Overlay can layer onto any mode without reducing physical clarity.
+
+**MODEL EXAMPLES:**
+- ❌ "Her heart fluttered with desire." → ✓ "Her weight shifted forward. Sweat traced her collarbone."
+- ❌ "He attacked viciously." → ✓ "His lead foot snapped forward, blade arcing toward her throat."
+- ❌ "The moment was electric." → ✓ "Three inches between their mouths. She could smell the wine on him."`;
+const DEFAULT_PROSE_RULES_PROMPT = String.raw`function simulationGuidelines() {
+**CORE DIRECTIVE:** The world and its inhabitants are autonomous, reactive, and textured.
+**BEHAVIOR & SOCIALS:**
+- **Autonomy:** Characters prioritize self-interest. Trust is currency, earned slowly.
+- **Dialogue:** Human Imperfection. Use interruptions, evasion, and subtext. Ban exposition.
+- **Dynamics:** Relationships mutate via _friction_ (arguments, shared danger), not just time.
+**SUBTEXT & HISTORY:**
+- **Trauma:** Show, Don't Explain. A flinch at a raised hand; a freeze at a specific smell.
+- **Totems:** Assign physical objects (worn key, hoodie) that recur in high-stress moments.
+- **Mirror Moments:** Occasional focus on physical degradation/change in reflections.
+**ENVIRONMENTAL TEXTURE:**
+- **Diegesis:** Enrich the present. Linger on background motion, light, and posture.
+- **Physics/Magic:** Describe as lived phenomena (weight, resonance, heat).
+- **Seeds:** Plant small, unanswered questions (rumors, odd details) for future payoff.
+}
+function abilityIntegration() {
+  domain: ability and magic rendering
+  policy: LOCKED
+  mandate: Biological Integration. Treat abilities and magic as innate physiology. Never announce activation.
+  ban:
+    - "Using [Ability]"
+    - "Focusing"
+    - "Activating"
+    - "Summoning"
+  protocol:
+    - Skip the cause.
+    - Narrate only the effect as direct sensory fact.
+  pattern:
+    - Darkvision -> "He scanned the unlit room. A figure crouched behind the crate, clear as day."
+    - Dimensional Storage -> "He closed his fingers. The hilt materialized against his palm, cold and heavy."
+    - Super Hearing -> "Through the stone wall, the rhythm of a heartbeat thudded against his ear."
+}
+function fogOfWar() {
+  domain: scene knowledge, naming, POV limits
+  policy: LOCKED
+  mandate: Strict Epistemology. Information stays locked until earned by direct sensory evidence, dialogue, or readable text.
+  ban:
+    - Hive Mind
+    - Psychic Empathy
+    - Meta-Labeling
+    - God-View
+    - Detached Ambience
+    - Ability Omniscience
+  protocol:
+    - Unknown entities/places: refer only by observable traits.
+    - Names unlock only after spoken, read, or formally revealed in-scene.
+    - Anchor all sound to position: direction + rough distance + occlusion when relevant.
+    - Do not narrate {{user}} cognition.
+    - If an ability has no visible origin, NPCs perceive effect only; source remains unknown.
+  pattern:
+    - "Somewhere beyond the glade's edge, a cricket chirps." -> "A cricket chirped to the left, past the treeline."
+    - "Somewhere, a dog barks." -> "A bark cut through — sharp, close, behind the wall."
+}
+function olfactoryGate() {
+  domain: smell and taste gating
+  policy: LOCKED
+  mandate: Default to sight, sound, touch. Scent and taste are locked by default.
+  ban:
+    - ambient mood scents
+    - "tasting the air"
+    - romanticized odor language
+  unlock:
+    - stimulus is overpowering
+    - source is visible
+    - {{user}} is in immediate proximity
+  limit:
+    - max 1 smell/taste mention per scene
+    - no repetition
+  pattern:
+    - "The tavern smelled of ale and woodsmoke." -> "Mugs clattered. The fire popped."
+    - "His musk and wet earth filled her senses." -> "Mud caked his boots. His coat dripped onto the floor."
+}
+function sensoryEnforcement() {
+  domain: allowed sensory channels
+  policy: LOCKED
+  mandate: Narrate only through raw physical data.
+  default:
+    - sight
+    - sound
+    - touch
+  gate:
+    - smell and taste allowed only if olfactoryGate() unlocks
+  ban:
+    - abstract emotive labels
+    - mood-label sensory claims
+    - "the air felt"
+  pattern:
+    - "He was nervous." -> "He wiped his palms on his jeans. The fabric darkened."
+    - "Awkward silence." -> "The refrigerator hummed. A floorboard settled."
+    - "Angry voice." -> "He slammed the mug down. 'No.'"
+}
+function styleEnforcement() {
+  domain: prose ornament and wording style
+  policy: LOCKED
+  mandate: Utilitarian prose. Zero ornament. Adjectives must describe physics, not vibes.
+  ban:
+    - textural glamour words
+    - emotional physics
+    - poetic framing
+  note:
+    - If describing silence, render observable absence plus substitute sound, not mood-object silence.
+  pattern:
+    - "Her voice was molten silk." -> "She spoke quietly."
+    - "The silence was heavy." -> "No one moved."
+    - "His eyes burned." -> "He stared."
+}
+function literalismEnforcement() {
+  domain: figurative language control
+  policy: LOCKED
+  mandate: Radical Literalism. Describe objects and actions only by physical properties.
+  ban:
+    - metaphor
+    - simile
+    - hyperbole
+    - elliptical construction
+    - ellipsis
+    - comparative phrasing
+    - idiom
+  pattern:
+    - "Cold as ice." -> "She didn't blink."
+    - "Drowning in guilt." -> "He put his head in his hands."
+    - "Words were daggers." -> "He flinched."
+}
+function behavioralEnforcement() {
+  domain: human behavior and emotional rendering
+  policy: LOCKED
+  mandate: Strict Behaviorism. Narrate only observable physical displacement: behavior + body mechanics.
+  ban:
+    - internal state labels
+    - eye-language mood words
+    - autonomic trope shortcuts
+    - escalation loops
+  use_instead:
+    - fidgeting
+    - posture shifts
+    - weight transfer
+    - footwork
+    - stance over-corrections
+    - gaze control
+    - speech timing
+  pattern:
+    - "She was embarrassed." -> "She retied her shoelaces. Twice."
+    - "He was afraid." -> "He fumbled with the lighter. It fell."
+    - "He felt tender." -> "He lowered his voice. Moved the mug closer to her hand."
+}
+function materialEnforcement() {
+  domain: objectivity of inanimate things
+  policy: LOCKED
+  mandate: Inanimate Objectivity. Only biological entities possess agency or intent.
+  ban:
+    - Pathetic Fallacy
+    - Active verbs for abstract concepts
+    - Anthropomorphism
+  pattern:
+    - "The wind whispered." -> "Leaves rustled."
+    - "The room waited." -> "Dust motes drifted."
+    - "The storm raged." -> "Rain lashed the glass."
+}
+function turnEnforcement() {
+  domain: turn structure and stop conditions
+  policy: LOCKED
+  mandate: Stop generation immediately when {{user}} is targeted by question, command, request, or action. No filler. No forced resolution.
+  npc_limits:
+    - max 1 inter-NPC exchange
+    - max 3 sentences per monologue
+    - never answer a question directed at {{user}}
+  agency:
+    - absolute ban on describing {{user}} reaction, thought, or silence
+  format:
+    - Merge action and dialogue from the same speaker into the same block.
+    - Paragraph breaks allowed for pacing.
+  ban:
+    - same-speaker fragmentation across line breaks
+  pattern:
+    - "I told you not to come here." She set the glass down. "But you never listen."
+    - "The shipment's late." He drummed his fingers on the table. "Again."
+}
+function agencyEnforcement() {
+  domain: user/world control separation
+  policy: LOCKED
+  mandate: Absolute Separation of Control. You run the world. {{user}} runs the protagonist.
+  boundary:
+    - Active: never write {{user}} speech, thoughts, or intentional actions.
+    - Passive: may write {{user}} involuntary physics.
+  ooc_override:
+    - If {{user}} inputs ((Instruction)): act as Proxy Narrator.
+    - Execute action exactly as described.
+    - No dialogue.
+    - Return control immediately after.
+  interrupt_protocols:
+    - Combat: if attack fails against {{user}}, halt at frame of impact.
+    - Dialogue: speech ≠ movement.
+    - Time Jump: on ((Skip to X)), hard cut. New environment only. No travel narration.
+  pattern:
+    - "The fist flew toward {{user}}'s jaw."
+    - "Where are you going?"
+    - "The tavern was half-empty. A fire crackled."
+}
+function chronologyEnforcement() {
+  domain: temporal sequencing
+  policy: LOCKED
+  mandate: Strict Linear Progression. Narration begins at T+1 after {{user}} action/dialogue.
+  ban:
+    - echoing {{user}} action
+    - summary restatement
+    - "As you..." phrasing
+  sequence:
+    - {{user}} input = past tense fact
+    - AI output = immediate consequence
+    - gap = 0 seconds
+  pattern:
+    - User: "I fill the trough."
+    - Bad: "You fill the trough..."
+    - Good: "The water settled. He watched the ripples."
+}
+function handoffEnforcement() {
+  domain: final beat and response hook
+  policy: LOCKED
+  mandate: Final beat must give {{user}} something immediate to react to. Never end on ambient filler.
+  priority:
+    - NPC dialogue or action directed at {{user}}
+    - new stimulus entering scene
+    - unresolved tension from handoff fields
+  ban:
+    - meta-questions
+    - explicit waiting
+    - ambient filler ending
+    - personification
+  test:
+    - If {{user}} cannot reasonably respond to the final beat right now, regenerate using next-highest priority.
+}`;
+const DEFAULT_FINAL_REMINDER_PROMPT = String.raw`FINAL RECALL — APPLY ALL LOCKED ENFORCEMENT FUNCTIONS BEFORE OUTPUT.
+REFERENCE ONLY. DO NOT OUTPUT THIS BLOCK.
+
+call olfactoryGate()
+- Smell/Taste locked unless overpowering + visible source + immediate proximity.
+- Max 1 mention per scene.
+
+call sensoryEnforcement()
+- Narrate raw physical data only.
+- Default channels: sight, sound, touch.
+
+call styleEnforcement()
+- Utilitarian prose only.
+- No ornament, emotional physics, or poetic framing.
+
+call literalismEnforcement()
+- No metaphor, simile, hyperbole, idiom, or comparison phrasing.
+
+call behavioralEnforcement()
+- Show only observable behavior and body mechanics.
+- No internal states or autonomic trope shortcuts. Absolutely no BLUSHING or FLUSHING. OBSERVABLE BEHAVIOR ONLY.
+
+call materialEnforcement()
+- No anthropomorphism or pathetic fallacy.
+
+call fogOfWar()
+- No omniscience, no god-view, no premature names/titles.
+
+call chronologyEnforcement()
+- Start at T+1 from {{user}}'s input.
+- Do not echo or summarize {{user}} dialogue or actions.
+
+call agencyEnforcement()
+- Never write {{user}}'s speech, thoughts, or intentional actions.
+- Failed attacks against {{user}} halt at frame of impact.
+
+call turnEnforcement()
+- Halt when {{user}} is targeted.
+- Keep NPC speech blocks cohesive.
+
+call handoffEnforcement()
+- Final beat must give {{user}} something immediate to react to.
+- No meta-questions, waiting, filler ambience, or personification.
+
+FINAL CHECK:
+- Remove any banned element before output.
+DO NOT Ooutput any of this text in your final response.
+- VIOLATION = FAILURE + DELETE ALL TEXT + REGENERATE.`;
 const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,
     semanticConnectionProfile: '',
     semanticPreset: '',
     disableSemanticThinking: true,
+    writingStylePrompt: DEFAULT_WRITING_STYLE_PROMPT,
+    proseRulesEnabled: true,
+    proseRulesPrompt: DEFAULT_PROSE_RULES_PROMPT,
+    finalReminderPrompt: DEFAULT_FINAL_REMINDER_PROMPT,
 });
 const CHAT_COMPLETION_SECRET_KEYS = Object.freeze({
     ai21: SECRET_KEYS.AI21,
@@ -399,9 +727,23 @@ function refreshSettingsControls() {
     const presetSelect = document.getElementById('structured_preflight_semantic_preset');
     const enabledCheckbox = document.getElementById('structured_preflight_use_separate_semantic_settings');
     const disableThinkingCheckbox = document.getElementById('structured_preflight_disable_semantic_thinking');
+    const writingStylePrompt = document.getElementById('structured_preflight_writing_style_prompt');
+    const proseRulesEnabled = document.getElementById('structured_preflight_prose_rules_enabled');
+    const proseRulesPrompt = document.getElementById('structured_preflight_prose_rules_prompt');
+    const finalReminderPrompt = document.getElementById('structured_preflight_final_reminder_prompt');
 
     if (enabledCheckbox) enabledCheckbox.checked = enabled;
     if (disableThinkingCheckbox) disableThinkingCheckbox.checked = settings.disableSemanticThinking !== false;
+    if (writingStylePrompt && writingStylePrompt.value !== settings.writingStylePrompt) {
+        writingStylePrompt.value = String(settings.writingStylePrompt ?? DEFAULT_WRITING_STYLE_PROMPT);
+    }
+    if (proseRulesEnabled) proseRulesEnabled.checked = settings.proseRulesEnabled !== false;
+    if (proseRulesPrompt && proseRulesPrompt.value !== settings.proseRulesPrompt) {
+        proseRulesPrompt.value = String(settings.proseRulesPrompt ?? DEFAULT_PROSE_RULES_PROMPT);
+    }
+    if (finalReminderPrompt && finalReminderPrompt.value !== settings.finalReminderPrompt) {
+        finalReminderPrompt.value = String(settings.finalReminderPrompt ?? DEFAULT_FINAL_REMINDER_PROMPT);
+    }
     setSelectOptions(
         profileSelect,
         getConnectionProfileNames(),
@@ -419,6 +761,8 @@ function refreshSettingsControls() {
 
     if (profileSelect) profileSelect.disabled = !enabled;
     if (presetSelect) presetSelect.disabled = !enabled;
+    if (proseRulesPrompt) proseRulesPrompt.disabled = settings.proseRulesEnabled === false;
+    if (finalReminderPrompt) finalReminderPrompt.disabled = settings.proseRulesEnabled === false;
 
     const playerStatus = document.getElementById('structured_preflight_player_setup_status');
     if (playerStatus) {
@@ -480,6 +824,35 @@ function renderSettingsPanel() {
                 <small>Applies only to Story Engine semantic, tracker, and player setup calls. Main narration keeps its own profile settings.</small>
                 <hr>
                 <div class="flex-container alignitemscenter">
+                    <b class="flex1">Edit Writing Style</b>
+                    <button id="structured_preflight_reset_writing_style" class="menu_button">Reset Writing Style</button>
+                </div>
+                <small>Injected into the regular SillyTavern prompt stack after Main Prompt. Edit freely; whatever text is here will be sent as writing style context.</small>
+                <textarea id="structured_preflight_writing_style_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
+                <hr>
+                <label class="checkbox_label flexNoGap">
+                    <input id="structured_preflight_prose_rules_enabled" type="checkbox">
+                    <span>Enable Prose Rules</span>
+                </label>
+                <small>When disabled, both the persistent prose rules and final reminder are skipped.</small>
+                <details open>
+                    <summary class="flex-container alignitemscenter">
+                        <b class="flex1">Edit Prose Rules</b>
+                        <button id="structured_preflight_reset_prose_rules" class="menu_button" type="button">Reset Prose Rules</button>
+                    </summary>
+                    <small>Injected as SYSTEM context in the regular SillyTavern prompt stack after Main Prompt and Writing Style.</small>
+                    <textarea id="structured_preflight_prose_rules_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
+                </details>
+                <details>
+                    <summary class="flex-container alignitemscenter">
+                        <b class="flex1">Edit Final Reminder</b>
+                        <button id="structured_preflight_reset_final_reminder" class="menu_button" type="button">Reset Final Reminder</button>
+                    </summary>
+                    <small>Inserted immediately before the Story Engine narrator prompt for the final narration pass only.</small>
+                    <textarea id="structured_preflight_final_reminder_prompt" class="text_pole textarea_compact" rows="12" spellcheck="false"></textarea>
+                </details>
+                <hr>
+                <div class="flex-container alignitemscenter">
                     <small id="structured_preflight_player_setup_status" class="flex1"></small>
                     <button id="structured_preflight_show_player_setup" class="menu_button">Show Player Setup</button>
                     <button id="structured_preflight_force_player_setup" class="menu_button">Run Character Creator</button>
@@ -505,6 +878,43 @@ function renderSettingsPanel() {
     });
     document.getElementById('structured_preflight_disable_semantic_thinking')?.addEventListener('change', event => {
         settings.disableSemanticThinking = Boolean(event.target?.checked);
+        saveExtensionSettings();
+    });
+    document.getElementById('structured_preflight_writing_style_prompt')?.addEventListener('input', event => {
+        settings.writingStylePrompt = String(event.target?.value ?? '');
+        injectWritingStylePrompt();
+        saveExtensionSettings();
+    });
+    document.getElementById('structured_preflight_reset_writing_style')?.addEventListener('click', () => {
+        settings.writingStylePrompt = DEFAULT_WRITING_STYLE_PROMPT;
+        refreshSettingsControls();
+        injectWritingStylePrompt();
+        saveExtensionSettings();
+    });
+    document.getElementById('structured_preflight_prose_rules_enabled')?.addEventListener('change', event => {
+        settings.proseRulesEnabled = Boolean(event.target?.checked);
+        refreshSettingsControls();
+        injectProseRulesPrompt();
+        saveExtensionSettings();
+    });
+    document.getElementById('structured_preflight_prose_rules_prompt')?.addEventListener('input', event => {
+        settings.proseRulesPrompt = String(event.target?.value ?? '');
+        injectProseRulesPrompt();
+        saveExtensionSettings();
+    });
+    document.getElementById('structured_preflight_final_reminder_prompt')?.addEventListener('input', event => {
+        settings.finalReminderPrompt = String(event.target?.value ?? '');
+        saveExtensionSettings();
+    });
+    document.getElementById('structured_preflight_reset_prose_rules')?.addEventListener('click', () => {
+        settings.proseRulesPrompt = DEFAULT_PROSE_RULES_PROMPT;
+        refreshSettingsControls();
+        injectProseRulesPrompt();
+        saveExtensionSettings();
+    });
+    document.getElementById('structured_preflight_reset_final_reminder')?.addEventListener('click', () => {
+        settings.finalReminderPrompt = DEFAULT_FINAL_REMINDER_PROMPT;
+        refreshSettingsControls();
         saveExtensionSettings();
     });
     document.getElementById('structured_preflight_refresh_semantic_settings')?.addEventListener('click', refreshSettingsControls);
@@ -552,6 +962,8 @@ function renderSettingsPanel() {
     });
 
     refreshSettingsControls();
+    injectWritingStylePrompt();
+    injectProseRulesPrompt();
 }
 
 function closeExtensionsDrawer() {
@@ -585,6 +997,57 @@ function injectRuntimeSentinel() {
         false,
         EXTENSION_PROMPT_ROLES.SYSTEM,
     );
+}
+
+function injectWritingStylePrompt() {
+    const context = getContext();
+    if (!context?.setExtensionPrompt) {
+        return;
+    }
+
+    const settings = getSettings();
+    const promptText = String(settings.writingStylePrompt ?? DEFAULT_WRITING_STYLE_PROMPT);
+    context.setExtensionPrompt(
+        WRITING_STYLE_PROMPT_KEY,
+        promptText,
+        EXTENSION_PROMPT_TYPES.IN_PROMPT,
+        0,
+        false,
+        EXTENSION_PROMPT_ROLES.SYSTEM,
+    );
+}
+
+function injectProseRulesPrompt() {
+    const context = getContext();
+    if (!context?.setExtensionPrompt) {
+        return;
+    }
+
+    const settings = getSettings();
+    if (settings.proseRulesEnabled === false) {
+        if (context.extensionPrompts) delete context.extensionPrompts[PROSE_RULES_PROMPT_KEY];
+        return;
+    }
+
+    const promptText = String(settings.proseRulesPrompt ?? DEFAULT_PROSE_RULES_PROMPT);
+    context.setExtensionPrompt(
+        PROSE_RULES_PROMPT_KEY,
+        promptText,
+        EXTENSION_PROMPT_TYPES.IN_PROMPT,
+        0,
+        false,
+        EXTENSION_PROMPT_ROLES.SYSTEM,
+    );
+}
+
+function buildFinalNarrationPrompt(narratorContext) {
+    const settings = getSettings();
+    if (settings.proseRulesEnabled === false) return narratorContext;
+
+    const reminder = String(settings.finalReminderPrompt ?? DEFAULT_FINAL_REMINDER_PROMPT).trim();
+    if (!reminder) return narratorContext;
+
+    return `${reminder}\n\n${narratorContext}`;
 }
 
 function clearRuntimePrompts() {
@@ -2605,7 +3068,7 @@ async function prependComputedDebug(messageId, type) {
                 postReplyTrackerWarning = error instanceof Error ? error.message : String(error);
                 console.warn(`[${EXTENSION_NAME}] post-reply tracker pass failed; keeping pre-reply tracker snapshot.`, error);
             }
-            await saveTrackerUpdate(context, buildTrackerUpdateForPersistence(trackerDisplaySnapshot));
+            await saveTrackerUpdate(context, buildTrackerUpdateForPersistence(trackerDisplaySnapshot), { save: false });
             root.snapshots[messageKey] = {
                 before: clone(pendingRun.trackerBefore),
                 beforeUser: clone(pendingRun.userBefore),
@@ -2617,14 +3080,12 @@ async function prependComputedDebug(messageId, type) {
                 savedAt: Date.now(),
             };
             setMessageTrackerDisplaySnapshot(message, trackerDisplaySnapshot);
-            await persistMetadata(context);
             if (state.pendingRun === pendingRun) state.pendingRun = null;
         }
 
         message.mes = narrationText;
         message.extra.display_text = narrationText;
         setMessageNarratorHandoff(message, narratorHandoff);
-        await persistMetadata(context);
         state.lastNarratorHandoffKey = messageKey;
         state.lastNarratorHandoff = '';
 
@@ -2636,6 +3097,8 @@ async function prependComputedDebug(messageId, type) {
 
         if (typeof context.saveChat === 'function') {
             await context.saveChat();
+        } else {
+            await persistMetadata(context);
         }
 
         clearRuntimePrompts();
@@ -2705,6 +3168,8 @@ function handleChatChanged() {
     clearPendingRunCleanupTimer();
     clearAllProgress();
     const context = getContext();
+    injectWritingStylePrompt();
+    injectProseRulesPrompt();
     getPlayerRoot(context);
     restoreTrackerFromLatestDisplaySnapshot(context);
     migrateVisibleHandoffDisplays(context);
@@ -2772,6 +3237,8 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         if (typeof abort === 'function') abort(true);
         return true;
     }
+    injectWritingStylePrompt();
+    injectProseRulesPrompt();
 
     if (playerSetupNeeded(context)) {
         const root = getPlayerRoot(context);
@@ -2879,7 +3346,7 @@ async function runSemanticPassWithPromptReadyBypass(context, assembledChat, type
 function appendNarratorContextToPrompt(chat, narratorContext) {
     chat.push({
         role: 'system',
-        content: narratorContext,
+        content: buildFinalNarrationPrompt(narratorContext),
     });
 }
 
@@ -2919,6 +3386,8 @@ export function onDisable() {
     if (context?.extensionPrompts) {
         delete context.extensionPrompts[ENGINE_PROMPT_KEY];
         delete context.extensionPrompts[NARRATOR_PROMPT_KEY];
+        delete context.extensionPrompts[WRITING_STYLE_PROMPT_KEY];
+        delete context.extensionPrompts[PROSE_RULES_PROMPT_KEY];
     }
     if (state.subscribed && context?.eventSource && context?.eventTypes?.MESSAGE_RECEIVED) {
         removeEventHandler(context, context.eventTypes.MESSAGE_RECEIVED, prependComputedDebug);
@@ -2946,6 +3415,8 @@ getSettings();
 if (typeof jQuery === 'function') {
     jQuery(() => {
         renderSettingsPanel();
+        injectWritingStylePrompt();
+        injectProseRulesPrompt();
         setTimeout(() => {
             getPlayerRoot();
             restoreTrackerFromLatestDisplaySnapshot();
@@ -2956,6 +3427,8 @@ if (typeof jQuery === 'function') {
     });
 } else {
     renderSettingsPanel();
+    injectWritingStylePrompt();
+    injectProseRulesPrompt();
     setTimeout(() => {
         getPlayerRoot();
         restoreTrackerFromLatestDisplaySnapshot();

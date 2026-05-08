@@ -142,7 +142,7 @@ export function buildPlayerTrackerSnapshot(context) {
     return normalizeTrackerUserState(trackerUser);
 }
 
-export async function saveTrackerUpdate(context, trackerUpdate) {
+export async function saveTrackerUpdate(context, trackerUpdate, options = {}) {
     if (!context?.chatMetadata || !trackerUpdate) return;
 
     const root = context.chatMetadata.structuredPreflightTracker || { npcs: {}, user: {} };
@@ -163,6 +163,8 @@ export async function saveTrackerUpdate(context, trackerUpdate) {
     }
 
     context.chatMetadata.structuredPreflightTracker = root;
+
+    if (options.save === false) return;
 
     if (typeof context.saveMetadataDebounced === 'function') {
         context.saveMetadataDebounced();
