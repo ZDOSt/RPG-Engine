@@ -357,12 +357,12 @@ function RelationshipEngine(npc, resolutionPacket) {
 
   timeLapseExplicit():
     policy: EO, FYW
-    rule: strict and unambiguous
-    rule: per-turn transition flag, not a general scene-state flag
-    rule: return Y only if the latest {{user}} input itself establishes that time has advanced from the immediately previous scene/assistant response into a later time: next day, next morning, after waking, after sleep/rest has already completed, after travel/downtime/separation, or another clear time skip
-    rule: return N if the scene is already after a prior time skip but the latest {{user}} input only continues that same scene, waits a few minutes, talks, acts, looks around, or otherwise remains in the same outing/day beat
-    rule: return N if {{user}} only lies down, goes to sleep, prepares to rest, intends to rest, says they will return later, or otherwise describes an action before time has actually passed
-    rule: return N if the text only describes future-tense plans, promises, intentions, brief pauses, momentary silence, same-scene continuation, vague later wording, or merely saying they will meet later
+    rule: return Y only if the user's input clearly establishes that the scene has advanced across at least one night or into a new calendar day
+    rule: includes explicit or strongly implied new-day/overnight framing such as "next day", "next morning", "the following morning/day", "the next evening", "overnight", "after sleeping", "when I woke up", "morning came", "the sun rose again"
+    rule: includes any clear overnight sleep plus wake-up or major time-skip that crosses days such as "two days later" or "a week later"
+    rule: return N for all intra-day / same-day time progression, even if hours have passed: "a few hours later", "later that day/afternoon/evening", "that evening", "after dinner/lunch", "once it got dark", "several hours passed", "some time later" while still the same day
+    rule: return N for any "later" framing that does not cross overnight or into a new day
+    rule: return N for future-tense plans, intentions, promises, brief pauses, momentary silence, or same-scene continuation
     else -> N
 
   updateRapport(currentRapport, target, rapportEligible):
