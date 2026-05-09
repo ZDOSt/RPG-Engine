@@ -19,6 +19,9 @@ import {
     updateDisposition,
     classifyDisposition,
     checkThreshold,
+    mergeSlowBondEvidence,
+    slowBondEvidenceCount,
+    isSlowBondEligible,
     currentIntimacyGateAllows,
     getStakesOverrideEvidence,
     resolveIntimacyGate,
@@ -178,7 +181,7 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
     const dice = createDice();
     const refereeContext = buildRefereeContext(context);
     const resolution = runResolution(ledger, trackerSnapshot, dice, audit, context, refereeContext);
-    const relationships = runRelationships(ledger, trackerSnapshot, resolution.packet, audit, refereeContext);
+    const relationships = runRelationships(ledger, trackerSnapshot, resolution.packet, audit, refereeContext, context);
     const chaos = runChaos(ledger, relationships.handoffs, resolution.packet, dice, audit);
     const name = runNameGeneration(ledger, audit, context, type);
     const injuryTrackerUpdate = applyInflictedNpcInjuriesToTrackerUpdate(resolution.packet, relationships.trackerUpdate, trackerSnapshot, audit);
@@ -457,10 +460,16 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     return { packet, resultLine };
 }
 
-function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refereeContext) {
+function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refereeContext, context) {
     const resolutionSemantic = ledger.resolutionEngine || {};
     const semanticMap = new Map((ledger.relationshipEngine || []).filter(x => x?.NPC).map(x => [x.NPC, x]));
-    const npcList = toRealArray(resolutionPacket.NPCInScene);
+    const npcList = unique([
+        ...toRealArray(resolutionPacket.NPCInScene),
+        ...(ledger.relationshipEngine || [])
+            .filter(item => item?.NPC && bool(item.relevant))
+            .filter(item => relationshipSemanticHasSlowBondSignal(item))
+            .map(item => item.NPC),
+    ]);
     const handoffs = [];
     const trackerUpdate = {};
 
@@ -492,7 +501,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         }
 
         const state = normalizeTrackerEntry(trackerSnapshot[npc] || {});
-        const newEncounter = bool(sem.newEncounterExplicit) ? 'Y' : 'N';
+        const newEncounter = resolveNewEncounterExplicit(sem, context, state, audit, `3.3 ${npc}.newEncounterExplicit`) ? 'Y' : 'N';
         let rapportEncounterLock = newEncounter === 'Y' ? 'N' : state.rapportEncounterLock;
         let currentDisposition = state.currentDisposition;
         let currentRapport = state.currentRapport;
@@ -500,6 +509,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         let hostileLandedPressure = state.hostileLandedPressure;
         let dominantLock = state.dominantLock;
         let pressureMode = state.pressureMode;
+        let slowBondEvidence = state.slowBondEvidence;
 
         audit.push(`3.3 getCurrentRelationalState=${compact(state)}`);
         audit.push(`3.3a newEncounterExplicit=${newEncounter}`);
@@ -522,7 +532,8 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
 
         audit.push(`3.3k currentRapport=${currentRapport}`);
 
-        const isAllowed = resolutionPacket.IntimacyConsent;
+        const isIntimacyTarget = sameName(firstReal(resolutionPacket.ActionTargets), npc);
+        const isAllowed = isIntimacyTargetAllowed(npc, resolutionPacket, sem, state, currentDisposition);
         const outcomeKey = String(resolutionPacket.Outcome || 'no_roll');
         const stakeReferee = resolveStakeChangeByOutcome(npc, sem, resolutionPacket);
         const benefitReferee = applyMeaningfulBenefitReferee(npc, resolutionPacket, stakeReferee.value, {
@@ -534,7 +545,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         const stakeChange = benefitReferee.value;
         const npcStakes = resolutionPacket.STAKES === 'Y' && ['benefit', 'harm'].includes(stakeChange) ? 'Y' : 'N';
         const auditInteraction = npcStakes === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
-        const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem);
+        const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem, isIntimacyTarget);
         const boundaryPressureResult = applyPhysicalBoundaryPressure(npc, resolutionPacket, {
             currentDisposition,
         });
@@ -596,11 +607,25 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         audit.push(`3.5e save currentRapport=${currentRapport} to sceneTracker`);
         audit.push(`3.5f save rapportEncounterLock=${rapportEncounterLock} to sceneTracker`);
 
+        const sceneKey = buildSlowBondSceneKey(resolutionPacket, npc);
+        const slowBondMerge = mergeSlowBondEvidence(slowBondEvidence, sem.slowBondEvidence || {}, sceneKey);
+        slowBondEvidence = slowBondMerge.evidence;
+        const slowBondEligible = isSlowBondEligible(currentDisposition, currentRapport, slowBondEvidence) ? 'Y' : 'N';
+        if (slowBondEligible === 'Y') {
+            currentDisposition = { ...currentDisposition, B: 4 };
+        }
+        audit.push(`3.5g slowBondEvidence=${compact(slowBondEvidence)}`);
+        audit.push(`3.5h slowBondEvidenceChanged=${compact(slowBondMerge.changed)}`);
+        audit.push(`3.5i slowBondEligible=${slowBondEligible}`);
+        if (slowBondEligible === 'Y') {
+            audit.push(`3.5j slowBondPromotion=B4`);
+        }
+
         const classified = classifyDisposition(currentDisposition);
         const threshold = checkThreshold(currentDisposition, sem.overrideFlags || {});
         const establishedRelationship = state.establishedRelationship === 'Y' || (currentDisposition.B === 4 && sem.establishedRelationship === true) ? 'Y' : 'N';
         const relationshipStateForGate = { ...state, establishedRelationship };
-        const resolvedGate = resolveIntimacyGate(relationshipStateForGate, threshold, currentDisposition, isAllowed, resolutionPacket.GOAL);
+        const resolvedGate = resolveIntimacyGate(relationshipStateForGate, threshold, currentDisposition, isAllowed, resolutionPacket.GOAL, isIntimacyTarget);
         const intimacyGate = resolvedGate.IntimacyGate;
         const intimacyGateSource = resolvedGate.IntimacyGateSource;
         const persistedGate = intimacyGate !== 'SKIP' && intimacyGateSource !== 'CURRENT_DENIED'
@@ -625,6 +650,8 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             NPC_STAKES: npcStakes,
             Override: threshold.Override,
             EstablishedRelationship: establishedRelationship,
+            SlowBondEligible: slowBondEligible,
+            SlowBondEvidenceCount: slowBondEvidenceCount(slowBondEvidence),
             Landed: landedBool(resolutionPacket.LandedActions) ? 'Y' : 'N',
             OutcomeTier: resolutionPacket.OutcomeTier || 'NONE',
             NarrationBand: resolutionPacket.Outcome || 'standard',
@@ -650,6 +677,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             currentRapport,
             rapportEncounterLock,
             establishedRelationship,
+            slowBondEvidence,
             intimacyGate: persistedGate,
             intimacyGateSource: persistedGateSource,
             currentCoreStats: coreStats,
@@ -664,6 +692,56 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
 
     audit.push('---');
     return { handoffs, trackerUpdate };
+}
+
+function buildSlowBondSceneKey(resolutionPacket, npc) {
+    return [
+        String(resolutionPacket.GOAL || 'none'),
+        String(resolutionPacket.Outcome || 'none'),
+        String(resolutionPacket.OutcomeTier || 'none'),
+        String(resolutionPacket.LandedActions || 'none'),
+        String(npc || 'none'),
+        toRealArray(resolutionPacket.ActionTargets).join('|'),
+        toRealArray(resolutionPacket.BenefitedObservers).join('|'),
+        toRealArray(resolutionPacket.HarmedObservers).join('|'),
+    ].join('::').slice(0, 120);
+}
+
+function relationshipSemanticHasSlowBondSignal(item) {
+    const evidence = item?.slowBondEvidence || {};
+    return [
+        evidence.respectfulContact,
+        evidence.cooperation,
+        evidence.comfortInProximity,
+        evidence.boundaryRespect,
+        evidence.sharedRoutine,
+        evidence.playfulness,
+        evidence.teamwork,
+        evidence.personalAttention,
+    ].some(bool) || toRealArray(evidence.blockers).length > 0 || item?.establishedRelationship === true;
+}
+
+function isIntimacyTargetAllowed(npc, resolutionPacket, sem, state, currentDisposition) {
+    if (!['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(resolutionPacket?.GOAL)) return 'N';
+    if (!toRealArray(resolutionPacket?.ActionTargets).some(name => sameName(name, npc))) return 'N';
+
+    const threshold = checkThreshold(currentDisposition, sem?.overrideFlags || {});
+    const establishedRelationship = state?.establishedRelationship === 'Y'
+        || (currentDisposition?.B === 4 && sem?.establishedRelationship === true)
+        ? 'Y'
+        : 'N';
+    const preliminaryState = {
+        ...state,
+        establishedRelationship,
+    };
+    const intimacyAllowance = currentIntimacyGateAllows(preliminaryState, currentDisposition, threshold);
+    return intimacyAllowance.allows ? 'Y' : 'N';
+}
+
+function resolveNewEncounterExplicit(sem, context, state, audit, label) {
+    if (bool(sem?.newEncounterExplicit)) {
+        return true;
+    }
 }
 
 function runChaos(ledger, handoffs, resolutionPacket, dice, audit) {
@@ -2029,9 +2107,12 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         const lock = handoff.Lock && handoff.Lock !== 'None' ? handoff.Lock : deriveLock(fin);
         const impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode, handoff.Target);
         const proactivityGuard = proactivityRefereeGuard(handoff, resolutionPacket);
-        const tier = proactivityGuard
+        let tier = proactivityGuard
             ? 'DORMANT'
             : classifyProactivityTier(handoff, chaosBand, counterPotential, lock, fin);
+        if (!proactivityGuard) {
+            tier = adjustPartnerProactivityTier(tier, handoff, fin, { kind, resolutionPacket, chaosBand, counterPotential });
+        }
 
         results[handoff.NPC] = {
             Proactive: 'N',
@@ -2055,7 +2136,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
             const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
             const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }) ? 'Y' : 'N';
-            candidates.push({ NPC: handoff.NPC, die: 20, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' });
+            candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die: 20, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential }));
             audit.push('6.4i FORCED candidate');
             continue;
         }
@@ -2074,7 +2155,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
             const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
             const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }) ? 'Y' : 'N';
-            candidates.push({ NPC: handoff.NPC, die, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: threshold, passes });
+            candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: threshold, passes }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential }));
             audit.push(`6.5c selectIntent=${intent}`);
             audit.push(`6.5e ProactivityTarget=${proactivityTarget}; TargetsUser=${targetsUser}`);
         } else {
@@ -2096,12 +2177,137 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             ProactivityTier: candidate.tier,
             ProactivityDie: candidate.die,
             Threshold: candidate.Threshold,
+            RomanceInitiative: candidate.RomanceInitiative || 'N',
+            RomanceInitiativeTag: candidate.RomanceInitiativeTag || NONE,
+            RomanceInitiativeDie: candidate.RomanceInitiativeDie ?? null,
+            PartnerInitiative: candidate.PartnerInitiative || 'N',
+            PartnerInitiativeTag: candidate.PartnerInitiativeTag || NONE,
+            PartnerInitiativeDie: candidate.PartnerInitiativeDie ?? null,
+            PartnerInitiativeContext: candidate.PartnerInitiativeContext || NONE,
         };
     }
 
     audit.push(`6.8 FINAL_RESULTS=${compact(results)}`);
     audit.push('---');
     return { results };
+}
+
+function applyInitiativeOverridesIfEligible(candidate, handoff, fin, dice, audit, context) {
+    const partnerCandidate = applyPartnerInitiativeIfEligible(candidate, handoff, fin, dice, audit, context);
+    if (partnerCandidate !== candidate) return partnerCandidate;
+    return applyRomanceInitiativeIfEligible(candidate, handoff, fin, dice, audit);
+}
+
+function applyRomanceInitiativeIfEligible(candidate, handoff, fin, dice, audit) {
+    if (!isRomanceInitiativeEligible(handoff, fin)) return candidate;
+    if (candidate.intent === 'ESCALATE_VIOLENCE' || candidate.intent === 'BOUNDARY_PHYSICAL' || candidate.intent === 'THREAT_OR_POSTURE') return candidate;
+
+    const romanceDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
+    const romanceTag = romanceInitiativeTagFromDie(romanceDie);
+    audit.push(`6.5f ${handoff.NPC}.RomanceInitiativeDie=${romanceDie}`);
+    audit.push(`6.5g ${handoff.NPC}.RomanceInitiativeTag=${romanceTag}`);
+    return {
+        ...candidate,
+        intent: romanceTag,
+        impulse: 'BOND',
+        ProactivityTarget: USER_PROACTIVITY_TARGET,
+        TargetsUser: 'Y',
+        RomanceInitiative: 'Y',
+        RomanceInitiativeTag: romanceTag,
+        RomanceInitiativeDie: romanceDie,
+    };
+}
+
+function isRomanceInitiativeEligible(handoff, fin) {
+    return fin.B >= 4
+        && fin.F < 3
+        && fin.H < 3
+        && handoff?.EstablishedRelationship !== 'Y'
+        && handoff?.Lock === 'None';
+}
+
+function romanceInitiativeTagFromDie(die) {
+    if (die >= 91) return 'Date_And_Confess';
+    if (die >= 71) return 'Ask_Date';
+    if (die >= 51) return 'Thoughtful_Gift';
+    if (die >= 26) return 'Romantic_Flirt';
+    return 'Romantic_Nervous';
+}
+
+function applyPartnerInitiativeIfEligible(candidate, handoff, fin, dice, audit, context) {
+    if (!isPartnerInitiativeEligible(handoff, fin)) return candidate;
+    if (isBlockedPartnerBaseIntent(candidate.intent)) return candidate;
+
+    const partnerDie = typeof dice.d150 === 'function' ? dice.d150() : Math.floor(Math.random() * 150) + 1;
+    const rawTag = partnerInitiativeTagFromDie(partnerDie);
+    const partnerContext = classifyPartnerInitiativeContext(context);
+    const partnerTag = remapPartnerInitiativeForContext(rawTag, partnerContext, partnerDie);
+    audit.push(`6.5h ${handoff.NPC}.PartnerInitiativeDie=${partnerDie}`);
+    audit.push(`6.5i ${handoff.NPC}.PartnerInitiativeContext=${partnerContext}`);
+    audit.push(`6.5j ${handoff.NPC}.PartnerInitiativeTag=${partnerTag}${partnerTag !== rawTag ? ` (from ${rawTag})` : ''}`);
+    return {
+        ...candidate,
+        intent: partnerTag,
+        impulse: 'BOND',
+        ProactivityTarget: USER_PROACTIVITY_TARGET,
+        TargetsUser: 'Y',
+        PartnerInitiative: 'Y',
+        PartnerInitiativeTag: partnerTag,
+        PartnerInitiativeDie: partnerDie,
+        PartnerInitiativeContext: partnerContext,
+    };
+}
+
+function isPartnerInitiativeEligible(handoff, fin) {
+    return fin.B >= 4
+        && fin.F < 3
+        && fin.H < 3
+        && handoff?.EstablishedRelationship === 'Y'
+        && handoff?.Lock === 'None';
+}
+
+function adjustPartnerProactivityTier(tier, handoff, fin, context) {
+    if (!isPartnerInitiativeEligible(handoff, fin)) return tier;
+    const partnerContext = classifyPartnerInitiativeContext(context);
+    if (partnerContext === 'calm') return 'HIGH';
+    if (partnerContext === 'active') return tier === 'DORMANT' ? 'MEDIUM' : tier;
+    return tier === 'FORCED' ? 'FORCED' : 'LOW';
+}
+
+function isBlockedPartnerBaseIntent(intent) {
+    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE', 'CALL_HELP_OR_AUTHORITY', 'WITHDRAW_OR_BOUNDARY'].includes(intent);
+}
+
+function partnerInitiativeTagFromDie(die) {
+    if (die >= 146) return 'Partner_Conflict';
+    if (die >= 131) return 'Partner_Intimacy';
+    if (die >= 116) return 'Partner_Gift';
+    if (die >= 96) return 'Partner_Private_Time';
+    if (die >= 76) return 'Partner_Tease';
+    if (die >= 51) return 'Partner_Support';
+    if (die >= 26) return 'Partner_Affection';
+    return 'Partner_Check_In';
+}
+
+function classifyPartnerInitiativeContext(context = {}) {
+    const packet = context.resolutionPacket || {};
+    if (context.counterPotential && context.counterPotential !== 'none') return 'crisis';
+    if (context.chaosBand && context.chaosBand !== 'None') return 'active';
+    if (packet.classifyCombatActionSequence === 'Y' || packet.classifyHostilePhysicalIntent === 'Y') return 'crisis';
+    if (packet.STAKES === 'Y') return context.kind === 'Skill' || context.kind === 'Social' ? 'active' : 'crisis';
+    if (['Combat', 'Intimacy_Physical'].includes(context.kind)) return 'crisis';
+    return 'calm';
+}
+
+function remapPartnerInitiativeForContext(tag, context, die) {
+    if (context === 'calm') return tag;
+    if (context === 'active') {
+        if (['Partner_Private_Time', 'Partner_Intimacy'].includes(tag)) return 'Partner_Check_In';
+        if (tag === 'Partner_Conflict') return 'Partner_Check_In';
+        return tag;
+    }
+    if (tag === 'Partner_Support') return 'Partner_Support';
+    return die % 2 === 0 ? 'Partner_Support' : 'Partner_Check_In';
 }
 
 function normalizeProactivityTarget(value) {

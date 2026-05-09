@@ -228,6 +228,7 @@ export function formatNarratorPromptContext(report) {
         'Relationship Result: ' + summary.relationshipResult,
         'Chaos: ' + summary.chaos,
         'Proactivity: ' + summary.proactive,
+        'Proactivity Guide: ' + summary.proactivityGuide,
         'Aggression: ' + summary.aggression,
         'Aggression Guide: ' + summary.aggressionGuide,
         'Generated Name: ' + summary.generatedName,
@@ -265,8 +266,12 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
             `${name}: ${value.Intent}`,
             `impulse:${value.Impulse}`,
             `target:${value.ProactivityTarget ?? '(none)'}`,
+            value.RomanceInitiative === 'Y' ? `romanceDie:${value.RomanceInitiativeDie ?? 'unknown'}` : '',
+            value.PartnerInitiative === 'Y' ? `partnerDie:${value.PartnerInitiativeDie ?? 'unknown'}` : '',
+            value.PartnerInitiative === 'Y' ? `partnerContext:${value.PartnerInitiativeContext ?? 'unknown'}` : '',
             `triggersAggressionRoll:${value.triggersAggressionRoll}`,
-        ].join('/')).join(';') || 'none';
+        ].filter(Boolean).join('/')).join(';') || 'none';
+    const proactivityGuide = buildProactivityGuide(handoff.proactivityResults ?? {});
 
     const aggressionText = Object.entries(handoff.aggressionResults ?? {}).map(([name, value]) =>
         `${name}/${value.AttackType ?? 'Attack'}/${value.ReactionOutcome}/target:${value.ProactivityTarget ?? '{{user}}'}/bonus:${value.CounterBonus ?? 0}/margin:${value.Margin}/npcImpair:${npcImpairmentSummary(value.NPCImpairment)}/targetDefenseImpair:${userImpairmentSummary(value.TargetImpairment || value.UserImpairment)}`,
@@ -285,7 +290,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
 
     const result = naturalOutcomeSummary(resolution);
     const rollAudit = rollAuditFromResultLine(handoff.resultLine, resolution);
-    const bindingDirective = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText, userImpairment, npcImpairment, inflictedNpcInjury, inflictedUserInjury });
+    const bindingDirective = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, aggressionText, userImpairment, npcImpairment, inflictedNpcInjury, inflictedUserInjury });
 
     return {
         userAction,
@@ -309,6 +314,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         npc: npcText,
         chaos: chaosText,
         proactive: proactiveText,
+        proactivityGuide,
         aggression: aggressionText,
         aggressionGuide,
         generatedName,
@@ -457,7 +463,7 @@ function targetSummary(resolution) {
     return parts.join('; ') || 'none';
 }
 
-function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, chaosText, aggressionText, userImpairment, npcImpairment }) {
+function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, aggressionText, userImpairment, npcImpairment }) {
     const goal = resolution.GOAL ?? 'normal';
     const outcome = naturalOutcomeSummary(resolution);
     const primaryNpc = handoff.npcHandoffs?.[0];
@@ -478,7 +484,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
         ? ' Then let the listed proactive NPC action happen only as denial, boundary, refusal, retreat, resistance, or escalation consistent with the gate.'
         : '';
     const naturalProactiveNote = proactiveText !== 'none'
-        ? ' Then narrate the listed proactive NPC action as a present scene beat, following its intent and impulse. If no Aggression result is listed, do not invent a resolved NPC hit.'
+        ? ` Then include the Proactivity Guide as a present scene beat: ${proactivityGuide}. Render it naturally through the NPC's personality, body language, speech, and setting. If no Aggression result is listed, do not invent a resolved NPC hit.`
         : '';
     const boundaryNote = resolution.classifyPhysicalBoundaryPressure === 'Y'
         ? ' Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance without inventing a landed attack.'
@@ -659,9 +665,104 @@ function formatProactivityForNarration(proactivity) {
             ProactivityTier: value?.ProactivityTier,
             ProactivityDie: value?.ProactivityDie,
             Threshold: value?.Threshold,
+            RomanceInitiative: value?.RomanceInitiative ?? 'N',
+            RomanceInitiativeTag: value?.RomanceInitiativeTag ?? '(none)',
+            RomanceInitiativeDie: value?.RomanceInitiativeDie,
+            PartnerInitiative: value?.PartnerInitiative ?? 'N',
+            PartnerInitiativeTag: value?.PartnerInitiativeTag ?? '(none)',
+            PartnerInitiativeDie: value?.PartnerInitiativeDie,
+            PartnerInitiativeContext: value?.PartnerInitiativeContext ?? '(none)',
         };
     }
     return formatted;
+}
+
+function buildProactivityGuide(proactivity) {
+    const active = Object.entries(proactivity ?? {}).filter(([, value]) => value?.Proactive === 'Y');
+    if (!active.length) return 'none';
+
+    return active.map(([name, value]) => {
+        const intent = value?.PartnerInitiative === 'Y'
+            ? value.PartnerInitiativeTag
+            : value?.RomanceInitiative === 'Y'
+            ? value.RomanceInitiativeTag
+            : value?.Intent;
+        const target = value?.ProactivityTarget && value.ProactivityTarget !== '(none)'
+            ? value.ProactivityTarget
+            : '{{user}}';
+        const description = proactivityIntentDescription(intent, target);
+        const noAttack = isAggressiveProactivityIntent(intent)
+            ? ' This may lead into Aggression only if an Aggression result is listed.'
+            : ' This is not a resolved attack.';
+        const relationshipLimit = isRomanceInitiativeIntent(intent)
+            ? ' Do not establish a relationship unless acceptance happens in-scene; do not force intimacy.'
+            : '';
+        const partnerLimit = isPartnerInitiativeIntent(intent)
+            ? ` This is established-relationship behavior; keep it consistent with privacy, danger, urgency, mood, and the listed partner context (${value?.PartnerInitiativeContext ?? 'unknown'}).`
+            : '';
+        return `${name}/${intent}: ${description}${noAttack}${relationshipLimit}${partnerLimit}`;
+    }).join(' ');
+}
+
+function proactivityIntentDescription(intent, target = '{{user}}') {
+    switch (intent) {
+        case 'ESCALATE_VIOLENCE':
+            return `NPC initiates immediate violent action toward ${target}.`;
+        case 'BOUNDARY_PHYSICAL':
+            return 'NPC physically asserts distance, blocks further contact, protects their body or space, pushes away, raises a guard, steps out of reach, or otherwise creates a clear physical boundary.';
+        case 'THREAT_OR_POSTURE':
+            return 'NPC signals hostile readiness, warning, intimidation, or threat without a resolved strike.';
+        case 'CALL_HELP_OR_AUTHORITY':
+            return 'NPC seeks help, backup, witnesses, guards, allies, or authority.';
+        case 'WITHDRAW_OR_BOUNDARY':
+            return 'NPC retreats, disengages, refuses, or sets a clear verbal or physical limit.';
+        case 'SUPPORT_ACT':
+            return 'NPC helps, protects, steadies, advises, assists, or advances a shared practical aim according to the current scene.';
+        case 'PLAN_OR_BANTER':
+            return 'NPC responds with planning, practical talk, comment, banter, or scene-advancing dialogue.';
+        case 'INTIMACY_OR_FLIRT':
+            return 'NPC shows permitted intimacy or flirtation consistent with the current gate or override.';
+        case 'Romantic_Nervous':
+            return 'NPC shows romantic nervousness around {{user}}.';
+        case 'Romantic_Flirt':
+            return 'NPC is flirtatious toward {{user}}.';
+        case 'Thoughtful_Gift':
+            return 'NPC offers or prepares a small thoughtful gift for {{user}}, chosen in a way that fits the NPC, setting, and current relationship.';
+        case 'Ask_Date':
+            return 'NPC asks or maneuvers toward spending romantic private time with {{user}}. If {{user}} accepts, the NPC already has a believable plan for what they will do together, as if they have been thinking about this for some time.';
+        case 'Date_And_Confess':
+            return 'NPC seeks to invite {{user}} to a very special date, where they may eventually be alone and the NPC can make a clear relationship-oriented confession or request.';
+        case 'Partner_Check_In':
+            return 'NPC checks on {{user}} with established-partner concern, noticing strain, danger, injury, mood, or unfinished personal matters as fits the scene.';
+        case 'Partner_Affection':
+            return 'NPC shows established-partner affection toward {{user}} through warmth, closeness, familiar touch, or private tenderness that fits the scene.';
+        case 'Partner_Support':
+            return 'NPC supports {{user}} as an established partner through practical help, protection, advice, care, positioning, supplies, or shared action.';
+        case 'Partner_Tease':
+            return 'NPC teases or flirts with {{user}} in a comfortable established-partner way without derailing urgent danger or serious stakes.';
+        case 'Partner_Private_Time':
+            return 'NPC seeks private time with {{user}}, suggesting or maneuvering toward being alone together when the scene is safe and plausible.';
+        case 'Partner_Gift':
+            return 'NPC offers, finds, prepares, or points out a small cute or thoughtful thing {{user}} might like, chosen to fit the NPC, setting, and relationship.';
+        case 'Partner_Intimacy':
+            return 'NPC initiates romantic or sexual closeness with {{user}} in a way that fits current privacy, safety, mood, and relationship; do not force explicit intimacy in public, danger, crisis, combat, or implausible circumstances.';
+        case 'Partner_Conflict':
+            return 'NPC raises an established-partner worry, concern, jealousy, disagreement, or vulnerable tension when context supports a real relationship conversation.';
+        default:
+            return 'NPC takes a proactive scene beat consistent with the listed intent and impulse.';
+    }
+}
+
+function isAggressiveProactivityIntent(intent) {
+    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(intent);
+}
+
+function isRomanceInitiativeIntent(intent) {
+    return ['Romantic_Nervous', 'Romantic_Flirt', 'Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess'].includes(intent);
+}
+
+function isPartnerInitiativeIntent(intent) {
+    return ['Partner_Check_In', 'Partner_Affection', 'Partner_Support', 'Partner_Tease', 'Partner_Private_Time', 'Partner_Gift', 'Partner_Intimacy', 'Partner_Conflict'].includes(intent);
 }
 
 function buildAggressionGuide(aggressionResults) {

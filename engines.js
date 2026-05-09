@@ -208,11 +208,12 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: rapportEncounterLock = valid Y/N ? exact value : N
     rule: intimacyGate = valid ALLOW/DENY ? exact value : SKIP
     rule: establishedRelationship = valid Y/N ? exact value : N
+    rule: slowBondEvidence = latest tracker slowBondEvidence object, default all counters 0, blockers empty
     rule: hostilePressure = valid number ? exact value : 0
     rule: hostileLandedPressure = valid number ? exact value : 0
     rule: dominantLock = valid FEAR/HOSTILITY/None ? exact value : None
     rule: pressureMode = valid none/cornered/dominated ? exact value : none
-    return {currentDisposition, currentRapport, rapportEncounterLock, intimacyGate, establishedRelationship, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
+    return {currentDisposition, currentRapport, rapportEncounterLock, intimacyGate, establishedRelationship, slowBondEvidence, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
 
   initPreset():
     policy: EO, FYW
@@ -357,7 +358,8 @@ function RelationshipEngine(npc, resolutionPacket) {
 
   newEncounterExplicit():
     policy: EO, FYW
-    rule: return Y only if explicit roleplay/context shows a clear encounter reset: sleep, rest, new day, significant downtime, leaving and returning later, or explicit later re-engagement after separation
+    rule: return Y if this specific NPC is being encountered for the first time, OR if a significant period of time elapsed since the last encounter with this NPC: overnight sleep, significant downtime, a new day, or extended separation
+    rule: return N if this same NPC is being revisited during the same day/outing, if they were only left briefly and then re-approached, or if the text only describes future intent, plans, or a brief interruption
     else -> N
 
   updateRapport(currentRapport, target, rapportEncounterLock):
@@ -432,6 +434,25 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: flirting, attraction, arousal, sex, prior intimacy, affection, kindness, trust, loyalty, closeness, friendship, gratitude, protectiveness, or B4 alone does NOT count
     else -> N
 
+  checkSlowBondEvidence(npc, resolutionPacket, context):
+    policy: LOCKED, EXPLICIT-ONLY
+    rule: identify only positive relationship evidence shown by the latest scene or explicit ongoing scene context. Do not infer from silence, friendliness, attractiveness, intimacy, or B score.
+    rule: respectfulContact = consensual or clearly welcome physical contact, careful non-invasive touch, or physical help performed with respect for the NPC's comfort and agency
+    rule: cooperation = ordinary constructive cooperation toward a shared immediate purpose
+    rule: comfortInProximity = NPC remains/settles close to {{user}} without tension, avoidance, coercion, duty pressure, or forced circumstance
+    rule: boundaryRespect = {{user}} explicitly respects refusal, hesitation, privacy, space, limits, consent, or a stated boundary
+    rule: sharedRoutine = repeated or mundane togetherness such as eating, traveling, working, resting, training, tending camp, or recurring rituals
+    rule: playfulness = mutual light teasing, joking, banter, gamefulness, or relaxed warmth without cruelty or pressure
+    rule: teamwork = coordinated effort under pressure, danger, conflict, crisis, or meaningful difficulty
+    rule: personalAttention = specific attention to the NPC's needs, preferences, wellbeing, vulnerability, history, comfort, or expressed concerns
+    rule: blockers include recent coercion, intimidation, betrayal, humiliation, unwanted intimacy pressure, boundary violation, unresolved harm, exploitation, active fear, active hostility, or NPC being trapped/dependent/powerless in a way that makes closeness unsafe to count
+    rule: return only categories with explicit evidence in this scene; leave all others 0. Return blocker labels only when explicitly present.
+
+  slowBondEligible(currentDisposition, currentRapport, slowBondEvidence):
+    policy: LOCKED, DETERMINISTIC
+    rule: return Y only if currentDisposition.B=3, currentDisposition.F<3, currentDisposition.H<3, currentRapport>=5, blockers empty, and at least 3 distinct positive evidence categories have count > 0
+    else -> N
+
   execution:
     if npc not in resolutionPacket.NPCInScene -> return uninitialized handoff
     read state, initialize disposition if missing, and update encounter lock
@@ -443,7 +464,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     update disposition and apply rapport reset if present
     if hostilePressureResult.dominatedFearBreak=Y and currentDisposition.F>=4 and currentDisposition.H>=3 -> lower currentDisposition.H by 1
     save currentRapport, rapportEncounterLock, hostilePressure, hostileLandedPressure, dominantLock, and pressureMode to sceneTracker
-    classify disposition, resolve threshold/override, check establishedRelationship, and determine intimacy gate
+    classify disposition, update slowBondEvidence, check slowBondEligible, resolve threshold/override, check establishedRelationship, and determine intimacy gate
     save intimacy gate when ALLOW or DENY
     RelationToUserAction = {isDirect, isOpp, isBenefited, isHarmed}
     return NPC handoff including HostilePressure, HostileLandedPressure, DominantLock, PressureMode, and RelationToUserAction
@@ -652,6 +673,8 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if counterPotential in [light,medium,severe] && lock in [HATRED,FREEZE] -> FORCED
     if lock=HATRED && (Target!=No Change || NPC_STAKES=Y || Landed=Y || handoff.PressureMode!=none || relation.isDirect || relation.isOpp || relation.isHarmed) -> FORCED
     if NPC_STAKES=N && Target=No Change && chaosBand=None:
+      if fin.B>=4 && fin.F<3 && fin.H<3 && handoff.EstablishedRelationship=Y -> HIGH in calm/no-stakes scenes; MEDIUM in active scenes; LOW in combat, immediate danger, hostile action, counterattack opening, or crisis
+      if fin.B>=4 && fin.F<3 && fin.H<3 && handoff.EstablishedRelationship!=Y -> HIGH
       if fin.B>=3 || fin.H>=3 -> MEDIUM
       else -> DORMANT
     if lock!=None && (Target!=No Change || Landed=Y) -> HIGH
@@ -699,6 +722,36 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       if kind in [Skill, Social] -> SUPPORT_ACT
       else -> PLAN_OR_BANTER
 
+  romanceInitiative(candidate, handoff, fin, diceBudget):
+    policy: LOCKED, DETERMINISTIC
+    rule: apply only after an NPC passes proactivity or is FORCED
+    rule: do not apply to ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, or THREAT_OR_POSTURE
+    rule: apply only if fin.B>=4, fin.F<3, fin.H<3, handoff.Lock=None, and handoff.EstablishedRelationship!=Y
+    romanceDie = 1d100
+    if romanceDie>=91 -> Date_And_Confess
+    if romanceDie>=71 -> Ask_Date
+    if romanceDie>=51 -> Thoughtful_Gift
+    if romanceDie>=26 -> Romantic_Flirt
+    else -> Romantic_Nervous
+    set Intent to selected romance tag, Impulse=BOND, ProactivityTarget={{user}}, TargetsUser=Y
+
+  partnerInitiative(candidate, handoff, fin, diceBudget):
+    policy: LOCKED, DETERMINISTIC, CONTEXT-AWARE
+    rule: apply only after an NPC passes proactivity or is FORCED
+    rule: do not apply to ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, THREAT_OR_POSTURE, CALL_HELP_OR_AUTHORITY, or WITHDRAW_OR_BOUNDARY
+    rule: apply only if fin.B>=4, fin.F<3, fin.H<3, handoff.Lock=None, and handoff.EstablishedRelationship=Y
+    partnerDie = 1d150
+    if partnerDie>=146 -> Partner_Conflict
+    if partnerDie>=131 -> Partner_Intimacy
+    if partnerDie>=116 -> Partner_Gift
+    if partnerDie>=96 -> Partner_Private_Time
+    if partnerDie>=76 -> Partner_Tease
+    if partnerDie>=51 -> Partner_Support
+    if partnerDie>=26 -> Partner_Affection
+    else -> Partner_Check_In
+    if current context is combat, immediate danger, hostile action, counterattack opening, or crisis -> remap Partner_Intimacy, Partner_Private_Time, Partner_Tease, Partner_Gift, Partner_Affection, or Partner_Conflict to Partner_Support or Partner_Check_In
+    set Intent to selected/remapped partner tag, Impulse=BOND, ProactivityTarget={{user}}, TargetsUser=Y
+
   proactivityTarget(handoff, resolutionPacket, intent):
     policy: FYW
     if intent not in [ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, THREAT_OR_POSTURE] -> (none)
@@ -735,7 +788,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N
     sort candidates by die descending
     promote up to cap candidates to proactive results
-    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?}...}
+    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|Romantic_Nervous|Romantic_Flirt|Thoughtful_Gift|Ask_Date|Date_And_Confess|Partner_Check_In|Partner_Affection|Partner_Support|Partner_Tease|Partner_Private_Time|Partner_Gift|Partner_Intimacy|Partner_Conflict|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?,RomanceInitiative:[Y/N]?,RomanceInitiativeTag:[tag|(none)]?,RomanceInitiativeDie:[1-100]?,PartnerInitiative:[Y/N]?,PartnerInitiativeTag:[tag|(none)]?,PartnerInitiativeDie:[1-150]?,PartnerInitiativeContext:[calm|active|crisis]?}...}
 }
 ----------------
 function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSnapshot, trackerUpdate, diceBudget) {
@@ -805,6 +858,12 @@ export function createDice() {
     return {
         d20() {
             return Math.floor(Math.random() * 20) + 1;
+        },
+        d100() {
+            return Math.floor(Math.random() * 100) + 1;
+        },
+        d150() {
+            return Math.floor(Math.random() * 150) + 1;
         },
     };
 }
@@ -912,7 +971,7 @@ export function initPreset(flags) {
     return { label: 'neutralDefault', disposition: { B: 2, F: 2, H: 2 } };
 }
 
-export function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem) {
+export function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem, isIntimacyTarget = true) {
     const isDirect = includesName(packet.ActionTargets, npc);
     const isOpp = includesName(packet.OppTargets?.NPC, npc);
     const isBenefited = includesName(packet.BenefitedObservers, npc);
@@ -927,7 +986,7 @@ export function routeDispositionTarget(npc, packet, auditInteraction, isAllowed,
         if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g) && isAllowed === 'Y') return 'Bond';
         return 'No Change';
     }
-    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g)) {
+    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g) && isIntimacyTarget) {
         if (isAllowed === 'Y') return 'Bond';
         if (g === 'IntimacyAdvancePhysical') return 'FearHostility';
         return 'Hostility';
@@ -1312,8 +1371,18 @@ export function getStakesOverrideEvidence(goal, intimacyTarget, targetState, pre
     return null;
 }
 
-export function resolveIntimacyGate(previousState, threshold, disposition, isAllowed, goal = '') {
+export function resolveIntimacyGate(previousState, threshold, disposition, isAllowed, goal = '', isIntimacyTarget = true) {
     const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
+
+    if (isIntimacyAdvance && !isIntimacyTarget) {
+        if (previousState.intimacyGate === 'ALLOW') {
+            return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
+        }
+        if (previousState.intimacyGate === 'DENY') {
+            return { IntimacyGate: 'DENY', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_DENY' };
+        }
+        return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
+    }
 
     if (threshold.LockActive === 'Y') {
         return { IntimacyGate: 'DENY', IntimacyGateSource: 'LOCK' };
@@ -1437,6 +1506,8 @@ export function classifyProactivityTier(handoff, chaosBand, counterPotential, lo
         return 'FORCED';
     }
     if (NPC_STAKES === 'N' && Target === 'No Change' && chaosBand === 'None') {
+        if (fin.B >= 4 && fin.F < 3 && fin.H < 3 && handoff.EstablishedRelationship === 'Y') return 'HIGH';
+        if (fin.B >= 4 && fin.F < 3 && fin.H < 3 && handoff.EstablishedRelationship !== 'Y') return 'HIGH';
         if (fin.B >= 3 || fin.H >= 3) return 'MEDIUM';
         return 'DORMANT';
     }
@@ -1548,6 +1619,72 @@ export function trackerSummary(trackerUpdate) {
 }
 
 const TRACKER_CONDITIONS = Object.freeze(['healthy', 'bruised', 'wounded', 'badly_wounded', 'critical', 'dead']);
+export const SLOW_BOND_KEYS = Object.freeze([
+    'respectfulContact',
+    'cooperation',
+    'comfortInProximity',
+    'boundaryRespect',
+    'sharedRoutine',
+    'playfulness',
+    'teamwork',
+    'personalAttention',
+]);
+
+export function normalizeSlowBondEvidence(value) {
+    const result = {};
+    for (const key of SLOW_BOND_KEYS) {
+        result[key] = clamp(Number(value?.[key] ?? 0), 0, 2);
+    }
+    result.blockers = normalizeTrackerStringList(value?.blockers).slice(0, 12);
+    result.lastUpdatedScene = typeof value?.lastUpdatedScene === 'string' ? value.lastUpdatedScene.slice(0, 120) : '';
+    return result;
+}
+
+export function mergeSlowBondEvidence(previous, semanticEvidence = {}, sceneKey = '') {
+    const before = normalizeSlowBondEvidence(previous);
+    const after = normalizeSlowBondEvidence(before);
+    const changed = [];
+    const sameScene = Boolean(sceneKey && before.lastUpdatedScene === sceneKey);
+    if (!sameScene) {
+        for (const key of SLOW_BOND_KEYS) {
+            if (bool(semanticEvidence?.[key])) {
+                const next = clamp((after[key] || 0) + 1, 0, 2);
+                if (next !== after[key]) changed.push(key);
+                after[key] = next;
+            }
+        }
+        const blockerAdds = normalizeTrackerStringList(semanticEvidence?.blockers);
+        if (blockerAdds.length) {
+            const blockerSet = new Set(after.blockers.map(item => item.toLowerCase()));
+            for (const blocker of blockerAdds) {
+                const key = blocker.toLowerCase();
+                if (!blockerSet.has(key)) {
+                    after.blockers.push(blocker);
+                    blockerSet.add(key);
+                    changed.push(`blocker:${blocker}`);
+                    if (after.blockers.length >= 12) break;
+                }
+            }
+        }
+        if (changed.length) after.lastUpdatedScene = sceneKey || after.lastUpdatedScene;
+    }
+    return { evidence: after, changed, sameScene };
+}
+
+export function slowBondEvidenceCount(evidence) {
+    const normalized = normalizeSlowBondEvidence(evidence);
+    return SLOW_BOND_KEYS.filter(key => normalized[key] > 0).length;
+}
+
+export function isSlowBondEligible(disposition, rapport, evidence) {
+    const normalized = normalizeSlowBondEvidence(evidence);
+    return disposition?.B === 3
+        && disposition.F < 3
+        && disposition.H < 3
+        && Number(rapport || 0) >= 5
+        && normalized.blockers.length === 0
+        && slowBondEvidenceCount(normalized) >= 3;
+}
 
 export function normalizeTrackerEntry(value) {
     return {
@@ -1557,6 +1694,7 @@ export function normalizeTrackerEntry(value) {
         intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(value?.intimacyGate) ? value.intimacyGate : 'SKIP',
         intimacyGateSource: normalizeIntimacyGateSource(value?.intimacyGateSource),
         establishedRelationship: value?.establishedRelationship === 'Y' ? 'Y' : 'N',
+        slowBondEvidence: normalizeSlowBondEvidence(value?.slowBondEvidence),
         currentCoreStats: value?.currentCoreStats ? normalizeCore(value.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 }) : null,
         hostilePressure: clamp(Number(value?.hostilePressure ?? 0), 0, 20),
         hostileLandedPressure: clamp(Number(value?.hostileLandedPressure ?? 0), 0, 20),

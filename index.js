@@ -401,7 +401,7 @@ call handoffEnforcement()
 
 FINAL CHECK:
 - Remove any banned element before output.
-DO NOT Ooutput any of this text in your final response.
+DO NOT output any of this text in your final response.
 - VIOLATION = FAILURE + DELETE ALL TEXT + REGENERATE.`;
 const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,

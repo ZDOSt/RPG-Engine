@@ -680,6 +680,7 @@ function buildSemanticPreflightSchema() {
                         'initFlags',
                         'newEncounterExplicit',
                         'establishedRelationship',
+                        'slowBondEvidence',
                         'explicitIntimidationOrCoercion',
                         'stakeChangeByOutcome',
                         'overrideFlags',
@@ -704,6 +705,22 @@ function buildSemanticPreflightSchema() {
                         },
                         newEncounterExplicit: { type: 'boolean' },
                         establishedRelationship: { type: 'boolean' },
+                        slowBondEvidence: {
+                            type: 'object',
+                            additionalProperties: false,
+                            required: ['respectfulContact', 'cooperation', 'comfortInProximity', 'boundaryRespect', 'sharedRoutine', 'playfulness', 'teamwork', 'personalAttention', 'blockers'],
+                            properties: {
+                                respectfulContact: { type: 'boolean' },
+                                cooperation: { type: 'boolean' },
+                                comfortInProximity: { type: 'boolean' },
+                                boundaryRespect: { type: 'boolean' },
+                                sharedRoutine: { type: 'boolean' },
+                                playfulness: { type: 'boolean' },
+                                teamwork: { type: 'boolean' },
+                                personalAttention: { type: 'boolean' },
+                                blockers: { type: 'array', items: { type: 'string' } },
+                            },
+                        },
                         explicitIntimidationOrCoercion: { type: 'boolean' },
                         stakeChangeByOutcome: stakeChangeSchema,
                         overrideFlags: {
@@ -873,6 +890,8 @@ const COMPACT_LEDGER_CONTRACT = [
     '- RelationshipEngine entries must use RelationshipEngine[0], RelationshipEngine[1], etc. Include one entry for each relevant living NPC.',
     '- If no living NPC is relevant, output RelationshipEngine.count=0 and no RelationshipEngine[index] lines.',
     '- RelationshipEngine[index].establishedRelationship is true only if this NPC already has B4 relationship state and tracker establishedRelationship=Y, or the current explicit scene shows a direct romantic/love/relationship declaration or request from {{user}} accepted by that NPC, or from that NPC accepted by {{user}}. It must establish an actual romantic relationship, partnership, lovers status, dating/courting bond, or equivalent committed romantic connection. Flirting, attraction, arousal, sex, prior intimacy, affection, kindness, trust, loyalty, closeness, friendship, gratitude, protectiveness, or B4 alone does not count.',
+    '- RelationshipEngine[index].slowBondEvidence is scene-local semantic evidence for slow B3-to-B4 trust growth. Mark only categories explicitly shown in the latest scene/current immediate context. respectfulContact=welcome/respectful physical contact or physical help; cooperation=constructive cooperation toward a shared purpose; comfortInProximity=NPC remains or settles close without fear, duty, coercion, or forced circumstance; boundaryRespect={{user}} respects refusal, hesitation, privacy, space, limits, consent, or a stated boundary; sharedRoutine=repeated or mundane togetherness such as eating/traveling/working/resting/training/tending camp; playfulness=mutual light teasing, joking, banter, or relaxed warmth; teamwork=coordinated effort under pressure/danger/conflict/crisis; personalAttention=specific attention to NPC needs, preferences, wellbeing, vulnerability, history, comfort, or concerns. blockers include coercion, intimidation, betrayal, humiliation, unwanted intimacy pressure, boundary violation, unresolved harm, exploitation, active fear, active hostility, or trapped/dependent/powerless circumstances that make closeness unsafe to count.',
+    '- RelationshipEngine[index].newEncounterExplicit is per NPC. Return Y if this specific NPC is being encountered for the first time, OR if a significant period of time has elapsed since the last encounter with this NPC: overnight sleep, significant downtime, a new day, or extended separation. Return N if this same NPC is being revisited during the same day/outing, if they were only left briefly and then re-approached, or if the text only describes future intent, plans, or a brief interruption.',
     '- All genStats groups must include Rank, MainStat, PHY, MND, CHA.',
     '- InjuryEffectEngine is semantic-only candidate extraction for effects the user action would cause if deterministic mechanics say the action lands. It does not roll and does not decide success. Include physical injuries and impairing magical/status effects regardless of source: burns, poison, paralysis, sickness, blindness, fear/panic, restraint, curses, lightning/electrical effects, exhaustion, mental effects, or other ongoing impairing states. Exclude purely emotional/social harm, mere witnessing, momentary pain, intended/requested future injuries, or effects that would not persist or impair later action.',
     '- InjuryEffectEngine target must be the entity actually receiving the impairing effect. HarmedObservers may appear only if they are directly affected by the injury/status effect, not merely emotionally harmed by seeing or caring about another target. Use persistence=lasting and affectsAction=Y only for effects that should impair later action if applied.',
@@ -1154,7 +1173,7 @@ function buildSemanticContractText(userName, charName, type, trackerSnapshot, pl
         'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
         'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, classifyPhysicalBoundaryPressure, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
         'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your ledger. ' +
-        'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
+        'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, establishedRelationship, slowBondEvidence, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
         'Execute InjuryEffectEngine after ResolutionEngine and RelationshipEngine: identify only actual injury/status-effect candidates that the user action would cause if it lands. The semantic pass decides target, effectType, affected body/function, persistence, and whether it affects action from context; deterministic mechanics later decide whether it lands and the final impairment severity. Source does not matter: physical attacks, magic, poison, paralysis, fear/panic, restraint, disease, burns, lightning/electrical effects, curses, exhaustion, mental status, and other ongoing impairing effects all qualify when they would impair later action. Mere emotional/social harm, witnessing harm to someone else, fear as ordinary emotion without an impairing status, momentary pain, impact, knockdown, or a requested/intended future injury does not qualify. ' +
         'Then fill CHAOS_INTERRUPT.sceneSummary, NameGenerationEngine semantic lines, and NPCProactivityEngine.cap from their engine/contextual requirements. ' +
         'Execute TrackerUpdateEngine as explicit-only persistent tracker deltas after RelationshipEngine. TrackerUpdateEngine is for display/state memory only, not outcome resolution. ' +
@@ -1570,6 +1589,15 @@ function parseCompactLedger(text, trackerSnapshot) {
             `${prefix}.initPreset.fearImmunity`,
             `${prefix}.newEncounterExplicit`,
             `${prefix}.establishedRelationship`,
+            `${prefix}.slowBondEvidence.respectfulContact`,
+            `${prefix}.slowBondEvidence.cooperation`,
+            `${prefix}.slowBondEvidence.comfortInProximity`,
+            `${prefix}.slowBondEvidence.boundaryRespect`,
+            `${prefix}.slowBondEvidence.sharedRoutine`,
+            `${prefix}.slowBondEvidence.playfulness`,
+            `${prefix}.slowBondEvidence.teamwork`,
+            `${prefix}.slowBondEvidence.personalAttention`,
+            `${prefix}.slowBondEvidence.blockers`,
             `${prefix}.auditInteraction`,
             `${prefix}.explicitIntimidationOrCoercion`,
             `${prefix}.checkThreshold.Exploitation`,
@@ -1617,6 +1645,17 @@ function parseCompactLedger(text, trackerSnapshot) {
             },
             newEncounterExplicit: readBoolean(fields, `${prefix}.newEncounterExplicit`, false),
             establishedRelationship: readBoolean(fields, `${prefix}.establishedRelationship`, false),
+            slowBondEvidence: {
+                respectfulContact: readBoolean(fields, `${prefix}.slowBondEvidence.respectfulContact`, false),
+                cooperation: readBoolean(fields, `${prefix}.slowBondEvidence.cooperation`, false),
+                comfortInProximity: readBoolean(fields, `${prefix}.slowBondEvidence.comfortInProximity`, false),
+                boundaryRespect: readBoolean(fields, `${prefix}.slowBondEvidence.boundaryRespect`, false),
+                sharedRoutine: readBoolean(fields, `${prefix}.slowBondEvidence.sharedRoutine`, false),
+                playfulness: readBoolean(fields, `${prefix}.slowBondEvidence.playfulness`, false),
+                teamwork: readBoolean(fields, `${prefix}.slowBondEvidence.teamwork`, false),
+                personalAttention: readBoolean(fields, `${prefix}.slowBondEvidence.personalAttention`, false),
+                blockers: readList(fields, `${prefix}.slowBondEvidence.blockers`),
+            },
             explicitIntimidationOrCoercion: readBoolean(fields, `${prefix}.explicitIntimidationOrCoercion`, false),
             stakeChangeByOutcome,
             overrideFlags: {
@@ -2051,6 +2090,8 @@ function trackerSnapshotToLedgerEntries(trackerSnapshot) {
         currentRapport: Number(entry?.currentRapport ?? 0),
         rapportEncounterLock: entry?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
         intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(entry?.intimacyGate) ? entry.intimacyGate : 'SKIP',
+        establishedRelationship: entry?.establishedRelationship === 'Y' ? 'Y' : 'N',
+        slowBondEvidence: entry?.slowBondEvidence || {},
         currentCoreStats: entry?.currentCoreStats
             ? readCoreObject(entry.currentCoreStats)
             : { Rank: 'none', MainStat: 'none', PHY: 1, MND: 1, CHA: 1 },
@@ -2264,6 +2305,16 @@ function normalizeLedger(ledger) {
         item.initFlags.activeEnemy = toBoolean(item.initFlags.activeEnemy, false);
         item.stakeChangeByOutcome = item.stakeChangeByOutcome || {};
         item.overrideFlags = item.overrideFlags || {};
+        item.slowBondEvidence = item.slowBondEvidence || {};
+        item.slowBondEvidence.respectfulContact = toBoolean(item.slowBondEvidence.respectfulContact, false);
+        item.slowBondEvidence.cooperation = toBoolean(item.slowBondEvidence.cooperation, false);
+        item.slowBondEvidence.comfortInProximity = toBoolean(item.slowBondEvidence.comfortInProximity, false);
+        item.slowBondEvidence.boundaryRespect = toBoolean(item.slowBondEvidence.boundaryRespect, false);
+        item.slowBondEvidence.sharedRoutine = toBoolean(item.slowBondEvidence.sharedRoutine, false);
+        item.slowBondEvidence.playfulness = toBoolean(item.slowBondEvidence.playfulness, false);
+        item.slowBondEvidence.teamwork = toBoolean(item.slowBondEvidence.teamwork, false);
+        item.slowBondEvidence.personalAttention = toBoolean(item.slowBondEvidence.personalAttention, false);
+        item.slowBondEvidence.blockers = readPlainArray(item.slowBondEvidence.blockers);
         item.genStats = normalizeCore(item.genStats);
     });
     ledger.injuryEffectEngine = ledger.injuryEffectEngine || {};
