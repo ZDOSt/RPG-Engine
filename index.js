@@ -1946,7 +1946,7 @@ function buildTrackerDisplayHtml(snapshot) {
                 <div>Toward User <code>${escapeHtml(relationshipTowardUser(disposition, classified))}</code></div>
                 <div>Condition <code>${escapeHtml(formatTrackerCondition(entry.condition))}</code></div>
                 <div><code>${escapeHtml(formatDisposition(disposition))}</code> | Lock <code>${escapeHtml(classified.lock)}</code> | Behavior <code>${escapeHtml(classified.behavior)}</code></div>
-                <div>Rapport <code>${escapeHtml(entry.currentRapport)}/5</code> | Encounter Lock <code>${escapeHtml(entry.rapportEncounterLock)}</code> | Gate <code>${escapeHtml(entry.intimacyGate)}</code></div>
+                <div>Rapport <code>${escapeHtml(entry.currentRapport)}/5</code> | Gate <code>${escapeHtml(entry.intimacyGate)}</code></div>
                 <div>Stats <code>${escapeHtml(formatCoreStats(entry.currentCoreStats))}</code></div>
                 ${trackerListLine('Wounds', entry.wounds)}
                 ${trackerListLine('Status', entry.statusEffects)}

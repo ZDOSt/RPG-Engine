@@ -205,7 +205,6 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: read exact latest sceneTracker NPC entry for this NPC
     rule: currentDisposition = valid B[x]/F[y]/H[z] 1-4 ? exact values : null
     rule: currentRapport = valid 0-5 ? exact value : 0
-    rule: rapportEncounterLock = valid Y/N ? exact value : N
     rule: intimacyGate = valid ALLOW/DENY ? exact value : SKIP
     rule: establishedRelationship = valid Y/N ? exact value : N
     rule: slowBondEvidence = latest tracker slowBondEvidence object, default all counters 0, blockers empty
@@ -213,7 +212,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: hostileLandedPressure = valid number ? exact value : 0
     rule: dominantLock = valid FEAR/HOSTILITY/None ? exact value : None
     rule: pressureMode = valid none/cornered/dominated ? exact value : none
-    return {currentDisposition, currentRapport, rapportEncounterLock, intimacyGate, establishedRelationship, slowBondEvidence, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
+    return {currentDisposition, currentRapport, intimacyGate, establishedRelationship, slowBondEvidence, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
 
   initPreset():
     policy: EO, FYW
@@ -356,26 +355,21 @@ function RelationshipEngine(npc, resolutionPacket) {
     if deltas.h>0 -> Hostility
     else -> No Change
 
-  newEncounterExplicit():
+  timeLapseExplicit():
     policy: EO, FYW
-    rule: this is per specific NPC, not global
-    rule: return Y if ANY of the following apply:
-      - This specific NPC is being encountered for the first time.
-      - The current scene takes place on a later day than the last interaction with this NPC.
-      - At least one night has passed since the last interaction with this NPC, including "next day", "next morning", "after another night passes", overnight sleep/rest, or similar.
-      - {{user}} and this NPC are living, traveling, resting, camping, or adventuring together, and a new day/overnight rest has occurred before the current interaction.
-      - {{user}} and this NPC were separated, and they interact again on a new day or after significant downtime.
-    rule: OOC/proxy scene framing like ((The next day, I help her...)) counts as current scene fact if it states elapsed time
-    rule: return N if this same NPC is being revisited during the same day/outing, if they were only left briefly and then re-approached, if the scene is continuous, or if the text only describes future intent, plans, promises, or a brief interruption
+    rule: strict and unambiguous
+    rule: return Y only if the latest {{user}} input states that the current scene is already taking place after a meaningful elapsed-time break: next day, next morning, after sleep/rest, after waking, after travel/downtime/separation, or another clear time skip
+    rule: return N if the text only describes future-tense plans, promises, intentions, brief pauses, momentary silence, same-scene continuation, vague later wording, or merely saying they will meet later
     else -> N
 
-  updateRapport(currentRapport, target, rapportEncounterLock):
+  updateRapport(currentRapport, target, rapportEligible):
     rule: positive encounter = target in [Bond,No Change]
     rule: negative encounter = target in [Hostility,Fear,FearHostility]
-    if rapportEncounterLock=Y -> return {currentRapport:currentRapport,rapportEncounterLock:Y}
-    if target in [Bond,No Change] -> return {currentRapport:min(5,currentRapport+1),rapportEncounterLock:Y}
-    if target in [Hostility,Fear,FearHostility] -> return {currentRapport:max(0,currentRapport-1),rapportEncounterLock:Y}
-    return {currentRapport:currentRapport,rapportEncounterLock:rapportEncounterLock}
+    rule: rapportEligible = Y only for first tracked encounter or strict timeLapseExplicit=Y
+    if target in [Bond,No Change] and rapportEligible!=Y -> return {currentRapport:currentRapport}
+    if target in [Bond,No Change] -> return {currentRapport:min(5,currentRapport+1)}
+    if target in [Hostility,Fear,FearHostility] -> return {currentRapport:max(0,currentRapport-1)}
+    return {currentRapport:currentRapport}
 
   deriveDirection(target, audit, currentDisposition, currentRapport, resolutionPacket):
     if target=No Change -> {b:0,f:0,h:0}
@@ -470,7 +464,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     if hostilePressureResult exists -> deltas = hostilePressureResult.deltas else deltas = deriveDirection(target, audit, currentDisposition, rapport.currentRapport, resolutionPacket)
     update disposition and apply rapport reset if present
     if hostilePressureResult.dominatedFearBreak=Y and currentDisposition.F>=4 and currentDisposition.H>=3 -> lower currentDisposition.H by 1
-    save currentRapport, rapportEncounterLock, hostilePressure, hostileLandedPressure, dominantLock, and pressureMode to sceneTracker
+    save currentRapport, hostilePressure, hostileLandedPressure, dominantLock, and pressureMode to sceneTracker
     classify disposition, update slowBondEvidence, check slowBondEligible, resolve threshold/override, check establishedRelationship, and determine intimacy gate
     save intimacy gate when ALLOW or DENY
     RelationToUserAction = {isDirect, isOpp, isBenefited, isHarmed}
@@ -1110,12 +1104,15 @@ export function proactivityRefereeGuard(handoff, packet) {
     return null;
 }
 
-export function updateRapport(currentRapport, target, rapportEncounterLock, mode = 'normal') {
-    if (rapportEncounterLock === 'Y') return { currentRapport, rapportEncounterLock: 'Y' };
-    if (mode === 'hostilePressure' && target === 'No Change') return { currentRapport, rapportEncounterLock: 'Y' };
-    if (['Bond', 'No Change'].includes(target)) return { currentRapport: Math.min(5, currentRapport + 1), rapportEncounterLock: 'Y' };
-    if (['Hostility', 'Fear', 'FearHostility'].includes(target)) return { currentRapport: Math.max(0, currentRapport - 1), rapportEncounterLock: 'Y' };
-    return { currentRapport, rapportEncounterLock };
+export function updateRapport(currentRapport, target, rapportEligible = false, mode = 'normal') {
+    if (mode === 'hostilePressure' && target === 'No Change') return { currentRapport };
+    if (['Bond', 'No Change'].includes(target)) {
+        return {
+            currentRapport: rapportEligible ? Math.min(5, currentRapport + 1) : currentRapport,
+        };
+    }
+    if (['Hostility', 'Fear', 'FearHostility'].includes(target)) return { currentRapport: Math.max(0, currentRapport - 1) };
+    return { currentRapport };
 }
 
 export function applyPhysicalBoundaryPressure(npc, packet, state) {
@@ -1587,7 +1584,7 @@ export function buildNarrationGuidance(resolution, handoffs, chaos, proactivity,
 export function buildPersistencePolicy() {
     return {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
-        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportEncounterLock', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
+        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
         playerPersistentRuleMutated: ['condition', 'wounds', 'statusEffects', 'gear', 'inventory', 'tasks', 'commitments'],
         perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
@@ -1697,7 +1694,6 @@ export function normalizeTrackerEntry(value) {
     return {
         currentDisposition: normalizeDisposition(value?.currentDisposition),
         currentRapport: clamp(Number(value?.currentRapport ?? 0), 0, 5),
-        rapportEncounterLock: value?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
         intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(value?.intimacyGate) ? value.intimacyGate : 'SKIP',
         intimacyGateSource: normalizeIntimacyGateSource(value?.intimacyGateSource),
         establishedRelationship: value?.establishedRelationship === 'Y' ? 'Y' : 'N',

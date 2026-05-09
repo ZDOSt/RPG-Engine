@@ -500,9 +500,11 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             continue;
         }
 
-        const state = normalizeTrackerEntry(trackerSnapshot[npc] || {});
-        const newEncounter = resolveNewEncounterExplicit(sem, context, state, audit, `3.3 ${npc}.newEncounterExplicit`) ? 'Y' : 'N';
-        let rapportEncounterLock = newEncounter === 'Y' ? 'N' : state.rapportEncounterLock;
+        const rawState = trackerSnapshot[npc] || {};
+        const firstTrackedEncounter = !rawState.currentDisposition;
+        const state = normalizeTrackerEntry(rawState);
+        const timeLapseExplicit = resolveTimeLapseExplicit(sem) ? 'Y' : 'N';
+        const rapportEligible = firstTrackedEncounter || timeLapseExplicit === 'Y';
         let currentDisposition = state.currentDisposition;
         let currentRapport = state.currentRapport;
         let hostilePressure = state.hostilePressure;
@@ -512,8 +514,9 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         let slowBondEvidence = state.slowBondEvidence;
 
         audit.push(`3.3 getCurrentRelationalState=${compact(state)}`);
-        audit.push(`3.3a newEncounterExplicit=${newEncounter}`);
-        audit.push(`3.3b rapportEncounterLock=${rapportEncounterLock}`);
+        audit.push(`3.3a timeLapseExplicit=${timeLapseExplicit}`);
+        audit.push(`3.3b firstTrackedEncounter=${yn(firstTrackedEncounter)}`);
+        audit.push(`3.3c rapportEligible=${yn(rapportEligible)}`);
 
         if (!currentDisposition) {
             const effectiveInitFlags = applyInitFlagReferee(sem.initFlags || {}, refereeContext, audit, `3.3 ${npc}.initPreset`);
@@ -527,7 +530,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             audit.push(`3.3i initPreset=${init.label}`);
             audit.push(`3.3j currentDisposition=${formatDisposition(currentDisposition)}`);
         } else {
-            audit.push(`3.3c currentDisposition=${formatDisposition(currentDisposition)}`);
+            audit.push(`3.3d currentDisposition=${formatDisposition(currentDisposition)}`);
         }
 
         audit.push(`3.3k currentRapport=${currentRapport}`);
@@ -557,9 +560,8 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             pressureMode,
         });
         const target = hostilePressureResult?.target || boundaryPressureResult?.target || routedTarget;
-        const rapport = updateRapport(currentRapport, target, rapportEncounterLock, hostilePressureResult ? 'hostilePressure' : 'normal');
+        const rapport = updateRapport(currentRapport, target, rapportEligible, hostilePressureResult ? 'hostilePressure' : 'normal');
         currentRapport = rapport.currentRapport;
-        rapportEncounterLock = rapport.rapportEncounterLock;
         hostilePressure = hostilePressureResult?.hostilePressure ?? hostilePressure;
         hostileLandedPressure = hostilePressureResult?.hostileLandedPressure ?? hostileLandedPressure;
         dominantLock = hostilePressureResult?.dominantLock ?? dominantLock;
@@ -605,7 +607,6 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         audit.push(`3.5 deriveDirection=${compact(deltas)}`);
         audit.push(`3.5a updateDisposition=${formatDisposition(updatedDisposition)}`);
         audit.push(`3.5e save currentRapport=${currentRapport} to sceneTracker`);
-        audit.push(`3.5f save rapportEncounterLock=${rapportEncounterLock} to sceneTracker`);
 
         const sceneKey = buildSlowBondSceneKey(resolutionPacket, npc);
         const slowBondMerge = mergeSlowBondEvidence(slowBondEvidence, sem.slowBondEvidence || {}, sceneKey);
@@ -675,7 +676,6 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             ...state,
             currentDisposition,
             currentRapport,
-            rapportEncounterLock,
             establishedRelationship,
             slowBondEvidence,
             intimacyGate: persistedGate,
@@ -738,10 +738,8 @@ function isIntimacyTargetAllowed(npc, resolutionPacket, sem, state, currentDispo
     return intimacyAllowance.allows ? 'Y' : 'N';
 }
 
-function resolveNewEncounterExplicit(sem, context, state, audit, label) {
-    if (bool(sem?.newEncounterExplicit)) {
-        return true;
-    }
+function resolveTimeLapseExplicit(sem) {
+    return bool(sem?.timeLapseExplicit);
 }
 
 function runChaos(ledger, handoffs, resolutionPacket, dice, audit) {

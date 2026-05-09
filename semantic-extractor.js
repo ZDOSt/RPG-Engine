@@ -678,7 +678,7 @@ function buildSemanticPreflightSchema() {
                         'relevant',
                         'auditInteraction',
                         'initFlags',
-                        'newEncounterExplicit',
+                        'timeLapseExplicit',
                         'establishedRelationship',
                         'slowBondEvidence',
                         'explicitIntimidationOrCoercion',
@@ -703,7 +703,7 @@ function buildSemanticPreflightSchema() {
                                 fearImmunity: { type: 'boolean' },
                             },
                         },
-                        newEncounterExplicit: { type: 'boolean' },
+                        timeLapseExplicit: { type: 'boolean' },
                         establishedRelationship: { type: 'boolean' },
                         slowBondEvidence: {
                             type: 'object',
@@ -891,7 +891,7 @@ const COMPACT_LEDGER_CONTRACT = [
     '- If no living NPC is relevant, output RelationshipEngine.count=0 and no RelationshipEngine[index] lines.',
     '- RelationshipEngine[index].establishedRelationship is true only if this NPC already has B4 relationship state and tracker establishedRelationship=Y, or the current explicit scene shows a direct romantic/love/relationship declaration or request from {{user}} accepted by that NPC, or from that NPC accepted by {{user}}. It must establish an actual romantic relationship, partnership, lovers status, dating/courting bond, or equivalent committed romantic connection. Flirting, attraction, arousal, sex, prior intimacy, affection, kindness, trust, loyalty, closeness, friendship, gratitude, protectiveness, or B4 alone does not count.',
     '- RelationshipEngine[index].slowBondEvidence is scene-local semantic evidence for slow B3-to-B4 trust growth. Mark only categories explicitly shown in the latest scene/current immediate context. respectfulContact=welcome/respectful physical contact or physical help; cooperation=constructive cooperation toward a shared purpose; comfortInProximity=NPC remains or settles close without fear, duty, coercion, or forced circumstance; boundaryRespect={{user}} respects refusal, hesitation, privacy, space, limits, consent, or a stated boundary; sharedRoutine=repeated or mundane togetherness such as eating/traveling/working/resting/training/tending camp; playfulness=mutual light teasing, joking, banter, or relaxed warmth; teamwork=coordinated effort under pressure/danger/conflict/crisis; personalAttention=specific attention to NPC needs, preferences, wellbeing, vulnerability, history, comfort, or concerns. blockers include coercion, intimidation, betrayal, humiliation, unwanted intimacy pressure, boundary violation, unresolved harm, exploitation, active fear, active hostility, or trapped/dependent/powerless circumstances that make closeness unsafe to count.',
-    '- RelationshipEngine[index].newEncounterExplicit is per specific NPC, not global. Return Y if ANY of the following apply: this specific NPC is being encountered for the first time; the current scene takes place on a later day than the last interaction with this NPC; at least one night has passed since the last interaction with this NPC, including "next day", "next morning", "after another night passes", overnight sleep/rest, or similar; {{user}} and this NPC are living, traveling, resting, camping, or adventuring together, and a new day/overnight rest has occurred before the current interaction; {{user}} and this NPC were separated, and they interact again on a new day or after significant downtime. OOC/proxy scene framing like ((The next day, I help her...)) counts as current scene fact if it states elapsed time. Return N if this same NPC is being revisited during the same day/outing, if they were only left briefly and then re-approached, if the scene is continuous, or if the text only describes future intent, plans, promises, or a brief interruption.',
+    '- RelationshipEngine[index].timeLapseExplicit is strict and unambiguous. Return Y only if this scene is taking place the next day, or the latest {{user}} input specifies that a significant amount of time has elapsed. Examples include {{user}} going to sleep, after sleep/rest, after waking, next morning, next day, after travel/downtime/separation, or another clear time skip. Return N if the text only describes future-tense plans, promises, intentions, brief pauses, momentary silence, same-scene continuation, vague later wording, or merely saying they will meet later.',
     '- All genStats groups must include Rank, MainStat, PHY, MND, CHA.',
     '- InjuryEffectEngine is semantic-only candidate extraction for effects the user action would cause if deterministic mechanics say the action lands. It does not roll and does not decide success. Include physical injuries and impairing magical/status effects regardless of source: burns, poison, paralysis, sickness, blindness, fear/panic, restraint, curses, lightning/electrical effects, exhaustion, mental effects, or other ongoing impairing states. Exclude purely emotional/social harm, mere witnessing, momentary pain, intended/requested future injuries, or effects that would not persist or impair later action.',
     '- InjuryEffectEngine target must be the entity actually receiving the impairing effect. HarmedObservers may appear only if they are directly affected by the injury/status effect, not merely emotionally harmed by seeing or caring about another target. Use persistence=lasting and affectsAction=Y only for effects that should impair later action if applied.',
@@ -1173,7 +1173,7 @@ function buildSemanticContractText(userName, charName, type, trackerSnapshot, pl
         'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
         'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, classifyPhysicalBoundaryPressure, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
         'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your ledger. ' +
-        'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, newEncounterExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, establishedRelationship, slowBondEvidence, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
+        'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, timeLapseExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, establishedRelationship, slowBondEvidence, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
         'Execute InjuryEffectEngine after ResolutionEngine and RelationshipEngine: identify only actual injury/status-effect candidates that the user action would cause if it lands. The semantic pass decides target, effectType, affected body/function, persistence, and whether it affects action from context; deterministic mechanics later decide whether it lands and the final impairment severity. Source does not matter: physical attacks, magic, poison, paralysis, fear/panic, restraint, disease, burns, lightning/electrical effects, curses, exhaustion, mental status, and other ongoing impairing effects all qualify when they would impair later action. Mere emotional/social harm, witnessing harm to someone else, fear as ordinary emotion without an impairing status, momentary pain, impact, knockdown, or a requested/intended future injury does not qualify. ' +
         'Then fill CHAOS_INTERRUPT.sceneSummary, NameGenerationEngine semantic lines, and NPCProactivityEngine.cap from their engine/contextual requirements. ' +
         'Execute TrackerUpdateEngine as explicit-only persistent tracker deltas after RelationshipEngine. TrackerUpdateEngine is for display/state memory only, not outcome resolution. ' +
@@ -1587,7 +1587,7 @@ function parseCompactLedger(text, trackerSnapshot) {
             `${prefix}.initPreset.priorUserGoodRep`,
             `${prefix}.initPreset.userNonHuman`,
             `${prefix}.initPreset.fearImmunity`,
-            `${prefix}.newEncounterExplicit`,
+            `${prefix}.timeLapseExplicit`,
             `${prefix}.establishedRelationship`,
             `${prefix}.slowBondEvidence.respectfulContact`,
             `${prefix}.slowBondEvidence.cooperation`,
@@ -1643,7 +1643,7 @@ function parseCompactLedger(text, trackerSnapshot) {
                 userNonHuman: readBoolean(fields, `${prefix}.initPreset.userNonHuman`, false),
                 fearImmunity: readBoolean(fields, `${prefix}.initPreset.fearImmunity`, false),
             },
-            newEncounterExplicit: readBoolean(fields, `${prefix}.newEncounterExplicit`, false),
+            timeLapseExplicit: readBoolean(fields, `${prefix}.timeLapseExplicit`, false),
             establishedRelationship: readBoolean(fields, `${prefix}.establishedRelationship`, false),
             slowBondEvidence: {
                 respectfulContact: readBoolean(fields, `${prefix}.slowBondEvidence.respectfulContact`, false),
@@ -2088,7 +2088,6 @@ function trackerSnapshotToLedgerEntries(trackerSnapshot) {
             ? `B${entry.currentDisposition.B}/F${entry.currentDisposition.F}/H${entry.currentDisposition.H}`
             : null,
         currentRapport: Number(entry?.currentRapport ?? 0),
-        rapportEncounterLock: entry?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
         intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(entry?.intimacyGate) ? entry.intimacyGate : 'SKIP',
         establishedRelationship: entry?.establishedRelationship === 'Y' ? 'Y' : 'N',
         slowBondEvidence: entry?.slowBondEvidence || {},
@@ -2372,7 +2371,6 @@ function normalizeTrackerRelevantNPCs(entries) {
                 NPC: npc,
                 currentDisposition: entry?.currentDisposition ?? null,
                 currentRapport: toNumber(entry?.currentRapport, 0),
-                rapportEncounterLock: entry?.rapportEncounterLock === 'Y' ? 'Y' : 'N',
                 intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(entry?.intimacyGate) ? entry.intimacyGate : 'SKIP',
                 currentCoreStats: normalizeCore(entry?.currentCoreStats),
             };

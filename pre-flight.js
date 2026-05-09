@@ -105,7 +105,7 @@ function buildReadableSemanticDebug(ledger) {
             `NPC[${index}]=${valueOrNone(item.NPC)}`,
             `relevant=${Boolean(item.relevant)}`,
             `initFlags=${inline(item.initFlags ?? {})}`,
-            `newEncounterExplicit=${Boolean(item.newEncounterExplicit)}`,
+            `timeLapseExplicit=${Boolean(item.timeLapseExplicit)}`,
             `explicitIntimidationOrCoercion=${Boolean(item.explicitIntimidationOrCoercion)}`,
             `stakeChangeByOutcome=${inline(item.stakeChangeByOutcome ?? {})}`,
             `overrideFlags=${inline(item.overrideFlags ?? {})}`,
