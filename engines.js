@@ -1261,7 +1261,6 @@ export function deriveDirection(target, currentDisposition, currentRapport, audi
     const landed = landedBool(packet.LandedActions);
     const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL);
 
-    if (target === 'No Change') return { b: 0, f: 0, h: 0 };
     if (target === 'Hostility' && packet.GOAL === 'IntimacyAdvanceVerbal' && packet.IntimacyConsent !== 'Y' && currentDisposition.H >= 3) {
         return { b: 0, f: 0, h: 0 };
     }
@@ -1280,6 +1279,7 @@ export function deriveDirection(target, currentDisposition, currentRapport, audi
         }
         return { b: 0, f: 0, h: 0 };
     }
+    if (target === 'No Change') return { b: 0, f: 0, h: 0 };
     if (target === 'Bond') {
         if (currentDisposition.B === 1) return currentRapport >= 1 ? { b: 1, f: 0, h: 0 } : { b: 0, f: 0, h: 0 };
         if (currentDisposition.B === 2) return currentRapport >= 3 ? { b: 1, f: 0, h: 0 } : { b: 0, f: 0, h: 0 };
