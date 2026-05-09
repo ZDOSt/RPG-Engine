@@ -358,7 +358,10 @@ function RelationshipEngine(npc, resolutionPacket) {
   timeLapseExplicit():
     policy: EO, FYW
     rule: strict and unambiguous
-    rule: return Y only if the latest {{user}} input states that the current scene is already taking place after a meaningful elapsed-time break: next day, next morning, after sleep/rest, after waking, after travel/downtime/separation, or another clear time skip
+    rule: per-turn transition flag, not a general scene-state flag
+    rule: return Y only if the latest {{user}} input itself establishes that time has advanced from the immediately previous scene/assistant response into a later time: next day, next morning, after waking, after sleep/rest has already completed, after travel/downtime/separation, or another clear time skip
+    rule: return N if the scene is already after a prior time skip but the latest {{user}} input only continues that same scene, waits a few minutes, talks, acts, looks around, or otherwise remains in the same outing/day beat
+    rule: return N if {{user}} only lies down, goes to sleep, prepares to rest, intends to rest, says they will return later, or otherwise describes an action before time has actually passed
     rule: return N if the text only describes future-tense plans, promises, intentions, brief pauses, momentary silence, same-scene continuation, vague later wording, or merely saying they will meet later
     else -> N
 
