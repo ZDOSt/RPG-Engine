@@ -22,9 +22,6 @@ import {
     mergeSlowBondEvidence,
     slowBondEvidenceCount,
     isSlowBondEligible,
-    currentIntimacyGateAllows,
-    getStakesOverrideEvidence,
-    resolveIntimacyGate,
     getChaosContext,
     classifyBand,
     classifyMagnitude,
@@ -41,6 +38,7 @@ import {
     buildPersistencePolicy,
     trackerSummary,
     normalizeTrackerEntry,
+    normalizeProactivityMemory,
     normalizeTrackerUserState,
     normalizeTrackerCondition,
     normalizeTargets,
@@ -186,6 +184,7 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
     const name = runNameGeneration(ledger, audit, context, type);
     const injuryTrackerUpdate = applyInflictedNpcInjuriesToTrackerUpdate(resolution.packet, relationships.trackerUpdate, trackerSnapshot, audit);
     const proactivity = runProactivity(ledger, relationships.handoffs, resolution.packet, chaos.handoff, dice, audit);
+    applyProactivityMemoryResults(injuryTrackerUpdate, relationships.handoffs, proactivity.results, dice, audit);
     const aggression = runAggression(ledger, trackerSnapshot, injuryTrackerUpdate, proactivity.results, resolution.packet, dice, audit, context);
     const trackerDeltas = runTrackerUpdates(ledger, trackerSnapshot, injuryTrackerUpdate, context, audit, aggression.userTrackerDelta, aggression.npcTrackerDeltas);
 
@@ -222,18 +221,10 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     const semantic = ledger.resolutionEngine || {};
     const targetClassifier = buildTargetClassifier(ledger, trackerSnapshot, context);
     const rawTargets = normalizeTargets(semantic.identifyTargets);
-    const intimacyReferee = applyIntimacyAdvanceHardRules(semantic, audit);
-    const intimacyAdvance = String(intimacyReferee.value || 'none').toLowerCase();
-    let goal = intimacyAdvance === 'physical'
-        ? 'IntimacyAdvancePhysical'
-        : intimacyAdvance === 'verbal'
-            ? 'IntimacyAdvanceVerbal'
-            : String(semantic.identifyGoal || 'Normal_Interaction');
-    if (goal === 'IntimacyAdvancePhysical' && intimacyReferee.value === 'verbal') {
-        goal = 'IntimacyAdvanceVerbal';
-    }
+    const goal = String(semantic.identifyGoal || 'Normal_Interaction');
     const semanticHasStakes = bool(semantic.hasStakes) ? 'Y' : 'N';
-    const preliminaryTargets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes: 'Y', goal, intimacyConsent: 'N' });
+    const intimacyAdvanceExplicit = bool(semantic.intimacyAdvanceExplicit) ? 'Y' : 'N';
+    const boundaryViolationExplicit = bool(semantic.boundaryViolationExplicit) ? 'Y' : 'N';
 
     const rollPool = [dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20(), dice.d20()];
     audit.push('STEP 1: SILENT SEMANTIC PASS COMPLETE');
@@ -255,47 +246,13 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     audit.push(`2.1a identifyChallenge=${semantic.identifyChallenge || semantic.explicitMeans || goal}`);
     audit.push(`2.2 identifyTargets.semantic=${formatTargets(rawTargets)}`);
 
-    const intimacyTarget = firstReal(preliminaryTargets.ActionTargets);
-    const semanticRelationship = (ledger.relationshipEngine || []).find(item => sameName(item?.NPC, intimacyTarget)) || {};
-    const targetState = trackerSnapshot[intimacyTarget] || null;
-    const preliminaryInitFlags = applyInitFlagReferee(semanticRelationship.initFlags || {}, refereeContext, audit, `2.3 checkIntimacyGate.initPreset(${intimacyTarget || NONE})`);
-    const preliminaryDisposition = targetState?.currentDisposition || initPreset(preliminaryInitFlags).disposition;
-    const preliminaryThreshold = checkThreshold(preliminaryDisposition, semanticRelationship.overrideFlags || {});
-    const preliminaryEstablishedRelationship = resolveEstablishedRelationshipState(
-        targetState,
-        preliminaryDisposition,
-        semanticRelationship,
-        intimacyTarget,
-        context,
-        audit,
-        `2.3 checkIntimacyGate.establishedRelationship(${intimacyTarget || NONE})`,
-        preliminaryTargets.ActionTargets,
-    );
-    const preliminaryState = targetState
-        ? {
-            ...targetState,
-            establishedRelationship: preliminaryEstablishedRelationship,
-        }
-        : {
-            establishedRelationship: preliminaryEstablishedRelationship,
-        };
-    const intimacyAllowance = currentIntimacyGateAllows(preliminaryState, preliminaryDisposition, preliminaryThreshold);
-    const intimacyConsent = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)
-        && intimacyAllowance.allows
-        ? 'Y'
-        : 'N';
-    audit.push(`2.3 checkIntimacyGate=${intimacyConsent}`);
-    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) {
-        audit.push(`2.3a checkIntimacyGate.threshold=${compact(preliminaryThreshold)}`);
-        audit.push(`2.3b checkIntimacyGate.evidence=${compact(intimacyAllowance)}`);
-    }
-
-    const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
+    audit.push(`2.3 intimacyAdvanceExplicit=${intimacyAdvanceExplicit}`);
+    audit.push(`2.3a boundaryViolationExplicit=${boundaryViolationExplicit}`);
     const pureLoveDeclarationEvidence = getPureLoveDeclarationNoRollEvidence(semantic, goal);
     const stakesOverrideEvidence = pureLoveDeclarationEvidence
-        || getStakesOverrideEvidence(goal, intimacyTarget, targetState, preliminaryDisposition, preliminaryThreshold, intimacyAllowance, semanticHasStakes, intimacyConsent);
+        || getRomanceNoRollOverrideEvidence(semantic, semanticHasStakes, boundaryViolationExplicit, intimacyAdvanceExplicit);
     const hasStakes = stakesOverrideEvidence?.hasStakes || semanticHasStakes;
-    const stakesRule = stakesOverrideEvidence?.rule || (isIntimacyAdvance ? 'semantic_final_intimacy_no_hard_override' : 'semantic_final');
+    const stakesRule = stakesOverrideEvidence?.rule || 'semantic_final';
     audit.push(`2.4a semanticHasStakes=${semanticHasStakes}`);
     audit.push(`2.4b deterministicStakesRule=${stakesRule}`);
     if (stakesOverrideEvidence) {
@@ -303,7 +260,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     }
     audit.push(`2.4 hasStakes=${hasStakes}`);
 
-    const targets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes, goal, intimacyConsent });
+    const targets = sanitizeTargets(rawTargets, targetClassifier, { hasStakes, goal, boundaryViolationExplicit });
     audit.push(`2.4d identifyTargets.final=${formatTargets(targets)}`);
     if (!sameTargets(rawTargets, targets)) {
         audit.push(`2.4e deterministicTargetSanitizer=${compact({
@@ -347,7 +304,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     } else {
         actions = normalizeActionMarkers(semantic.actionCount);
         const semanticMapStats = normalizeMapStats(semantic.mapStats);
-        let { userStat, oppStat } = applyMapStatsHardRules(semantic, goal, targets, semanticMapStats, audit, { intimacyConsent });
+        let { userStat, oppStat } = applyMapStatsHardRules(semantic, goal, targets, semanticMapStats, audit, { boundaryViolationExplicit });
         const userCore = getUserCoreStats(ledger);
         let targetCore = null;
         const oppTargetsNpcFirst = firstReal(targets.OppTargets.NPC);
@@ -446,7 +403,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     const packet = {
         GOAL: goal,
         actions,
-        IntimacyConsent: intimacyConsent,
+        intimacyAdvanceExplicit,
+        boundaryViolationExplicit,
         STAKES: hasStakes,
         LandedActions: outcome.LandedActions,
         OutcomeTier: outcome.OutcomeTier,
@@ -485,6 +443,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
     ]);
     const handoffs = [];
     const trackerUpdate = {};
+    const pendingOfferNpcs = npcList.filter(npc => isRomanceMemoryTag(normalizeTrackerEntry(trackerSnapshot[npc] || {}).proactivityMemory.pendingTag));
 
     audit.push('STEP 3: EXECUTE RelationshipEngine(npc, resolutionPacket) USING SEMANTIC_LEDGER');
     audit.push(`3.1 NPC_LIST=[${npcList.join(',') || NONE}]`);
@@ -503,10 +462,13 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
                 Target: 'No Change',
                 NPC_STAKES: 'N',
                 Override: 'NONE',
+                EstablishedRelationship: 'N',
+                IntimacyBoundary: 'SKIP',
+                IntimacyBoundarySource: 'NONE',
+                IntimacyRefusalStyle: 'NONE',
                 Landed: landedBool(resolutionPacket.LandedActions) ? 'Y' : 'N',
                 OutcomeTier: resolutionPacket.OutcomeTier || 'NONE',
                 NarrationBand: resolutionPacket.Outcome || 'standard',
-                IntimacyGate: 'SKIP',
             };
             handoffs.push(handoff);
             audit.push(`3.2a NPC_HANDOFF=${compact(handoff)}`);
@@ -525,6 +487,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         let dominantLock = state.dominantLock;
         let pressureMode = state.pressureMode;
         let slowBondEvidence = state.slowBondEvidence;
+        let proactivityMemory = beginProactivityMemoryTurn(state.proactivityMemory);
 
         audit.push(`3.3 getCurrentRelationalState=${compact(state)}`);
         audit.push(`3.3a timeLapseExplicit=${timeLapseExplicit}`);
@@ -548,8 +511,6 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
 
         audit.push(`3.3k currentRapport=${currentRapport}`);
 
-        const isIntimacyTarget = sameName(firstReal(resolutionPacket.ActionTargets), npc);
-        const isAllowed = isIntimacyTargetAllowed(npc, resolutionPacket, sem, state, currentDisposition, context, audit);
         const outcomeKey = String(resolutionPacket.Outcome || 'no_roll');
         const stakeReferee = resolveStakeChangeByOutcome(npc, sem, resolutionPacket);
         const benefitReferee = applyMeaningfulBenefitReferee(npc, resolutionPacket, stakeReferee.value, {
@@ -561,7 +522,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         const stakeChange = benefitReferee.value;
         const npcStakes = resolutionPacket.STAKES === 'Y' && ['benefit', 'harm'].includes(stakeChange) ? 'Y' : 'N';
         const auditInteraction = npcStakes === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
-        const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, isAllowed, sem, isIntimacyTarget);
+        const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, sem);
         const boundaryPressureResult = applyPhysicalBoundaryPressure(npc, resolutionPacket, {
             currentDisposition,
         });
@@ -580,7 +541,6 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         dominantLock = hostilePressureResult?.dominantLock ?? dominantLock;
         pressureMode = hostilePressureResult?.pressureMode ?? pressureMode;
 
-        audit.push(`3.4 isAllowed=${isAllowed}`);
         audit.push(`3.4a auditInteraction=stakeChangeByOutcome[${outcomeKey}]=${stakeChange} -> ${auditInteraction}`);
         if (stakeReferee.referee) {
             audit.push(`3.4a.1 deterministicStakeChangeReferee=${compact(stakeReferee.referee)}`);
@@ -634,6 +594,20 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         if (slowBondEligible === 'Y') {
             audit.push(`3.5j slowBondPromotion=B4`);
         }
+        proactivityMemory = resetRomanceMemoryOnB4Reentry(proactivityMemory, state.currentDisposition, currentDisposition);
+        const memoryOutcome = resolveProactivityMemoryPending(proactivityMemory, context, {
+            npc,
+            allowGenericResponse: pendingOfferNpcs.length <= 1,
+        });
+        proactivityMemory = memoryOutcome.memory;
+        if (memoryOutcome.result !== 'NONE') {
+            audit.push(`3.5k proactivityMemoryPending=${compact(memoryOutcome)}`);
+            if (memoryOutcome.tag === 'Date_And_Confess' && memoryOutcome.result === 'REFUSED' && currentDisposition.B >= 4) {
+                currentDisposition = { ...currentDisposition, B: 3 };
+                currentRapport = 0;
+                audit.push(`3.5l Date_And_Confess refused -> Bond lowered to ${formatDisposition(currentDisposition)}`);
+            }
+        }
 
         const classified = classifyDisposition(currentDisposition);
         const threshold = checkThreshold(currentDisposition, sem.overrideFlags || {});
@@ -647,22 +621,20 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             `3.6a.1 establishedRelationship(${npc})`,
             resolutionPacket.ActionTargets,
         );
-        const relationshipStateForGate = { ...state, establishedRelationship };
-        const resolvedGate = resolveIntimacyGate(relationshipStateForGate, threshold, currentDisposition, isAllowed, resolutionPacket.GOAL, isIntimacyTarget);
-        const intimacyGate = resolvedGate.IntimacyGate;
-        const intimacyGateSource = resolvedGate.IntimacyGateSource;
-        const persistedGate = intimacyGate !== 'SKIP' && intimacyGateSource !== 'CURRENT_DENIED'
-            ? intimacyGate
-            : 'SKIP';
-        const persistedGateSource = persistedGate === 'SKIP' ? 'NONE' : intimacyGateSource;
 
         audit.push(`3.6 classifyDisposition=${compact(classified)}`);
         audit.push(`3.6a checkThreshold=${compact(threshold)}`);
         audit.push(`3.6a.1 establishedRelationship=${establishedRelationship}`);
-        audit.push(`3.6b IntimacyGate=${intimacyGate}`);
-        audit.push(`3.6c IntimacyGateSource=${intimacyGateSource}`);
-        audit.push(`3.6d persistedIntimacyGate=${persistedGate}`);
-        audit.push(`3.6e persistedIntimacyGateSource=${persistedGateSource}`);
+        const intimacyBoundary = resolveIntimacyBoundary({
+            npc,
+            currentDisposition,
+            threshold,
+            establishedRelationship,
+            resolutionPacket,
+            context,
+            state,
+        });
+        audit.push(`3.6b intimacyBoundary=${compact(intimacyBoundary)}`);
 
         const handoff = {
             NPC: npc,
@@ -673,13 +645,15 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             NPC_STAKES: npcStakes,
             Override: threshold.Override,
             EstablishedRelationship: establishedRelationship,
+            IntimacyBoundary: intimacyBoundary.boundary,
+            IntimacyBoundarySource: intimacyBoundary.source,
+            IntimacyRefusalStyle: intimacyBoundary.refusalStyle,
             SlowBondEligible: slowBondEligible,
             SlowBondEvidenceCount: slowBondEvidenceCount(slowBondEvidence),
+            PersonalitySummary: state.personalitySummary || 'none',
             Landed: landedBool(resolutionPacket.LandedActions) ? 'Y' : 'N',
             OutcomeTier: resolutionPacket.OutcomeTier || 'NONE',
             NarrationBand: resolutionPacket.Outcome || 'standard',
-            IntimacyGate: intimacyGate,
-            IntimacyGateSource: intimacyGateSource,
             RomanceStyle: normalizeRomanceStyle(sem.romanceStyle),
             HostilePressure: hostilePressure,
             HostileLandedPressure: hostileLandedPressure,
@@ -690,6 +664,7 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             Wounds: state.wounds || [],
             StatusEffects: state.statusEffects || [],
             RelationToUserAction: relationToUserAction(npc, resolutionPacket),
+            ProactivityMemory: proactivityMemory,
         };
         handoffs.push(handoff);
 
@@ -704,13 +679,12 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             currentRapport,
             establishedRelationship,
             slowBondEvidence,
-            intimacyGate: persistedGate,
-            intimacyGateSource: persistedGateSource,
             currentCoreStats: coreStats,
             hostilePressure,
             hostileLandedPressure,
             dominantLock,
             pressureMode,
+            proactivityMemory,
         };
 
         audit.push(`3.7 NPC_HANDOFF=${compact(handoff)}`);
@@ -747,6 +721,140 @@ function relationshipSemanticHasSlowBondSignal(item) {
     ].some(bool) || toRealArray(evidence.blockers).length > 0 || item?.establishedRelationship === true;
 }
 
+const ROMANCE_MEMORY_TAGS = Object.freeze(['Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess']);
+
+function beginProactivityMemoryTurn(memory) {
+    const normalized = normalizeProactivityMemory(memory);
+    return {
+        ...normalized,
+        interchangeCount: clamp(normalized.interchangeCount + 1, 0, 1000000),
+    };
+}
+
+function resetRomanceMemoryOnB4Reentry(memory, previousDisposition, currentDisposition) {
+    const normalized = normalizeProactivityMemory(memory);
+    const previousB = Number(previousDisposition?.B || 0);
+    const currentB = Number(currentDisposition?.B || 0);
+    if (previousB >= 4 || currentB < 4) return normalized;
+    return {
+        ...normalized,
+        romanceCycle: clamp(normalized.romanceCycle + 1, 0, 1000000),
+        romanceBlocked: 'N',
+        pendingTag: 'NONE',
+        pendingSince: 0,
+        acceptedTags: [],
+        refusedTags: [],
+    };
+}
+
+function resolveProactivityMemoryPending(memory, context, options = {}) {
+    const normalized = normalizeProactivityMemory(memory);
+    const pendingTag = normalized.pendingTag;
+    if (!isRomanceMemoryTag(pendingTag)) {
+        return { result: 'NONE', tag: 'NONE', memory: normalized };
+    }
+
+    const userText = getLatestUserTextFromContext(context);
+    if (!proactivityOfferResponseTargetsNpc(options.npc, userText, options.allowGenericResponse)) {
+        return { result: 'NONE', tag: pendingTag, memory: normalized };
+    }
+
+    const verdict = classifyProactivityOfferResponse(pendingTag, userText);
+    if (verdict === 'ACCEPTED') {
+        return {
+            result: 'ACCEPTED',
+            tag: pendingTag,
+            memory: {
+                ...normalized,
+                pendingTag: 'NONE',
+                pendingSince: 0,
+                acceptedTags: addMemoryTag(normalized.acceptedTags, pendingTag),
+            },
+        };
+    }
+    if (verdict === 'REFUSED') {
+        return {
+            result: 'REFUSED',
+            tag: pendingTag,
+            memory: {
+                ...normalized,
+                romanceBlocked: pendingTag === 'Date_And_Confess' ? 'Y' : normalized.romanceBlocked,
+                pendingTag: 'NONE',
+                pendingSince: 0,
+                refusedTags: addMemoryTag(normalized.refusedTags, pendingTag),
+            },
+        };
+    }
+
+    const age = normalized.pendingSince > 0 ? normalized.interchangeCount - normalized.pendingSince : 0;
+    if (age >= 3) {
+        return {
+            result: 'EXPIRED',
+            tag: pendingTag,
+            memory: {
+                ...normalized,
+                pendingTag: 'NONE',
+                pendingSince: 0,
+            },
+        };
+    }
+    return { result: 'NONE', tag: pendingTag, memory: normalized };
+}
+
+function proactivityOfferResponseTargetsNpc(npc, text, allowGenericResponse) {
+    if (allowGenericResponse) return true;
+    return assistantMentionsNpc(npc, text);
+}
+
+function isRomanceMemoryTag(tag) {
+    return ROMANCE_MEMORY_TAGS.includes(tag);
+}
+
+function addMemoryTag(list, tag) {
+    if (!isRomanceMemoryTag(tag)) return Array.isArray(list) ? [...list] : [];
+    const result = Array.isArray(list) ? [...list] : [];
+    if (!result.includes(tag)) result.push(tag);
+    return result.slice(0, ROMANCE_MEMORY_TAGS.length);
+}
+
+function classifyProactivityOfferResponse(tag, text) {
+    const source = relationshipText(text).toLowerCase();
+    if (!source) return 'UNCLEAR';
+    if (proactivityOfferRefused(tag, source)) return 'REFUSED';
+    if (proactivityOfferAccepted(tag, source)) return 'ACCEPTED';
+    return 'UNCLEAR';
+}
+
+function proactivityOfferAccepted(tag, source) {
+    if (tag === 'Thoughtful_Gift') {
+        return /\b(?:thank(?:s| you)?|appreciate|accept|take|keep|receive|love it|like it|that's sweet|that is sweet|smile)\b/.test(source)
+            && !/\b(?:no thanks|no thank you|can't accept|cannot accept|won't accept|do not accept|don't accept)\b/.test(source);
+    }
+    if (tag === 'Ask_Date') {
+        return /\b(?:yes|okay|ok|sure|alright|i'd love to|i would love to|sounds good|let's go|i accept|i agree|i want that|i want this|take me|go with you)\b/.test(source)
+            || /\b(?:date|private time|spend time)\b.{0,60}\b(?:yes|okay|sure|accept|love to|want)\b/.test(source);
+    }
+    if (tag === 'Date_And_Confess') {
+        return hasRelationshipAcceptance(source, { allowPhysical: true });
+    }
+    return false;
+}
+
+function proactivityOfferRefused(tag, source) {
+    if (tag === 'Thoughtful_Gift') {
+        return /\b(?:no thanks|no thank you|refuse|decline|reject|can't accept|cannot accept|won't accept|do not accept|don't accept|give it back|push (?:it|the gift) away|not want (?:it|that|the gift))\b/.test(source);
+    }
+    if (tag === 'Ask_Date') {
+        return /\b(?:no|refuse|decline|reject|not interested|don't want|do not want|not now|can't|cannot|won't|stop)\b.{0,80}\b(?:date|private time|go with you|spend time|romantic|romance|you)\b/.test(source)
+            || /\b(?:no|not now|not interested|i refuse|i decline)\b/.test(source);
+    }
+    if (tag === 'Date_And_Confess') {
+        return hasRelationshipRefusal(source)
+            || /\b(?:no|not interested|don't love you|do not love you|can't love you|cannot love you|won't love you|do not want this|don't want this|not like that)\b/.test(source);
+    }
+    return false;
+}
+
 function resolveEstablishedRelationshipState(state, currentDisposition, sem, npc, context, audit, label, actionTargets = []) {
     if (state?.establishedRelationship === 'Y') return 'Y';
     if (currentDisposition?.B !== 4) return 'N';
@@ -758,29 +866,6 @@ function resolveEstablishedRelationshipState(state, currentDisposition, sem, npc
 
     audit?.push(`${label}.deterministicAcceptance=Y source=${evidence.source}`);
     return 'Y';
-}
-
-function isIntimacyTargetAllowed(npc, resolutionPacket, sem, state, currentDisposition, context, audit) {
-    if (!['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(resolutionPacket?.GOAL)) return 'N';
-    if (!toRealArray(resolutionPacket?.ActionTargets).some(name => sameName(name, npc))) return 'N';
-
-    const threshold = checkThreshold(currentDisposition, sem?.overrideFlags || {});
-    const establishedRelationship = resolveEstablishedRelationshipState(
-        state,
-        currentDisposition,
-        sem,
-        npc,
-        context,
-        audit,
-        `3.6 isAllowed.establishedRelationship(${npc})`,
-        resolutionPacket.ActionTargets,
-    );
-    const preliminaryState = {
-        ...state,
-        establishedRelationship,
-    };
-    const intimacyAllowance = currentIntimacyGateAllows(preliminaryState, currentDisposition, threshold);
-    return intimacyAllowance.allows ? 'Y' : 'N';
 }
 
 function detectCurrentRelationshipAcceptance(npc, context, assumeSingleTarget = false) {
@@ -888,6 +973,70 @@ function hasRelationshipRefusal(text) {
 
 function resolveTimeLapseExplicit(sem) {
     return bool(sem?.timeLapseExplicit);
+}
+
+function resolveIntimacyBoundary({ npc, currentDisposition, threshold, establishedRelationship, resolutionPacket, context, state }) {
+    if (resolutionPacket?.intimacyAdvanceExplicit !== 'Y') {
+        return { boundary: 'SKIP', source: 'NONE', refusalStyle: 'NONE' };
+    }
+    const directTarget = toRealArray(resolutionPacket.ActionTargets).some(name => sameName(name, npc));
+    const opposingTarget = toRealArray(resolutionPacket.OppTargets?.NPC).some(name => sameName(name, npc));
+    if (!directTarget && !opposingTarget) {
+        return { boundary: 'SKIP', source: 'NONE', refusalStyle: 'NONE' };
+    }
+    if (establishedRelationship === 'Y') {
+        return { boundary: 'ALLOW', source: 'ESTABLISHED_RELATIONSHIP', refusalStyle: 'NONE' };
+    }
+    if (threshold?.Override && threshold.Override !== 'NONE') {
+        return { boundary: 'ALLOW', source: `OVERRIDE:${threshold.Override}`, refusalStyle: 'NONE' };
+    }
+    const initiated = detectNpcInitiatedIntimacy(npc, context, toRealArray(resolutionPacket.ActionTargets).filter(isReal).length === 1);
+    if (initiated.accepted) {
+        return { boundary: 'ALLOW', source: 'NPC_INITIATED', refusalStyle: 'NONE' };
+    }
+    return {
+        boundary: 'DENY',
+        source: 'NONE',
+        refusalStyle: intimacyRefusalStyle(currentDisposition, state),
+    };
+}
+
+function intimacyRefusalStyle(disposition, state = {}) {
+    const fin = disposition || {};
+    const condition = String(state?.condition || 'healthy').toLowerCase();
+    if (fin.F >= 4 || condition === 'critical') return 'PANIC';
+    if (fin.H >= 3) return 'HOSTILE';
+    if (fin.F >= 3) return 'FEARFUL';
+    if (fin.B >= 3 && fin.H < 3 && fin.F < 3) return 'SOFT';
+    return 'CLEAR';
+}
+
+function detectNpcInitiatedIntimacy(npc, context, assumeSingleTarget = false) {
+    const exchange = getLatestRelationshipExchange(context);
+    const userText = relationshipText(exchange.user);
+    const assistantText = relationshipText(exchange.assistant);
+    if (!userText || !assistantText) return { accepted: false, source: 'none' };
+    if (!assumeSingleTarget && !assistantMentionsNpc(npc, assistantText)) return { accepted: false, source: 'npc_not_in_previous_assistant_message' };
+    if (!hasNpcIntimacyInitiation(assistantText)) return { accepted: false, source: 'no_npc_intimacy_initiation' };
+    if (!hasUserIntimacyAcceptance(userText)) return { accepted: false, source: 'no_user_acceptance' };
+    return { accepted: true, source: 'previous_npc_initiation_accepted' };
+}
+
+function hasNpcIntimacyInitiation(text) {
+    const source = relationshipText(text).toLowerCase();
+    if (hasRelationshipRefusal(source)) return false;
+    return /\b(?:i\s+want\s+to\s+kiss\s+you|kiss\s+me|let\s+me\s+kiss\s+you|do\s+you\s+want\s+(?:me\s+)?to\s+kiss\s+you|can\s+i\s+kiss\s+you|may\s+i\s+kiss\s+you)\b/.test(source)
+        || /\b(?:i\s+want\s+you|take\s+me|come\s+to\s+bed|sleep\s+with\s+me|make\s+love|have\s+sex|touch\s+me|let\s+me\s+touch\s+you)\b/.test(source)
+        || /\b(?:pulls?|leans?)\s+(?:you\s+)?(?:closer|in)\b.{0,80}\b(?:kiss|mouth|lips|bed|desire|want)\b/.test(source)
+        || /\b(?:kisses|kissed|presses?\s+(?:her|his|their)?\s*lips|mouth\s+meets)\b/.test(source)
+        || /\b(?:undresses?|removes?\s+(?:her|his|their)\s+clothes|lets?\s+(?:her|his|their)\s+clothes\s+(?:fall|slip))\b.{0,120}\b(?:you|bed|closer|kiss|desire|want)\b/.test(source);
+}
+
+function hasUserIntimacyAcceptance(text) {
+    const source = relationshipText(text).toLowerCase();
+    if (hasRelationshipRefusal(source)) return false;
+    return /\b(?:yes|okay|ok|alright|please|i\s+want\s+that|i\s+want\s+this|i\s+want\s+you|i\s+let\s+you|i\s+accept|i\s+nod)\b/.test(source)
+        || /\b(?:kiss(?:es|ed|ing)?\s+(?:you|him|her|them)|kiss\s+back|return\s+(?:the\s+)?kiss|press\s+my\s+lips|pull\s+(?:you|him|her|them)\s+(?:close|against)|hold\s+(?:you|him|her|them)\s+close|wrap\s+my\s+arms|touch\s+(?:you|him|her|them)|take\s+(?:you|him|her|them)\s+to\s+bed)\b/.test(source);
 }
 
 function runChaos(ledger, handoffs, resolutionPacket, dice, audit) {
@@ -1622,6 +1771,72 @@ function applyInflictedNpcInjuriesToTrackerUpdate(resolutionPacket, relationship
     return merged;
 }
 
+function applyProactivityMemoryResults(trackerUpdate, handoffs, proactivityResults, dice, audit) {
+    const handoffMap = new Map((handoffs || []).map(handoff => [String(handoff?.NPC || '').toLowerCase(), handoff]));
+    const updates = [];
+    for (const [npc, result] of Object.entries(proactivityResults || {})) {
+        if (!isReal(npc) || result?.Proactive !== 'Y') continue;
+        const before = normalizeTrackerEntry(trackerUpdate?.[npc] || {});
+        let memory = normalizeProactivityMemory(before.proactivityMemory);
+        const handoff = handoffMap.get(String(npc).toLowerCase()) || {};
+        const tag = selectedMemoryTag(result);
+        let changed = false;
+        if (isRomanceMajorTag(tag)) {
+            memory = {
+                ...memory,
+                pendingTag: tag,
+                pendingSince: memory.interchangeCount,
+            };
+            changed = true;
+            if (tag === 'Thoughtful_Gift' || tag === 'Ask_Date') {
+                const cooldown = rollCooldown(dice, 20);
+                memory.cooldowns = {
+                    ...memory.cooldowns,
+                    [tag]: cooldownAvailableAt(memory, cooldown),
+                };
+                updates.push(`${npc}.${tag}.cooldown=1d20(${cooldown})->${memory.cooldowns[tag]}`);
+            }
+            updates.push(`${npc}.${tag}.pending`);
+        }
+        if (isPartnerCooldownTag(tag)) {
+            const sides = tag === 'Partner_Conflict' ? 50 : 20;
+            const cooldown = rollCooldown(dice, sides);
+            memory.cooldowns = {
+                ...memory.cooldowns,
+                [tag]: cooldownAvailableAt(memory, cooldown),
+            };
+            changed = true;
+            updates.push(`${npc}.${tag}.cooldown=1d${sides}(${cooldown})->${memory.cooldowns[tag]}`);
+        }
+        if (changed && trackerUpdate?.[npc]) {
+            trackerUpdate[npc] = normalizeTrackerEntry({
+                ...before,
+                proactivityMemory: memory,
+            });
+            handoff.ProactivityMemory = trackerUpdate[npc].proactivityMemory;
+        }
+    }
+    if (updates.length) {
+        audit.push(`STEP 6.3b APPLY PROACTIVITY_MEMORY=${compact(updates)}`);
+    }
+}
+
+function selectedMemoryTag(result) {
+    if (result?.RomanceInitiative === 'Y') return result.RomanceInitiativeTag;
+    if (result?.PartnerInitiative === 'Y') return result.PartnerInitiativeTag;
+    return result?.Intent;
+}
+
+function rollCooldown(dice, sides) {
+    if (sides === 50 && typeof dice?.d50 === 'function') return dice.d50();
+    if (sides === 20 && typeof dice?.d20 === 'function') return dice.d20();
+    return Math.floor(Math.random() * sides) + 1;
+}
+
+function cooldownAvailableAt(memory, cooldown) {
+    return clamp(Number(memory?.interchangeCount || 0) + Number(cooldown || 0) + 1, 0, 1000000);
+}
+
 function applyInflictedNpcInjuriesToNpcMap(npcs, trackerSnapshot, injuries) {
     for (const injury of injuries || []) {
         const name = injury?.NPC;
@@ -2166,6 +2381,7 @@ function applyTrackerDeltaToState(before, delta, includePlayerFields) {
         ? normalizeTrackerUserState(before)
         : normalizeTrackerEntry(before);
     const result = {
+        ...(!includePlayerFields ? { personalitySummary: source.personalitySummary || '' } : {}),
         condition: source.condition,
         wounds: [...source.wounds],
         statusEffects: [...source.statusEffects],
@@ -2185,6 +2401,12 @@ function applyTrackerDeltaToState(before, delta, includePlayerFields) {
     result.wounds = applyListDelta(result.wounds, delta?.woundsAdd, delta?.woundsRemove);
     result.statusEffects = applyListDelta(result.statusEffects, delta?.statusAdd, delta?.statusRemove);
     result.gear = applyListDelta(result.gear, delta?.gearAdd, delta?.gearRemove);
+    if (!includePlayerFields) {
+        const personalitySummary = cleanPersonalitySummary(delta?.personalitySummary);
+        if (personalitySummary) {
+            result.personalitySummary = personalitySummary;
+        }
+    }
     if (includePlayerFields) {
         result.inventory = applyListDelta(result.inventory, delta?.inventoryAdd, delta?.inventoryRemove);
         result.tasks = applyListDelta(result.tasks, delta?.tasksAdd, delta?.tasksRemove);
@@ -2234,6 +2456,12 @@ function cleanTrackerText(value) {
     return text.slice(0, 140);
 }
 
+function cleanPersonalitySummary(value) {
+    const text = String(value ?? '').trim().replace(/\s+/g, ' ').replace(/^["']|["']$/g, '').trim();
+    if (!text || ['(none)', 'none', 'null', 'n/a', 'unknown', 'unchanged'].includes(text.toLowerCase())) return '';
+    return text.slice(0, 160);
+}
+
 function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, audit) {
     const kind = classifyAction(resolutionPacket);
     const chaosBand = chaosHandoff.CHAOS?.triggered ? chaosHandoff.CHAOS.band : 'None';
@@ -2251,7 +2479,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
     for (const handoff of handoffs) {
         const fin = parseFinalState(handoff.FinalState);
         const lock = handoff.Lock && handoff.Lock !== 'None' ? handoff.Lock : deriveLock(fin);
-        const impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode, handoff.Target);
+        const impulse = deriveImpulse(kind, lock, fin, handoff.PressureMode, handoff.Target);
         const proactivityGuard = proactivityRefereeGuard(handoff, resolutionPacket);
         let tier = proactivityGuard
             ? 'DORMANT'
@@ -2277,7 +2505,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         }
 
         if (tier === 'FORCED') {
-            const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
+            const intent = selectIntent(impulse, kind, fin, handoff.Override, handoff.PressureMode);
             const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
             const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }) ? 'Y' : 'N';
             candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die: 20, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential }));
@@ -2296,7 +2524,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         results[handoff.NPC].Threshold = threshold;
 
         if (passes === 'Y') {
-            const intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode);
+            const intent = selectIntent(impulse, kind, fin, handoff.Override, handoff.PressureMode);
             const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
             const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }) ? 'Y' : 'N';
             candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: threshold, passes }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential }));
@@ -2325,10 +2553,14 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             RomanceInitiativeTag: candidate.RomanceInitiativeTag || NONE,
             RomanceInitiativeDie: candidate.RomanceInitiativeDie ?? null,
             RomanceInitiativeContext: candidate.RomanceInitiativeContext || NONE,
+            RomanceInitiativeRawTag: candidate.RomanceInitiativeRawTag || candidate.RomanceInitiativeTag || NONE,
+            RomanceInitiativeMemoryGate: candidate.RomanceInitiativeMemoryGate || 'none',
             PartnerInitiative: candidate.PartnerInitiative || 'N',
             PartnerInitiativeTag: candidate.PartnerInitiativeTag || NONE,
             PartnerInitiativeDie: candidate.PartnerInitiativeDie ?? null,
             PartnerInitiativeContext: candidate.PartnerInitiativeContext || NONE,
+            PartnerInitiativeRawTag: candidate.PartnerInitiativeRawTag || candidate.PartnerInitiativeTag || NONE,
+            PartnerInitiativeMemoryGate: candidate.PartnerInitiativeMemoryGate || 'none',
             CompanionInitiative: candidate.CompanionInitiative || 'N',
             CompanionInitiativeTag: candidate.CompanionInitiativeTag || NONE,
             CompanionInitiativeDie: candidate.CompanionInitiativeDie ?? null,
@@ -2402,21 +2634,27 @@ function applyRomanceInitiativeIfEligible(candidate, handoff, fin, dice, audit, 
     const rawTag = romanceInitiativeTagFromDie(romanceDie, handoff?.RomanceStyle);
     const romanceContext = classifyCompanionInitiativeContext(context);
     const remap = remapCompanionInitiativeForContext(rawTag, romanceContext, romanceDie, handoff, context);
-    const romanceTag = remap.tag;
+    const gate = applyRomanceMemoryGate(remap.tag, romanceDie, handoff, romanceContext);
+    const romanceTag = gate.tag;
     audit.push(`6.5f ${handoff.NPC}.RomanceInitiativeDie=${romanceDie}`);
     audit.push(`6.5f.1 ${handoff.NPC}.RomanceInitiativeContext=${romanceContext}`);
     audit.push(`6.5g ${handoff.NPC}.RomanceInitiativeTag=${romanceTag}${romanceTag !== rawTag ? ` (from ${rawTag})` : ''}`);
     audit.push(`6.5g.1 ${handoff.NPC}.RomanceStyle=${normalizeRomanceStyle(handoff?.RomanceStyle)}`);
+    if (gate.reason !== 'none') {
+        audit.push(`6.5g.2 ${handoff.NPC}.RomanceMemoryGate=${gate.reason}`);
+    }
     return {
         ...candidate,
-        intent: remap.intent || romanceTag,
+        intent: gate.intent || remap.intent || romanceTag,
         impulse: 'BOND',
-        ProactivityTarget: remap.target || USER_PROACTIVITY_TARGET,
-        TargetsUser: remap.target && remap.target !== USER_PROACTIVITY_TARGET ? 'N' : 'Y',
+        ProactivityTarget: gate.target || remap.target || USER_PROACTIVITY_TARGET,
+        TargetsUser: (gate.target || remap.target) && (gate.target || remap.target) !== USER_PROACTIVITY_TARGET ? 'N' : 'Y',
         RomanceInitiative: 'Y',
         RomanceInitiativeTag: romanceTag,
         RomanceInitiativeDie: romanceDie,
         RomanceInitiativeContext: romanceContext,
+        RomanceInitiativeRawTag: rawTag,
+        RomanceInitiativeMemoryGate: gate.reason,
     };
 }
 
@@ -2439,6 +2677,43 @@ function romanceInitiativeTagFromDie(die, romanceStyle = 'auto') {
     return die % 2 === 0 ? 'Romantic_Flirt' : 'Romantic_Nervous';
 }
 
+function applyRomanceMemoryGate(tag, die, handoff, context) {
+    const memory = normalizeProactivityMemory(handoff?.ProactivityMemory);
+    if (isRomanceMajorTag(tag) && isRomanceMemoryTag(memory.pendingTag)) {
+        return romanceFallbackForBlockedTag(die, handoff, `${memory.pendingTag}.pending`);
+    }
+    if (memory.romanceBlocked === 'Y' && isRomanceMajorTag(tag)) {
+        return romanceFallbackForBlockedTag(die, handoff, 'romanceBlocked');
+    }
+    if (memory.refusedTags.includes(tag) && isRomanceMajorTag(tag)) {
+        return romanceFallbackForBlockedTag(die, handoff, `${tag}.refused`);
+    }
+    if (['Thoughtful_Gift', 'Ask_Date'].includes(tag) && isOnMemoryCooldown(memory, tag)) {
+        return romanceFallbackForBlockedTag(die, handoff, `${tag}.cooldownUntil${memory.cooldowns[tag]}`);
+    }
+    if (tag === 'Date_And_Confess') {
+        const giftAccepted = memory.acceptedTags.includes('Thoughtful_Gift');
+        const dateAccepted = memory.acceptedTags.includes('Ask_Date');
+        if (!giftAccepted || !dateAccepted) {
+            return romanceFallbackForBlockedTag(die, handoff, 'Date_And_Confess.requiresGiftAndDateAccepted');
+        }
+    }
+    return { tag, intent: tag, target: USER_PROACTIVITY_TARGET, reason: 'none' };
+}
+
+function romanceFallbackForBlockedTag(die, handoff, reason) {
+    const tag = romanceFallbackTag(die, handoff?.RomanceStyle);
+    return { tag, intent: tag, target: USER_PROACTIVITY_TARGET, reason };
+}
+
+function romanceFallbackTag(die, romanceStyle = 'auto') {
+    if (die % 5 === 0) return 'Romantic_Attention';
+    const style = normalizeRomanceStyle(romanceStyle);
+    if (style === 'nervous') return 'Romantic_Nervous';
+    if (style === 'flirt') return 'Romantic_Flirt';
+    return die % 2 === 0 ? 'Romantic_Flirt' : 'Romantic_Nervous';
+}
+
 function applyPartnerInitiativeIfEligible(candidate, handoff, fin, dice, audit, context) {
     if (!isPartnerInitiativeEligible(handoff, fin)) return candidate;
     if (isBlockedPartnerBaseIntent(candidate.intent)) return candidate;
@@ -2448,20 +2723,26 @@ function applyPartnerInitiativeIfEligible(candidate, handoff, fin, dice, audit, 
     const rawTag = partnerInitiativeTagFromDie(partnerDie);
     const partnerContext = classifyCompanionInitiativeContext(context);
     const remap = remapPartnerInitiativeForContext(rawTag, partnerContext, partnerDie, handoff, context);
-    const partnerTag = remap.tag;
+    const gate = applyPartnerMemoryGate(remap.tag, partnerDie, handoff, partnerContext);
+    const partnerTag = gate.tag;
     audit.push(`6.5h ${handoff.NPC}.PartnerInitiativeDie=${partnerDie}`);
     audit.push(`6.5i ${handoff.NPC}.PartnerInitiativeContext=${partnerContext}`);
     audit.push(`6.5j ${handoff.NPC}.PartnerInitiativeTag=${partnerTag}${partnerTag !== rawTag ? ` (from ${rawTag})` : ''}`);
+    if (gate.reason !== 'none') {
+        audit.push(`6.5j.1 ${handoff.NPC}.PartnerMemoryGate=${gate.reason}`);
+    }
     return {
         ...candidate,
-        intent: remap.intent || partnerTag,
+        intent: gate.intent || remap.intent || partnerTag,
         impulse: 'BOND',
-        ProactivityTarget: remap.target || USER_PROACTIVITY_TARGET,
-        TargetsUser: remap.target && remap.target !== USER_PROACTIVITY_TARGET ? 'N' : 'Y',
+        ProactivityTarget: gate.target || remap.target || USER_PROACTIVITY_TARGET,
+        TargetsUser: (gate.target || remap.target) && (gate.target || remap.target) !== USER_PROACTIVITY_TARGET ? 'N' : 'Y',
         PartnerInitiative: 'Y',
         PartnerInitiativeTag: partnerTag,
         PartnerInitiativeDie: partnerDie,
         PartnerInitiativeContext: partnerContext,
+        PartnerInitiativeRawTag: rawTag,
+        PartnerInitiativeMemoryGate: gate.reason,
     };
 }
 
@@ -2497,6 +2778,33 @@ function partnerInitiativeTagFromDie(die) {
     if (die >= 51) return 'Partner_Support';
     if (die >= 26) return 'Partner_Affection';
     return 'Partner_Check_In';
+}
+
+function applyPartnerMemoryGate(tag, die, handoff, context) {
+    const memory = normalizeProactivityMemory(handoff?.ProactivityMemory);
+    if (isPartnerCooldownTag(tag) && isOnMemoryCooldown(memory, tag)) {
+        const fallback = partnerFallbackTag(die);
+        return { tag: fallback, intent: fallback, target: USER_PROACTIVITY_TARGET, reason: `${tag}.cooldownUntil${memory.cooldowns[tag]}` };
+    }
+    return { tag, intent: tag, target: USER_PROACTIVITY_TARGET, reason: 'none' };
+}
+
+function partnerFallbackTag(die) {
+    if (die % 3 === 0) return 'Partner_Support';
+    if (die % 2 === 0) return 'Partner_Affection';
+    return 'Partner_Check_In';
+}
+
+function isOnMemoryCooldown(memory, tag) {
+    return Number(memory?.cooldowns?.[tag] || 0) > Number(memory?.interchangeCount || 0);
+}
+
+function isRomanceMajorTag(tag) {
+    return ['Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess'].includes(tag);
+}
+
+function isPartnerCooldownTag(tag) {
+    return ['Partner_Gift', 'Partner_Private_Time', 'Partner_Conflict'].includes(tag);
 }
 
 function companionCrisisTagFromDie(die, fin, establishedRelationship, dire, canRetreat, attackTarget) {
@@ -2870,27 +3178,6 @@ function applyInitFlagReferee(flags, refereeContext, audit, label) {
     return effective;
 }
 
-function applyIntimacyAdvanceHardRules(semantic, audit) {
-    let value = ['physical', 'verbal', 'none'].includes(String(semantic.intimacyAdvance || '').toLowerCase())
-        ? String(semantic.intimacyAdvance || '').toLowerCase()
-        : 'none';
-    const source = semanticSourceText(semantic);
-    if (value === 'none' && semantic?.identifyGoal === 'IntimacyAdvancePhysical') value = 'physical';
-    if (value === 'none' && semantic?.identifyGoal === 'IntimacyAdvanceVerbal') value = 'verbal';
-
-    if (value === 'physical' && isVerbalIntimacyRequest(source) && !hasUserInitiatedIntimateContact(source)) {
-        audit.push(`2.1b deterministicIntimacyAdvanceReferee=${compact({
-            hardRule: 'ResolutionEngine.identifyGoal: asking/requesting/proposing intimacy is verbal unless the user attempts physical contact',
-            from: 'physical',
-            to: 'verbal',
-            evidence: source.slice(0, 220),
-        })}`);
-        value = 'verbal';
-    }
-
-    return { value };
-}
-
 function applyHostilePhysicalIntentHardRules(semantic, audit) {
     const semanticValue = bool(semantic.classifyHostilePhysicalIntent);
     const source = semanticSourceText(semantic);
@@ -2952,7 +3239,6 @@ function applyPhysicalBoundaryPressureHardRules(semantic, targets, options, audi
 }
 
 function getPureLoveDeclarationNoRollEvidence(semantic, goal) {
-    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) return null;
     const source = semanticSourceText(semantic);
     if (!isPureLoveDeclarationOrReciprocation(source)) return null;
     return {
@@ -2967,6 +3253,24 @@ function getPureLoveDeclarationNoRollEvidence(semantic, goal) {
     };
 }
 
+function getRomanceNoRollOverrideEvidence(semantic, semanticHasStakes, boundaryViolationExplicit, intimacyAdvanceExplicit = 'N') {
+    if (boundaryViolationExplicit === 'Y' || semanticHasStakes !== 'Y') return null;
+    const source = semanticSourceText(semantic);
+    if (!isRomanticOrIntimateConversation(source)) return null;
+    if (hasBoundaryViolationLanguage(source)) return null;
+    return {
+        hasStakes: 'N',
+        rule: 'hard_override_romance_conversation_no_roll',
+        evidence: {
+            hardRule: 'ResolutionEngine.hasStakes: flirting, teasing, romantic talk, intimacy proposals, permission asks, or reciprocation are not stakes unless boundaryViolationExplicit=Y or ordinary non-romantic stakes apply; intimacyAdvanceExplicit is handled by IntimacyBoundary without a roll',
+            from: 'Y',
+            to: 'N',
+            intimacyAdvanceExplicit,
+            evidence: source.slice(0, 220),
+        },
+    };
+}
+
 function semanticSourceText(semantic) {
     return [
         semantic?.identifyGoal,
@@ -2975,34 +3279,27 @@ function semanticSourceText(semantic) {
     ].filter(Boolean).join(' ').toLowerCase();
 }
 
-function isVerbalIntimacyRequest(source) {
-    return /\b(will you|would you|could you|can you|may i|can i|could i|let me|please|ask(?:s|ed|ing)?|request(?:s|ed|ing)?|invite(?:s|d)?|propos(?:e|es|ed|ing)|want you to)\b.{0,80}\b(kiss|touch|hold|embrace|sleep with|sex|intimacy|intimate|bed|caress)\b/.test(source)
-        || /\b(kiss|touch|hold|embrace|sleep with|sex|intimacy|intimate|bed|caress)\b.{0,80}\b(me|you|permission|allow|let)\b/.test(source);
+function isRomanticOrIntimateConversation(source) {
+    const text = String(source || '').toLowerCase();
+    return /\b(flirt|teas(?:e|es|ing)|banter|compliment|blush|romantic|romance|love|date|court|kiss|touch|hold|embrace|hug|cuddle|caress|intimacy|intimate|sex|sexual|desire|want you|want me|private time|alone together|distract(?:ion|ions)?|seduc(?:e|tion|tive)|suggestive|affection|affectionate)\b/.test(text)
+        || /\b(can i|could i|may i|would you|will you|do you want|if you want|what .* in mind)\b.{0,100}\b(kiss|touch|hold|embrace|hug|caress|intimacy|intimate|sex|bed|date|distract)\b/.test(text);
+}
+
+function hasBoundaryViolationLanguage(source) {
+    const text = String(source || '').toLowerCase();
+    return /\b(after|despite|even though|ignoring|ignore|ignored|keeps?|continue(?:s|d)?|press(?:es|ed|ing)?|push(?:es|ed|ing)?|insist(?:s|ed|ing)?|force(?:s|d|ing)?|coerc(?:e|es|ed|ing|ion)|threat(?:en|ens|ened|ening)?|blackmail|grab(?:s|bed|bing)?|restrain(?:s|ed|ing)?|pin(?:s|ned|ning)?|won['’]?t stop|refus(?:e|es|ed|al)|said no|told me no|told .* stop|pull(?:s|ed|ing)? away|withdraw(?:s|n|ing)?|unwanted|without consent)\b/.test(text);
 }
 
 function isPureLoveDeclarationOrReciprocation(source) {
     const text = String(source || '').toLowerCase();
     const hasLoveDeclaration = /\b(?:i\s+(?:think\s+|know\s+|realize\s+|realise\s+)?love\s+you(?:\s+too)?|i\s+love\s+you\s+too|love\s+you\s+too|i['’]m\s+in\s+love\s+with\s+you|i\s+have\s+feelings\s+for\s+you|i\s+feel\s+the\s+same(?:\s+way)?|i\s+feel\s+it\s+too)\b/.test(text);
     if (!hasLoveDeclaration) return false;
-    if (isVerbalIntimacyRequest(text) || hasUserInitiatedIntimateContact(text)) return false;
+    if (hasBoundaryViolationLanguage(text)) return false;
     if (hasDirectBodilyAggression(text) || isObjectBoundaryContest(text) || isBodyBoundaryPressure(text)) return false;
     if (/\b(?:threaten|blackmail|coerc(?:e|es|ed|ing|ion)|force(?:s|d|ing)?|demand(?:s|ed|ing)?|intimidat(?:e|es|ed|ing|ion)|manipulat(?:e|es|ed|ing|ion)|lie(?:s|d)?|deceiv(?:e|es|ed|ing)|trick(?:s|ed|ing)?|pressure(?:s|d|ing)?|ultimatum)\b/.test(text)) return false;
     if (/\b(?:if\s+you\s+do\s+not|if\s+you\s+don['’]t|or\s+else|you\s+(?:must|have\s+to|need\s+to)\s+(?:love|accept|date|be\s+with))\b/.test(text)) return false;
+    if (/\b(?:can\s+i|could\s+i|may\s+i|would\s+you|will\s+you|do\s+you\s+want|if\s+you\s+want|kiss|touch|hold|embrace|hug|caress|cuddle|date|bed|sex|intimacy|intimate|private\s+time|alone\s+together|distract(?:ion|ions)?)\b/.test(text)) return false;
     return true;
-}
-
-function hasUserInitiatedIntimateContact(source) {
-    if (isPureVerbalIntimacyPermissionRequest(source)) return false;
-    return /\b(i|user|{{user}})\s+(?:try|tries|tried|attempt|attempts|attempted|lean|leans|leaned|move|moves|moved|reach|reaches|reached|press|presses|pressed|pull|pulls|pulled|grab|grabs|grabbed|touch|touches|touched|kiss|kisses|kissed|cup|cups|cupped|caress|caresses|caressed|grope|gropes|groped)\b/.test(source)
-        && /\b(kiss|lips|mouth|touch|hold|embrace|body|waist|chin|face|cheek|neck|hair|hand|caress|grope|undress|clothes|shirt|dress|skirt|underwear)\b/.test(source);
-}
-
-function isPureVerbalIntimacyPermissionRequest(source) {
-    const text = String(source || '').toLowerCase();
-    const hasContactAction = /\b(i|user|{{user}})\s+(?:try|tries|tried|attempt|attempts|attempted|lean|leans|leaned|move|moves|moved|reach|reaches|reached|press|presses|pressed|pull|pulls|pulled|grab|grabs|grabbed|touch|touches|touched|kiss|kisses|kissed|cup|cups|cupped|caress|caresses|caressed|grope|gropes|groped)\b/.test(text)
-        && !/\b(?:can|could|may|might|would)\s+i\s+(?:kiss|touch|hold|embrace|sleep with|caress|grope)\b/.test(text);
-    const hasPermissionRequest = /\b(?:i\s+ask|i\s+request|i\s+say|i\s+whisper|i\s+tell|can\s+i|could\s+i|may\s+i|would\s+you\s+let\s+me|will\s+you\s+let\s+me|do\s+you\s+want\s+me\s+to|would\s+you\s+like\s+me\s+to)\b.{0,120}\b(?:kiss|touch|hold|embrace|sleep with|sex|intimacy|intimate|bed|caress)\b/.test(text);
-    return hasPermissionRequest && !hasContactAction;
 }
 
 function isObjectBoundaryContest(source) {

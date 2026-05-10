@@ -8,7 +8,7 @@ export const POST_REPLY_TRACKER_STOP_SENTINEL = 'POST_REPLY_TRACKER_COMPLETE';
 const SEMANTIC_RESPONSE_LENGTH_MIN = 2048;
 const SEMANTIC_RESPONSE_LENGTH_MAX = 8192;
 const SEMANTIC_RESPONSE_LENGTH_PER_TRACKED_NPC = 320;
-const POST_REPLY_TRACKER_RESPONSE_LENGTH = 1200;
+const POST_REPLY_TRACKER_RESPONSE_LENGTH = 1400;
 const SEMANTIC_TOOL_NAME = 'submit_semantic_preflight';
 const SEMANTIC_BACKEND_ENDPOINT = '/api/backends/chat-completions/generate';
 const TRACKER_CONDITIONS = Object.freeze(['unchanged', 'healthy', 'bruised', 'wounded', 'badly_wounded', 'critical', 'dead']);
@@ -532,9 +532,10 @@ function buildSemanticPreflightSchema() {
     const trackerNpcDeltaSchema = {
         type: 'object',
         additionalProperties: false,
-        required: ['NPC', 'condition', ...TRACKER_NPC_DELTA_FIELDS],
+        required: ['NPC', 'personalitySummary', 'condition', ...TRACKER_NPC_DELTA_FIELDS],
         properties: {
             NPC: { type: 'string' },
+            personalitySummary: { type: 'string' },
             condition: { type: 'string', enum: TRACKER_CONDITIONS },
             woundsAdd: stringListSchema,
             woundsRemove: stringListSchema,
@@ -616,10 +617,10 @@ function buildSemanticPreflightSchema() {
                 required: [
                     'identifyGoal',
                     'identifyChallenge',
-                    'intimacyAdvance',
                     'explicitMeans',
                     'identifyTargets',
-                    'checkIntimacyGate',
+                    'intimacyAdvanceExplicit',
+                    'boundaryViolationExplicit',
                     'hasStakes',
                     'actionCount',
                     'mapStats',
@@ -631,7 +632,6 @@ function buildSemanticPreflightSchema() {
                 properties: {
                     identifyGoal: { type: 'string' },
                     identifyChallenge: { type: 'string' },
-                    intimacyAdvance: { type: 'string', enum: ['none', 'physical', 'verbal'] },
                     explicitMeans: { type: 'string' },
                     identifyTargets: {
                         type: 'object',
@@ -652,7 +652,8 @@ function buildSemanticPreflightSchema() {
                             HarmedObservers: stringListSchema,
                         },
                     },
-                    checkIntimacyGate: { type: 'boolean' },
+                    intimacyAdvanceExplicit: { type: 'boolean' },
+                    boundaryViolationExplicit: { type: 'boolean' },
                     hasStakes: { type: 'boolean' },
                     actionCount: stringListSchema,
                     mapStats: {
@@ -898,14 +899,18 @@ const COMPACT_LEDGER_CONTRACT = [
     '- RelationshipEngine[index].slowBondEvidence is scene-local semantic evidence for slow B3-to-B4 trust growth. Mark only categories explicitly shown in the latest scene/current immediate context. respectfulContact=welcome/respectful physical contact or physical help; cooperation=constructive cooperation toward a shared purpose; comfortInProximity=NPC remains or settles close without fear, duty, coercion, or forced circumstance; boundaryRespect={{user}} respects refusal, hesitation, privacy, space, limits, consent, or a stated boundary; sharedRoutine=repeated or mundane togetherness such as eating/traveling/working/resting/training/tending camp; playfulness=mutual light teasing, joking, banter, or relaxed warmth; teamwork=coordinated effort under pressure/danger/conflict/crisis; personalAttention=specific attention to NPC needs, preferences, wellbeing, vulnerability, history, comfort, or concerns. blockers include coercion, intimidation, betrayal, humiliation, unwanted intimacy pressure, boundary violation, unresolved harm, exploitation, active fear, active hostility, or trapped/dependent/powerless circumstances that make closeness unsafe to count.',
     '- RelationshipEngine[index].timeLapseExplicit is strict and unambiguous. Return Y only if the user input clearly establishes that the scene has advanced across at least one night or into a new calendar day. This includes explicit or strongly implied new-day/overnight framing such as "next day", "next morning", "the following morning/day", "the next evening", "overnight", "after sleeping", "when I woke up", "morning came", "the sun rose again", any clear overnight sleep plus wake-up, or a major time-skip that crosses days such as "two days later" or "a week later". Return N for all intra-day or same-day time progression, even if hours have passed: "a few hours later", "later that day/afternoon/evening", "that evening", "after dinner/lunch", "once it got dark", "several hours passed", "some time later" while still the same day, or any later framing that does not cross overnight or into a new day. Return N for future-tense plans, intentions, promises, brief pauses, momentary silence, or same-scene continuation.',
     '- ResolutionEngine.activeHostileThreat is strict. Return Y only if the current scene contains an immediate hostile danger from an NPC/entity: attacking, charging, preparing to attack, pursuing, ambushing, threatening violence, monster/hostile creature engagement, armed standoff, capture attempt, or imminent physical/supernatural harm. Return N for negotiation, refusal, bargaining, argument, social resistance, authority denial, suspicion, rivalry, nonviolent obstruction, or ordinary OppTargets.NPC without immediate danger.',
+    '- ResolutionEngine.intimacyAdvanceExplicit is strict. Return Y only if {{user}} explicitly attempts, requests, accepts, or reciprocates actual intimate escalation with a specific NPC: kissing, making out, sexual touch, undressing toward intimacy, asking to sleep together, asking for sex, moving to bed, or clearly initiating romantic/sexual physical closeness. Return Y for accepting or reciprocating a prior explicit NPC-initiated intimacy invitation or action. Return N for flirting, teasing, compliments, romantic banter, suggestive jokes, vague innuendo, "what did you have in mind", declarations of love, asking for a date, emotional confession, hand-holding, casual proximity, or ordinary affection that does not clearly escalate into kissing or sexual/intimate contact. This is only an intimacy permission/boundary signal and does not create stakes, rolls, landed actions, Bond loss, Fear, or Hostility by itself.',
+    '- ResolutionEngine.boundaryViolationExplicit is strict. Return Y only if the current user input explicitly violates, ignores, or pressures past a clear refusal, stated boundary, withdrawal, fear, incapacitation, explicitly established lack of consent, or prior denial from this specific NPC. Return Y for coercion, threats, force, unwanted restraint/contact after refusal, repeated pressure after refusal, humiliation, blackmail, or ignoring a clear stop/no. Return N for flirting, teasing, romantic talk, asking permission, accepting or reciprocating NPC-initiated flirtation/intimacy, backing off/respecting a boundary, or ordinary romantic/sexual ambiguity where no refusal/boundary/incapacity has been explicitly established.',
     '- All genStats groups must include Rank, MainStat, PHY, MND, CHA.',
     '- InjuryEffectEngine is semantic-only candidate extraction for effects the user action would cause if deterministic mechanics say the action lands. It does not roll and does not decide success. Include physical injuries and impairing magical/status effects regardless of source: burns, poison, paralysis, sickness, blindness, fear/panic, restraint, curses, lightning/electrical effects, exhaustion, mental effects, or other ongoing impairing states. Exclude purely emotional/social harm, mere witnessing, momentary pain, intended/requested future injuries, or effects that would not persist or impair later action.',
     '- InjuryEffectEngine target must be the entity actually receiving the impairing effect. HarmedObservers may appear only if they are directly affected by the injury/status effect, not merely emotionally harmed by seeing or caring about another target. Use persistence=lasting and affectsAction=Y only for effects that should impair later action if applied.',
-    '- TrackerUpdateEngine is explicit-only visual state tracking. Output deltas only from the latest user input and immediate visible context. Use condition=unchanged and (none) lists unless a change is explicitly stated.',
+    '- TrackerUpdateEngine is explicit-only visual state tracking. Output deltas only from the latest user input and immediate visible context. Use condition=unchanged, personalitySummary=unchanged, and (none) lists unless a change is explicitly stated.',
     '- TrackerUpdateEngine must never rewrite full inventories, gear, wounds, status, tasks, or commitments from silence. Add only explicit new items/effects/tasks. Remove only explicit dropped/spent/used-up/lost/completed/canceled/failed/abandoned entries. Remove wounds/status only when the text explicitly says the injury or status is healed, cured, recovered, restored, regenerated, magically healed, knitted closed, gone, or no longer impairing.',
     '- TrackerUpdateEngine must not treat a requested, intended, commanded, allowed, promised, predicted, or pending attempted action as an established wound/status/condition change. "I tell him to hit my arm hard enough to bruise it", "I stab him", or "I let the blow land" is not woundsAdd/statusAdd/condition by itself. "My arm is already bruised", "his arm is bleeding", or "I am poisoned" is.',
     '- TrackerUpdateEngine must track only current lasting injuries/status. Do not track momentary pain, impact, a hit landing, being knocked back/down, being winded, losing breath, flinching, staggering, or temporary shock unless the text explicitly establishes an ongoing bruise, cut, bleeding, sprain, break, fracture, poison, sickness, restraint, exhaustion, unconsciousness, or similar continuing state.',
-    '- TrackerUpdateEngine NPC entries are only for NPCs with explicit condition, wound, status, or visible gear changes in this turn. NPC inventory is not tracked. If none, output TrackerUpdateEngine.NPC.count=0 and no NPC[index] lines.',
+    '- TrackerUpdateEngine NPC personalitySummary is optional stable personality memory. Use a concise 8-20 word phrase only when the scene clearly reveals enduring traits or interaction style for that NPC. Do not write mood, temporary emotion, injuries, relationship state, attraction, fear/hostility level, or what happened this turn. If no stable trait is clear, use unchanged.',
+    '- If TrackerUpdateEngine.NPC.count > 0, every NPC[index] entry must include NPC, personalitySummary, condition, woundsAdd, woundsRemove, statusAdd, statusRemove, gearAdd, and gearRemove.',
+    '- TrackerUpdateEngine NPC entries are only for NPCs with explicit condition, wound, status, visible gear, or stable personalitySummary changes in this turn. NPC inventory is not tracked. If none, output TrackerUpdateEngine.NPC.count=0 and no NPC[index] lines.',
     '- Do not output primaryOppTarget or primaryOpposition. The only opposing living target list is identifyTargets.OppTargets.NPC.',
     '- If you cannot find explicit evidence, use the engine default for that line; never invent missing facts.',
 ].join('\n');
@@ -918,14 +923,14 @@ engineContext.getUserCoreStats.MND=1
 engineContext.getUserCoreStats.CHA=1
 ResolutionEngine.identifyGoal=Normal_Interaction
 ResolutionEngine.identifyChallenge=Normal_Interaction
-ResolutionEngine.intimacyAdvance=none
 ResolutionEngine.explicitMeans=(none)
 ResolutionEngine.identifyTargets.ActionTargets=(none)
 ResolutionEngine.identifyTargets.OppTargets.NPC=(none)
 ResolutionEngine.identifyTargets.OppTargets.ENV=(none)
 ResolutionEngine.identifyTargets.BenefitedObservers=(none)
 ResolutionEngine.identifyTargets.HarmedObservers=(none)
-ResolutionEngine.checkIntimacyGate=N
+ResolutionEngine.intimacyAdvanceExplicit=N
+ResolutionEngine.boundaryViolationExplicit=N
 ResolutionEngine.hasStakes=N
 ResolutionEngine.actionCount=a1
 ResolutionEngine.mapStats.USER=PHY
@@ -973,6 +978,8 @@ const POST_REPLY_TRACKER_CONTRACT = [
     '- This pass is tracker-only. Do not resolve mechanics, relationship, rolls, names, proactivity, or outcomes.',
     '- Use semantic reading, not keyword matching. Identify who is affected, what changed, and whether the change persists beyond the instant of narration.',
     '- Do not infer hidden consequences. Do not add momentary pain, effort, hesitation, fear, impact, or flavor as wounds/status.',
+    '- NPC personalitySummary is stable personality memory only: a concise 8-20 word phrase for enduring temperament, values, manner, or interaction style revealed by the narration.',
+    '- Do not use personalitySummary for current mood, attraction, relationship state, fear/hostility, wounds, status, gear, temporary reactions, or this-turn events. Use unchanged unless a stable trait is clear.',
     '- Add wounds/status only when the prose establishes an actual ongoing injury, ailment, restraint, impairment, or continuing condition. This includes any body part, organ, sense, mental function, magic/poison/disease effect, or status that would continue to affect later action.',
     '- A hit, blow, impact, fall, shove, knockdown, stagger, flinch, gasp, pain spike, breath loss, being winded, or "the wind is knocked out" is not a tracked wound/status by itself.',
     '- Track rib/chest/torso effects only if the narration explicitly establishes a lasting injury or continuing status such as bruised ribs, cracked rib, broken rib, bleeding, ongoing breathing trouble, or unconsciousness.',
@@ -984,7 +991,8 @@ const POST_REPLY_TRACKER_CONTRACT = [
     '- Remove wounds/status only when the prose explicitly says the injury/status is healed, cured, recovered, restored, regenerated, magically healed, knitted closed, gone, or no longer impairing. Bandaging, splinting, dressing, cleaning, stitching, stabilizing, normal care, or starting treatment does NOT remove injuries unless the prose also says the injury/status is gone, healed, cured, fully recovered, or no longer impairing.',
     '- Never rewrite full tracker lists. Return deltas only.',
     '- Use condition=unchanged unless the narration explicitly changes overall condition.',
-    '- NPC entries are only for named or currently tracked NPCs with explicit condition, wound, status, or visible gear changes. NPC inventory is not tracked.',
+    '- NPC entries are only for named or currently tracked NPCs with explicit condition, wound, status, visible gear, or stable personalitySummary changes. NPC inventory is not tracked.',
+    '- If TrackerUpdateEngine.NPC.count > 0, every NPC[index] entry must include NPC, personalitySummary, condition, woundsAdd, woundsRemove, statusAdd, statusRemove, gearAdd, and gearRemove.',
     '- If uncertain, output (none).',
     '- Output exactly the compact block. No markdown. No prose. No JSON.',
 ].join('\n');
@@ -1171,29 +1179,30 @@ function buildSemanticContractText(userName, charName, type, trackerSnapshot, pl
         'The semantic/contextual fields you return are authoritative; the deterministic runner should not reinterpret them. ' +
         'hasStakes is contextual and FINAL: return true only when success or failure would materially change stakes under DEF.STAKES; return false for truly no-stakes acts. ' +
         'Living/non-living target separation is mandatory: ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, RelationshipEngine NPC entries, and NPCInScene candidates are living entities only; objects, terrain, hazards, wards, magic effects, rooms, tools, furniture, paths, and obstacles are OppTargets.ENV only. ' +
-        'OppTargets.NPC is only for stakes-bearing living opposition/resistance/contest. If hasStakes=false, OppTargets.NPC must be ["(none)"] unless a hard intimacy gate rule makes stakes true. If a living ActionTarget meaningfully resists/opposes a stakes-bearing action, that same NPC may also appear in OppTargets.NPC. ' +
+        'OppTargets.NPC is only for stakes-bearing living opposition/resistance/contest. If hasStakes=false, OppTargets.NPC must be ["(none)"]. If a living ActionTarget meaningfully resists/opposes a stakes-bearing action, that same NPC may also appear in OppTargets.NPC. ' +
         'BenefitedObservers and HarmedObservers are living entities present in scene who are NOT already in ActionTargets or OppTargets.NPC. Do not put a direct target or opposing NPC in observer lists. ' +
         'Create one relationshipEngine entry for each living NPC in ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, or otherwise directly interacted with or materially affected by the last user input. ' +
-        'For each living NPC in relationshipEngine, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. For denied intimacy advances toward a direct/opposing NPC target, successful or landed outcomes worsen that NPC boundary/autonomy/trust stakes, so use harm and not none. ' +
+        'For each living NPC in relationshipEngine, stakeChangeByOutcome must describe that NPC stakes change for each outcome: benefit means their stakes improve, harm means their stakes worsen, none means no meaningful stake change. For explicit boundary violations toward a direct/opposing NPC target, successful or landed outcomes worsen that NPC boundary/autonomy/trust stakes, so use harm and not none. ' +
         'If a named NPC is a primary target and tracker currentCoreStats are missing, generate that NPC core stat block from explicit portrayal and copy the same block into ResolutionEngine genStats and the matching RelationshipEngine genStats. ' +
         'Do not leave a named portrayed NPC as Rank none or 1/1/1 unless the card, scene, and tracker give no explicit portrayal at all. ' +
         'Mandatory engine execution order for this semantic pass: read the Engine reference above, then execute only the semantic/contextual portions of the engines. ' +
-        'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, activeHostileThreat, classifyPhysicalBoundaryPressure, checkIntimacyGate context, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
+        'Execute ResolutionEngine(input) semantic functions in order: identifyGoal, identifyChallenge, identifyTargets, classifyHostilePhysicalIntent, activeHostileThreat, classifyPhysicalBoundaryPressure, intimacyAdvanceExplicit, boundaryViolationExplicit, hasStakes, actionCount, mapStats, getUserCoreStats, getCurrentCoreStats/genStats. Copy those outputs into the ResolutionEngine lines using the exact function/key names shown in the template. ' +
         'Do NOT execute ResolutionEngine.resolveOutcome, dice, margins, landed actions, or counter potential; deterministic code handles those after your ledger. ' +
         'Execute RelationshipEngine(npc, resolutionPacket) semantic functions in order for each relevant living NPC: relevant/current state context, initPreset flags, timeLapseExplicit, auditInteraction/stakeChangeByOutcome, route context flags, checkThreshold override flags, establishedRelationship, slowBondEvidence, genStats. Copy those outputs into the RelationshipEngine[index] lines using the exact function/key names shown in the template. ' +
         'Execute InjuryEffectEngine after ResolutionEngine and RelationshipEngine: identify only actual injury/status-effect candidates that the user action would cause if it lands. The semantic pass decides target, effectType, affected body/function, persistence, and whether it affects action from context; deterministic mechanics later decide whether it lands and the final impairment severity. Source does not matter: physical attacks, magic, poison, paralysis, fear/panic, restraint, disease, burns, lightning/electrical effects, curses, exhaustion, mental status, and other ongoing impairing effects all qualify when they would impair later action. Mere emotional/social harm, witnessing harm to someone else, fear as ordinary emotion without an impairing status, momentary pain, impact, knockdown, or a requested/intended future injury does not qualify. ' +
         'Then fill CHAOS_INTERRUPT.sceneSummary, NameGenerationEngine semantic lines, and NPCProactivityEngine.cap from their engine/contextual requirements. ' +
         'Execute TrackerUpdateEngine as explicit-only persistent tracker deltas after RelationshipEngine. TrackerUpdateEngine is for display/state memory only, not outcome resolution. ' +
-        'TrackerUpdateEngine.User records only explicit changes to the player condition, wounds, status effects, gear, inventory, tasks, and commitments. TrackerUpdateEngine.NPC records only explicit changes to tracked or directly affected NPC condition, wounds, status effects, and visible gear. NPC inventory is not tracked. ' +
+        'TrackerUpdateEngine.User records only explicit changes to the player condition, wounds, status effects, gear, inventory, tasks, and commitments. TrackerUpdateEngine.NPC records only explicit changes to tracked or directly affected NPC condition, wounds, status effects, visible gear, and concise stable personality summaries. NPC inventory is not tracked. ' +
         'Use condition=unchanged unless the latest user input or immediate visible context explicitly establishes a completed/current health state as healthy, bruised, wounded, badly_wounded, critical, or dead. Do not set condition from a desired/requested future injury or from an attempted action before narration confirms the result. ' +
         'Use Add only for explicit gains/new injuries/new effects/new obligations. Use Remove only for explicit dropping, spending, losing, completing, canceling, failing, or abandoning. Remove wounds/status only when the text explicitly says the injury or status is healed, cured, recovered, restored, regenerated, magically healed, knitted closed, gone, or no longer impairing. Bandaging, splinting, dressing, cleaning, stitching, stabilizing, normal care, or starting treatment does not remove injuries unless the text also says the injury/status is gone, healed, cured, fully recovered, or no longer impairing. Never infer unchanged lists from silence and never output a full replacement list. ' +
         'Do not mark wounds/status/condition from requested, intended, commanded, allowed, promised, predicted, or pending attempted actions before deterministic resolution; only track state already explicit as current/completed in context. ' +
         'Do not track momentary pain, impact, knockdown, stagger, breath loss, winded reaction, or temporary shock as wounds/status/condition unless an ongoing injury or continuing status is explicitly stated. ' +
+        'For NPC personalitySummary, write only a short stable trait summary when explicit card/context or the scene clearly reveals enduring temperament or interaction style; otherwise leave unchanged. Do not summarize mood, attraction, relationship score, fear/hostility, injuries, or temporary reactions. ' +
         'For NameGenerationEngine, classify only whether a distinct unnamed person/entity or location needs a proper name in the upcoming response, whether a proper name is already explicit, whether it is a location, and a short 3-letter seed hint if explicit context suggests one. The seed is hidden entropy only and will not be forced into the visible name. The deterministic code generates the final name. Always return NameGenerationEngine.generatedName=(none); do not invent names in the semantic ledger. ' +
         'For unfinished naming cues such as "his name is...", "her name is...", "they call him...", "called...", "known as...", or "the place is called...", set NameGenerationEngine.nameRequired=Y even if the semantic context otherwise seems complete; provide a seed from the role/place word when available. ' +
         'Tie rule override: exact roll ties are cinematic stalemates/struggles, not defender wins; include stakeChangeByOutcome.struggle accordingly. ' +
         'Do not use deterministic outcomes, dice, or guesses to change semantic stakes. ' +
-        'Important classification reminders: Asking/proposing/requesting/questioning explicit intimacy is IntimacyAdvanceVerbal. "Will you kiss me?", "Can I kiss you?", and asking an NPC to kiss/touch/hold {{user}} are verbal unless {{user}} also attempts physical contact in the same input. IntimacyAdvancePhysical requires attempted physical sexual/intimate contact initiated by {{user}} toward a specific NPC. A declaration of love, flirting, compliments, teasing, affectionate tone, or non-explicit romantic/social behavior is not an intimacy advance. identifyChallenge is the explicit stakes-bearing action/challenge; ignore incidental gestures, setup, delivery method, movement, or flavor unless that act itself carries stakes. classifyHostilePhysicalIntent is true only for direct bodily aggression/control against a living entity: attack, assault, strike, shove, tackle, choke, cut, stab, injure, twist/hurt/crush a grabbed body part, violent restraint, pin, immobilization, dragging/forced movement, physical domination, blocking escape with bodily force, or preventing casting/action with bodily force. A grab/catch/hold is hostilePhysicalIntent only when it explicitly includes harm, attack, violent restraint, pinning, dragging, forced movement, twisting/crushing, choking, domination, or preventing bodily action by force. classifyHostilePhysicalIntent is false for grabbing/catching/holding an NPC wrist, arm, shoulder, sleeve, cloak, or clothing only to stop/delay/get attention/block departure/contest immediate movement unless explicit harm, attack, violent restraint, pinning, dragging, forced movement, twisting/crushing, choking, domination, or bodily injury is also stated. It is false for taking/grabbing/pulling/snatching/opening/moving/contesting an object, possession, access point, path, or space unless {{user}} also attacks, harms, violently restrains, pins, shoves, drags, or controls the NPC body. activeHostileThreat is true only for immediate hostile danger from an NPC/entity: attacking, charging, preparing to attack, pursuing, ambushing, threatening violence, monster/hostile creature engagement, armed standoff, capture attempt, or imminent physical/supernatural harm. It is false for negotiation, refusal, bargaining, argument, social resistance, authority denial, suspicion, rivalry, nonviolent obstruction, or ordinary OppTargets.NPC without immediate danger. classifyPhysicalBoundaryPressure is true for stakes-bearing forceful object/possession/space/access/departure/body-adjacent boundary contests against a resisting NPC when classifyHostilePhysicalIntent is false; catching or holding an NPC wrist/arm/sleeve only to stop them leaving or force attention is boundary pressure, not combat. Boundary pressure does not create multi-action combat impact, CounterPotential, or H4 by itself. initPreset.activeEnemy is true only when the NPC is explicitly actively hostile to {{user}} now: attacking, ambushing, robbing, hunting, threatening, capturing, fighting, or intentionally obstructing with hostile intent. Archetype or label alone, such as bandit/criminal/enemy soldier/orc/monster, is not activeEnemy without explicit active hostile intent. For intimacy advances toward a named NPC, put that NPC in ActionTargets; if they resist, contest, oppose, or consent-gate the advance, also put that same NPC in OppTargets.NPC. If IntimacyConsent=false/IntimacyGate=DENY, successful or landed intimacy outcomes for that target worsen boundary/autonomy/trust stakes; stakeChangeByOutcome for success/dominant_impact/solid_impact/light_impact must be harm, not none. Denied verbal intimacy may increase Hostility but cannot create H4; H4 is reserved for activeEnemy or hostilePhysicalIntent. ActionTargets and observers must be living entities only; non-living obstacles/objects/hazards/effects go only in OppTargets.ENV. OppTargets.NPC requires stakes-bearing living opposition; no-stakes social attention, casual banter, compliments, or flavor actions should keep the NPC as ActionTarget only. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. A protected/rescued NPC is a BenefitedObserver unless {{user}} directly acts on that NPC. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure of the final goal or explicit challenge materially affects safety, harm, danger, detection, material gain/loss, significant status/authority/trust, autonomy/physical freedom, hostile restraint/immobilization/confinement, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. For mapStats, map the stat from the final goal or explicit challenge that carries stakes, not incidental gestures, flavor, delivery method, or setup. Denied/opposed IntimacyAdvancePhysical is USER=PHY and OPP=PHY even when the approach includes romantic, seductive, verbal, or social framing. Positive social opposition such as persuasion, negotiation, diplomacy, bargaining, reassurance, reconciliation, or good-faith appeal against a living opposing target is USER=CHA and OPP=CHA; negative social opposition such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target is USER=CHA and OPP=MND. Body-affecting magic against a living target (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding) is USER=MND and OPP=PHY; non-living hazards/effects remain OppTargets.ENV and OPP=ENV unless a living target explicitly resists. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit only if that outcome significantly and concretely improves their stakes; harm if it materially worsens their stakes; otherwise none. Do not mark benefit for compliments, flirting, mood improvement, politeness, ordinary conversation, user self-advancement, successful negotiation for the user, choosing not to harm the NPC, failing to harm the NPC, de-escalation without a concrete NPC gain, or the NPC merely surviving/remaining safe.\n\n' +
+        'Important classification reminders: Romantic, flirtatious, affectionate, suggestive, sexual, or intimate conversation/contact is not a special roll category and does not create stakes by itself. intimacyAdvanceExplicit is strict permission/boundary classification for actual intimate escalation only: mark it true for explicit kissing, sexual touch, undressing toward intimacy, asking to sleep together/have sex, or accepting a prior explicit NPC intimacy invitation; keep it false for flirting, teasing, vague innuendo, compliments, declarations of love, dates, hand-holding, ordinary affection, or "what did you have in mind" style banter. Asking permission, teasing, flirting, declarations of love, reciprocating NPC-initiated flirtation/intimacy, kissing, embracing, or making an intimate proposal should be ordinary no-roll scene behavior unless ordinary DEF.STAKES applies for another reason. boundaryViolationExplicit is the romance/boundary trigger for mechanics: mark it true only for clear coercion, threats, force, unwanted contact/restraint after refusal, repeated pressure after refusal, humiliation, blackmail, or ignoring a clear stop/no; do not mark it true for uncertainty or ordinary romantic/sexual ambiguity. identifyChallenge is the explicit stakes-bearing action/challenge; ignore incidental gestures, setup, delivery method, movement, or flavor unless that act itself carries stakes. classifyHostilePhysicalIntent is true only for direct bodily aggression/control against a living entity: attack, assault, strike, shove, tackle, choke, cut, stab, injure, twist/hurt/crush a grabbed body part, violent restraint, pin, immobilization, dragging/forced movement, physical domination, blocking escape with bodily force, or preventing casting/action with bodily force. A grab/catch/hold is hostilePhysicalIntent only when it explicitly includes harm, attack, violent restraint, pinning, dragging, forced movement, twisting/crushing, choking, domination, or preventing bodily action by force. classifyHostilePhysicalIntent is false for grabbing/catching/holding an NPC wrist, arm, shoulder, sleeve, cloak, or clothing only to stop/delay/get attention/block departure/contest immediate movement unless explicit harm, attack, violent restraint, pinning, dragging, forced movement, twisting/crushing, choking, domination, or bodily injury is also stated. It is false for taking/grabbing/pulling/snatching/opening/moving/contesting an object, possession, access point, path, or space unless {{user}} also attacks, harms, violently restrains, pins, shoves, drags, or controls the NPC body. activeHostileThreat is true only for immediate hostile danger from an NPC/entity: attacking, charging, preparing to attack, pursuing, ambushing, threatening violence, monster/hostile creature engagement, armed standoff, capture attempt, or imminent physical/supernatural harm. It is false for negotiation, refusal, bargaining, argument, social resistance, authority denial, suspicion, rivalry, nonviolent obstruction, or ordinary OppTargets.NPC without immediate danger. classifyPhysicalBoundaryPressure is true for stakes-bearing forceful object/possession/space/access/departure/body-adjacent boundary contests against a resisting NPC when classifyHostilePhysicalIntent is false; catching or holding an NPC wrist/arm/sleeve only to stop them leaving or force attention is boundary pressure, not combat. Boundary pressure does not create multi-action combat impact, CounterPotential, or H4 by itself. initPreset.activeEnemy is true only when the NPC is explicitly actively hostile to {{user}} now: attacking, ambushing, robbing, hunting, threatening, capturing, fighting, or intentionally obstructing with hostile intent. Archetype or label alone, such as bandit/criminal/enemy soldier/orc/monster, is not activeEnemy without explicit active hostile intent. ActionTargets and observers must be living entities only; non-living obstacles/objects/hazards/effects go only in OppTargets.ENV. OppTargets.NPC requires stakes-bearing living opposition; no-stakes social attention, casual banter, compliments, or flavor actions should keep the NPC as ActionTarget only. BenefitedObservers and HarmedObservers must exclude direct ActionTargets and OppTargets.NPC; a complimented NPC is an ActionTarget, not a BenefitedObserver. A protected/rescued NPC is a BenefitedObserver unless {{user}} directly acts on that NPC. For hasStakes, apply DEF.STAKES directly and contextually: if success/failure of the final goal or explicit challenge materially affects safety, harm, danger, detection, material gain/loss, significant status/authority/trust, autonomy/physical freedom, hostile restraint/immobilization/confinement, obstacle resolution, or explicit goal advancement/failure for {{user}} or a living entity, return true; if success/failure would not materially change outcome, return false. Minor mood, flavor, casual rudeness, weak preference, or trivial convenience alone is not stakes. For mapStats, map the stat from the final goal or explicit challenge that carries stakes, not incidental gestures, flavor, delivery method, or setup. Positive social opposition such as persuasion, negotiation, diplomacy, bargaining, reassurance, reconciliation, or good-faith appeal against a living opposing target is USER=CHA and OPP=CHA; negative social opposition such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target is USER=CHA and OPP=MND. Body-affecting magic against a living target (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding) is USER=MND and OPP=PHY; non-living hazards/effects remain OppTargets.ENV and OPP=ENV unless a living target explicitly resists. For each living NPC, mark stakeChangeByOutcome for each possible outcome strictly by DEF.STAKES: benefit only if that outcome significantly and concretely improves their stakes; harm if it materially worsens their stakes; otherwise none. Do not mark benefit for compliments, flirting, mood improvement, politeness, ordinary conversation, user self-advancement, successful negotiation for the user, choosing not to harm the NPC, failing to harm the NPC, de-escalation without a concrete NPC gain, or the NPC merely surviving/remaining safe.\n\n' +
         COMPACT_LEDGER_CONTRACT;
 }
 
@@ -1414,7 +1423,6 @@ function validateRawLedgerContract(ledger, raw) {
     if (!ledger?.resolutionEngine) missing.push('resolutionEngine');
     if (!ledger?.resolutionEngine?.identifyGoal) missing.push('resolutionEngine.identifyGoal');
     if (!ledger?.resolutionEngine?.identifyChallenge) missing.push('resolutionEngine.identifyChallenge');
-    if (!['none', 'physical', 'verbal'].includes(ledger?.resolutionEngine?.intimacyAdvance)) missing.push('resolutionEngine.intimacyAdvance');
     if (!ledger?.resolutionEngine?.identifyTargets) missing.push('resolutionEngine.identifyTargets');
     if (!Array.isArray(ledger?.resolutionEngine?.identifyTargets?.ActionTargets)) missing.push('resolutionEngine.identifyTargets.ActionTargets');
     if (!Array.isArray(ledger?.resolutionEngine?.identifyTargets?.OppTargets?.NPC)) missing.push('resolutionEngine.identifyTargets.OppTargets.NPC');
@@ -1491,14 +1499,14 @@ function parseCompactLedger(text, trackerSnapshot) {
         'engineContext.getUserCoreStats.CHA',
         'ResolutionEngine.identifyGoal',
         'ResolutionEngine.identifyChallenge',
-        'ResolutionEngine.intimacyAdvance',
         'ResolutionEngine.explicitMeans',
         'ResolutionEngine.identifyTargets.ActionTargets',
         'ResolutionEngine.identifyTargets.OppTargets.NPC',
         'ResolutionEngine.identifyTargets.OppTargets.ENV',
         'ResolutionEngine.identifyTargets.BenefitedObservers',
         'ResolutionEngine.identifyTargets.HarmedObservers',
-        'ResolutionEngine.checkIntimacyGate',
+        'ResolutionEngine.intimacyAdvanceExplicit',
+        'ResolutionEngine.boundaryViolationExplicit',
         'ResolutionEngine.hasStakes',
         'ResolutionEngine.actionCount',
         'ResolutionEngine.mapStats.USER',
@@ -1547,6 +1555,7 @@ function parseCompactLedger(text, trackerSnapshot) {
         const prefix = `TrackerUpdateEngine.NPC[${index}]`;
         const trackerRequired = [
             `${prefix}.NPC`,
+            `${prefix}.personalitySummary`,
             `${prefix}.condition`,
             `${prefix}.woundsAdd`,
             `${prefix}.woundsRemove`,
@@ -1682,7 +1691,6 @@ function parseCompactLedger(text, trackerSnapshot) {
     const resolutionEngine = {
         identifyGoal: cleanScalar(fields.get('ResolutionEngine.identifyGoal')) || 'Normal_Interaction',
         identifyChallenge: cleanScalar(fields.get('ResolutionEngine.identifyChallenge')) || cleanScalar(fields.get('ResolutionEngine.identifyGoal')) || 'Normal_Interaction',
-        intimacyAdvance: normalizeIntimacyAdvance(fields.get('ResolutionEngine.intimacyAdvance')),
         explicitMeans: cleanScalar(fields.get('ResolutionEngine.explicitMeans')) || '(none)',
         identifyTargets: {
             ActionTargets: readList(fields, 'ResolutionEngine.identifyTargets.ActionTargets'),
@@ -1693,7 +1701,8 @@ function parseCompactLedger(text, trackerSnapshot) {
             BenefitedObservers: readList(fields, 'ResolutionEngine.identifyTargets.BenefitedObservers'),
             HarmedObservers: readList(fields, 'ResolutionEngine.identifyTargets.HarmedObservers'),
         },
-        checkIntimacyGate: readBoolean(fields, 'ResolutionEngine.checkIntimacyGate', false),
+        intimacyAdvanceExplicit: readBoolean(fields, 'ResolutionEngine.intimacyAdvanceExplicit', false),
+        boundaryViolationExplicit: readBoolean(fields, 'ResolutionEngine.boundaryViolationExplicit', false),
         hasStakes: readBoolean(fields, 'ResolutionEngine.hasStakes', false),
         actionCount: readList(fields, 'ResolutionEngine.actionCount', ['a1']),
         mapStats: {
@@ -1748,6 +1757,7 @@ function parseCompactLedger(text, trackerSnapshot) {
         if (!npc || isNoneValue(npc)) continue;
         trackerUpdateEngine.npcs.push({
             NPC: npc,
+            personalitySummary: normalizePersonalitySummary(fields.get(`${prefix}.personalitySummary`)),
             condition: normalizeTrackerDeltaCondition(fields.get(`${prefix}.condition`)),
             woundsAdd: readList(fields, `${prefix}.woundsAdd`),
             woundsRemove: readList(fields, `${prefix}.woundsRemove`),
@@ -1858,6 +1868,7 @@ function parsePostReplyTrackerText(text) {
         if (!npc || isNoneValue(npc)) continue;
         npcs.push({
             NPC: npc,
+            personalitySummary: normalizePersonalitySummary(fields.get(`${prefix}.personalitySummary`)),
             condition: normalizeTrackerDeltaCondition(fields.get(`${prefix}.condition`)),
             woundsAdd: readList(fields, `${prefix}.woundsAdd`),
             woundsRemove: readList(fields, `${prefix}.woundsRemove`),
@@ -1887,6 +1898,7 @@ function sanitizePostReplyTrackerDelta(delta, narration) {
         && (
             normalizeTrackerDeltaCondition(item.condition) !== 'unchanged'
             || TRACKER_NPC_DELTA_FIELDS.some(field => Array.isArray(item[field]) && item[field].length)
+            || normalizePersonalitySummary(item.personalitySummary)
         ));
     return cleanDelta;
 }
@@ -1903,6 +1915,7 @@ function sanitizePostReplyActorDelta(delta, narration, actorName = '') {
     const sanitizedCondition = sanitizePostReplyCondition(condition, narration, actorName, actorHasPersistentDelta, actorHasConditionEvidence);
     return {
         ...source,
+        personalitySummary: normalizePersonalitySummary(source.personalitySummary),
         condition: sanitizedCondition,
         woundsAdd: sanitizedWoundsAdd,
         statusAdd: sanitizedStatusAdd,
@@ -2100,7 +2113,6 @@ function trackerSnapshotToLedgerEntries(trackerSnapshot) {
             ? `B${entry.currentDisposition.B}/F${entry.currentDisposition.F}/H${entry.currentDisposition.H}`
             : null,
         currentRapport: Number(entry?.currentRapport ?? 0),
-        intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(entry?.intimacyGate) ? entry.intimacyGate : 'SKIP',
         establishedRelationship: entry?.establishedRelationship === 'Y' ? 'Y' : 'N',
         slowBondEvidence: entry?.slowBondEvidence || {},
         currentCoreStats: entry?.currentCoreStats
@@ -2208,11 +2220,6 @@ function normalizeStakeChangeValue(value) {
     return ['benefit', 'harm', 'none'].includes(text) ? text : 'none';
 }
 
-function normalizeIntimacyAdvance(value) {
-    const text = cleanScalar(value).toLowerCase();
-    return ['physical', 'verbal', 'none'].includes(text) ? text : 'none';
-}
-
 function normalizeRomanceStyle(value) {
     const text = cleanScalar(value).toLowerCase();
     return ['auto', 'nervous', 'flirt'].includes(text) ? text : 'auto';
@@ -2272,10 +2279,17 @@ function normalizeTrackerDeltaList(value) {
     return value.map(cleanScalar).filter(item => item && !isNoneValue(item) && item.toLowerCase() !== 'unchanged').slice(0, 20);
 }
 
+function normalizePersonalitySummary(value) {
+    const text = cleanScalar(value).replace(/\s+/g, ' ').trim();
+    if (!text || isNoneValue(text) || ['unknown', 'unchanged'].includes(text.toLowerCase())) return '';
+    return text.slice(0, 160);
+}
+
 function normalizeTrackerDelta(value, fields) {
     const source = value && typeof value === 'object' ? value : {};
     return {
         condition: normalizeTrackerDeltaCondition(source.condition),
+        personalitySummary: normalizePersonalitySummary(source.personalitySummary),
         ...Object.fromEntries(fields.map(field => [field, normalizeTrackerDeltaList(source[field])])),
     };
 }
@@ -2303,12 +2317,13 @@ function normalizeLedger(ledger) {
     ledger.resolutionEngine = ledger.resolutionEngine || {};
     ledger.resolutionEngine.identifyGoal = ledger.resolutionEngine.identifyGoal || 'Normal_Interaction';
     ledger.resolutionEngine.identifyChallenge = ledger.resolutionEngine.identifyChallenge || ledger.resolutionEngine.explicitMeans || ledger.resolutionEngine.identifyGoal;
-    ledger.resolutionEngine.intimacyAdvance = normalizeIntimacyAdvance(ledger.resolutionEngine.intimacyAdvance);
     ledger.resolutionEngine.identifyTargets = ledger.resolutionEngine.identifyTargets || {};
     ledger.resolutionEngine.identifyTargets.OppTargets = ledger.resolutionEngine.identifyTargets.OppTargets || {};
     ledger.resolutionEngine.actionCount = normalizeActionMarkers(ledger.resolutionEngine.actionCount);
     ledger.resolutionEngine.mapStats = ledger.resolutionEngine.mapStats || {};
     ledger.resolutionEngine.hasStakes = toBoolean(ledger.resolutionEngine.hasStakes, false);
+    ledger.resolutionEngine.intimacyAdvanceExplicit = toBoolean(ledger.resolutionEngine.intimacyAdvanceExplicit, false);
+    ledger.resolutionEngine.boundaryViolationExplicit = toBoolean(ledger.resolutionEngine.boundaryViolationExplicit, false);
     ledger.resolutionEngine.classifyHostilePhysicalIntent = toBoolean(ledger.resolutionEngine.classifyHostilePhysicalIntent, false);
     ledger.resolutionEngine.activeHostileThreat = toBoolean(ledger.resolutionEngine.activeHostileThreat, false);
     ledger.resolutionEngine.classifyPhysicalBoundaryPressure = toBoolean(ledger.resolutionEngine.classifyPhysicalBoundaryPressure, false);
@@ -2390,7 +2405,6 @@ function normalizeTrackerRelevantNPCs(entries) {
                 NPC: npc,
                 currentDisposition: entry?.currentDisposition ?? null,
                 currentRapport: toNumber(entry?.currentRapport, 0),
-                intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(entry?.intimacyGate) ? entry.intimacyGate : 'SKIP',
                 currentCoreStats: normalizeCore(entry?.currentCoreStats),
             };
         })
@@ -2410,7 +2424,6 @@ function validateNormalizedLedger(ledger, raw) {
     if (!ledger.resolutionEngine) missing.push('resolutionEngine');
     if (!ledger.resolutionEngine?.identifyGoal) missing.push('resolutionEngine.identifyGoal');
     if (!ledger.resolutionEngine?.identifyChallenge) missing.push('resolutionEngine.identifyChallenge');
-    if (!['none', 'physical', 'verbal'].includes(ledger.resolutionEngine?.intimacyAdvance)) missing.push('resolutionEngine.intimacyAdvance');
     if (!ledger.resolutionEngine?.identifyTargets) missing.push('resolutionEngine.identifyTargets');
     if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.ActionTargets)) missing.push('resolutionEngine.identifyTargets.ActionTargets');
     if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.OppTargets?.NPC)) missing.push('resolutionEngine.identifyTargets.OppTargets.NPC');
@@ -2418,6 +2431,8 @@ function validateNormalizedLedger(ledger, raw) {
     if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.BenefitedObservers)) missing.push('resolutionEngine.identifyTargets.BenefitedObservers');
     if (!Array.isArray(ledger.resolutionEngine?.identifyTargets?.HarmedObservers)) missing.push('resolutionEngine.identifyTargets.HarmedObservers');
     if (typeof ledger.resolutionEngine?.hasStakes !== 'boolean') missing.push('resolutionEngine.hasStakes:boolean');
+    if (typeof ledger.resolutionEngine?.intimacyAdvanceExplicit !== 'boolean') missing.push('resolutionEngine.intimacyAdvanceExplicit:boolean');
+    if (typeof ledger.resolutionEngine?.boundaryViolationExplicit !== 'boolean') missing.push('resolutionEngine.boundaryViolationExplicit:boolean');
     if (!Array.isArray(ledger.resolutionEngine?.actionCount)) missing.push('resolutionEngine.actionCount');
     if (!ledger.resolutionEngine?.mapStats?.USER) missing.push('resolutionEngine.mapStats.USER');
     if (!ledger.resolutionEngine?.mapStats?.OPP) missing.push('resolutionEngine.mapStats.OPP');

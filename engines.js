@@ -14,11 +14,8 @@ function ResolutionEngine(input) {
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
     finalGoal: return a short, plain description of {{user}}'s finalGoal/intent in the last input
     rule: ignore setup, movement, intermediary steps, and post-action flavor unless they are themselves separate consequential actions
-    rule: if finalGoal is an explicit direct physical sexual or physical intimate advance toward a specific NPC, including {{user}} attempting to kiss, touch, pull close, undress, grope, caress, or otherwise create physical sexual/intimate contact, return IntimacyAdvancePhysical
-    rule: IntimacyAdvancePhysical REQUIRES attempted physical contact initiated by {{user}}. A request for intimacy, question about intimacy, asking permission, asking the NPC to kiss/touch/hold {{user}}, declaration of love, flirtation, compliment, or romantic statement is NOT physical.
-    rule: if finalGoal is an explicit direct verbal sexual or verbal intimate proposition/request toward a specific NPC, return IntimacyAdvanceVerbal
-    rule: IntimacyAdvanceVerbal REQUIRES an explicit request, invitation, proposition, question, permission request, or demand for sexual/intimate activity. "Will you kiss me?", "Can I kiss you?", "May I touch you?", and asking an NPC to kiss/touch/hold {{user}} are verbal unless {{user}} also attempts physical contact in the same input.
-    rule: A declaration of love, flirting, compliments, teasing, affectionate tone, or non-explicit romantic/social behavior is NOT IntimacyAdvanceVerbal.
+    rule: romantic, flirtatious, affectionate, suggestive, sexual, or intimate talk/contact is not a special roll category by itself. Describe the finalGoal plainly without using an intimacy gate label.
+    rule: asking permission, flirting, teasing, reciprocating NPC-initiated flirtation, declarations of love, kisses, embraces, or intimate proposals are ordinary social/scene actions unless the current user input also contains explicit coercion, force, threat, pressure after refusal, or boundary violation.
     rule: otherwise return finalGoal
 
   identifyChallenge(input, finalGoal, context):
@@ -50,6 +47,14 @@ function ResolutionEngine(input) {
     rule: return Y only if the current scene contains an immediate hostile danger from an NPC/entity: attacking, charging, preparing to attack, pursuing, ambushing, threatening violence, monster/hostile creature engagement, armed standoff, capture attempt, or imminent physical/supernatural harm
     rule: return N for negotiation, refusal, bargaining, argument, social resistance, authority denial, suspicion, rivalry, nonviolent obstruction, or ordinary OppTargets.NPC without immediate danger
 
+  intimacyAdvanceExplicit(input, finalGoal, challenge, targets, context):
+    policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
+    rule: return Y only if {{user}} explicitly attempts, requests, accepts, or reciprocates actual intimate escalation with a specific NPC: kissing, making out, sexual touch, undressing toward intimacy, asking to sleep together, asking for sex, moving to bed, or clearly initiating romantic/sexual physical closeness.
+    rule: return Y for accepting or reciprocating a prior explicit NPC-initiated intimacy invitation or action.
+    rule: return N for flirting, teasing, compliments, romantic banter, suggestive jokes, vague innuendo, "what did you have in mind", declarations of love, asking for a date, emotional confession, hand-holding, casual proximity, or ordinary affection that does not clearly escalate into kissing or sexual/intimate contact.
+    rule: this field is only an intimacy permission/boundary signal. It does not create stakes, rolls, landed actions, Bond loss, Fear, or Hostility by itself.
+    else -> N
+
   identifyTargets(input, challenge, finalGoal, context):
     policy: LOCKED, EXPLICIT-ONLY
     ActionTargets = LIVING entities {{user}} directly tries to affect as the main resolution target
@@ -57,23 +62,25 @@ function ResolutionEngine(input) {
     OppTargets.ENV = NON-LIVING environmental or terrain feature, hazard, object, or other obstacle directly obstructing {{user}}'s actions
     BenefitedObservers = THIRD-PARTY LIVING entities present in scene, not ActionTargets and not OppTargets.NPC, whose stakes materially improve as a result of {{user}}'s actions, as per DEF.STAKES. Protective/rescue contact with an ally, shielding them, pulling/pushing them out of danger, or standing between them and harm makes them BenefitedObservers when {{user}} is not contesting their will, harming them, restraining them, or making them the main opposed challenge. Example: {{user}} pushes a woman out of danger and stands between her and a harasser. Harasser = ActionTargets and OppTargets.NPC; woman = BenefitedObservers.
     HarmedObservers = THIRD-PARTY LIVING entities present in scene, not ActionTargets and not OppTargets.NPC, whose stakes materially worsen as a result of {{user}}'s actions, as per DEF.STAKES. This requires an explicit material stake, relationship, duty, protection role, authority role, or similar; mere witnessing alone is not enough. Example: {{user}} hurts an NPC while that NPC's father witnesses it. Hurt NPC = ActionTargets and OppTargets.NPC; witnessing father = HarmedObservers.
-    rule: if hasStakes=N, OppTargets.NPC must be [(none)] unless a hard intimacy gate rule forces stakes
+    rule: if hasStakes=N, OppTargets.NPC must be [(none)]
     rule: a direct ActionTarget can also be OppTargets.NPC only when that target's stakes are meaningfully contested or resisted
     rule: protective/rescue movement of an ally does not make that ally ActionTargets unless {{user}} contests their will, harms them, restrains them, or makes them the main opposed challenge
     rule: ActionTargets, OppTargets.NPC, BenefitedObservers, and HarmedObservers are mutually exclusive observer categories except that direct ActionTargets may also be OppTargets.NPC when they are the resisting/opposing party
     rule: if any target list is not present, return [(none)]
     return {ActionTargets, OppTargets, BenefitedObservers, HarmedObservers}
 
-  checkIntimacyGate(finalGoal, targets, context):
-    policy: LOCKED, EXPLICIT-ONLY
-    rule: if finalGoal=IntimacyAdvancePhysical or finalGoal=IntimacyAdvanceVerbal, read exact target NPC entry in latest sceneTracker
-    rule: return Y only if current explicit RelationshipEngine checkThreshold would produce OverrideActive=Y and no F/H lock blocks it, or the NPC already has an active established intimacy gate from prior explicit acceptance
+  boundaryViolationExplicit(input, finalGoal, challenge, targets, context):
+    policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
+    rule: return Y only if the current user input explicitly violates, ignores, or pressures past a clear refusal, stated boundary, withdrawal, fear, incapacitation, explicitly established lack of consent, or prior denial from this specific NPC.
+    rule: return Y for coercion, threats, force, unwanted restraint/contact after refusal, repeated pressure after refusal, humiliation, blackmail, or ignoring a clear stop/no.
+    rule: return N for flirting, teasing, romantic talk, asking permission, accepting or reciprocating NPC-initiated flirtation/intimacy, or backing off/respecting a boundary.
+    rule: return N when consent/refusal is merely uncertain, unstated, or left to ordinary scene interpretation. Do not turn ordinary flirting, teasing, kissing, embracing, or romantic/sexual proposals into mechanics without an explicit boundary violation.
     else -> N
 
-  hasStakes(input, finalGoal, challenge, targets, IntimacyConsent, context):
+  hasStakes(input, finalGoal, challenge, targets, boundaryViolationExplicit, context):
     policy: LOCKED, EXPLICIT-ONLY
-    rule: if finalGoal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal] and IntimacyConsent=N, return Y
-    rule: if finalGoal in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal], return N
+    rule: romantic, flirtatious, affectionate, suggestive, sexual, or intimate conversation/proposals/contact are not stakes by themselves.
+    rule: if boundaryViolationExplicit=Y, evaluate stakes normally under DEF.STAKES; boundary violation usually affects autonomy, trust, safety, or social standing.
     rule: return Y if success or failure of finalGoal or explicit challenge could affect {{user}} or NPC's stakes, as per DEF.STAKES
     else -> N
 
@@ -93,7 +100,6 @@ function ResolutionEngine(input) {
     rule: if finalGoal relies heavily on a specific enabling action (e.g., a physical feat to intimidate, or clearing an obstacle to dodge), determine USER stat based strictly on that enabling challenge
     rule: if {{user}} uses deliberate mental/supernatural exertion to affect a living target's bodily functions or physical state (paralysis, poison, blindness, forced sleep, pain, muscle lock, disease, transmutation, bodily binding), USER=MND and OPP=PHY
     rule: if magic or a substance creates a non-living environmental hazard/obstacle instead of directly contesting a living target, put the hazard/obstacle in OppTargets.ENV and use OPP=ENV unless a living target explicitly resists the effect
-    rule: if finalGoal=IntimacyAdvancePhysical and IntimacyConsent=N, USER=PHY and OPP=PHY. This rule is absolute for denied/opposed physical intimacy, including kissing or attempted intimate contact, even if the approach includes romantic, seductive, verbal, or social framing
     rule: if explicit means is positive social interaction such as persuasion, negotiation, diplomacy, bargaining, reconciliation, reassurance, or good-faith appeal against a living opposing target, USER=CHA and OPP=CHA
     rule: if explicit means is negative social interaction such as bluff, deception, intimidation, coercion, threat, blackmail, manipulation, interrogation, humiliation, or forced submission against a living opposing target, USER=CHA and OPP=MND
     rule: if OppTargets.NPC contains an opposing entity, determine opposing stat by applying DEF.STATS to that first OppTargets.NPC entity's resistance to {{user}}'s explicit means or finalGoal
@@ -176,8 +182,9 @@ function ResolutionEngine(input) {
     challenge = identifyChallenge(input, finalGoal, context)
     targets = identifyTargets(input, challenge, finalGoal, context)
     activeHostileThreat = activeHostileThreat(input, finalGoal, targets, context)
-    IntimacyConsent = checkIntimacyGate(finalGoal, targets, context)
-    STAKES = hasStakes(input, finalGoal, challenge, targets, IntimacyConsent, context)
+    intimacyAdvanceExplicit = intimacyAdvanceExplicit(input, finalGoal, challenge, targets, context)
+    boundaryViolationExplicit = boundaryViolationExplicit(input, finalGoal, challenge, targets, context)
+    STAKES = hasStakes(input, finalGoal, challenge, targets, boundaryViolationExplicit, context)
     actions = actionCount(input, challenge)
     if STAKES=N:
       outcome = {OutcomeTier:NONE, LandedActions:(none), Outcome:no_roll, CounterPotential:none}
@@ -189,7 +196,7 @@ function ResolutionEngine(input) {
         if missing -> targetCore = genStats(first OppTargets.NPC, context)
       outcome = resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore)
     NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, and relationshipEngine entries
-    return {GOAL:finalGoal, actions:actions, IntimacyConsent:IntimacyConsent, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
+    return {GOAL:finalGoal, actions:actions, intimacyAdvanceExplicit:intimacyAdvanceExplicit, boundaryViolationExplicit:boundaryViolationExplicit, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
 }
 ---------------------------
 function RelationshipEngine(npc, resolutionPacket) {
@@ -199,7 +206,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     FYW:
 'FIRST-YES-WINS. In ordered rule ladders, the first matching explicit rule becomes final.',
     UNIVERSAL:
-'Use resolutionPacket as final for GOAL, IntimacyConsent, LandedActions, OutcomeTier, Outcome, ActionTargets, OppTargets, BenefitedObservers, and HarmedObservers.',
+'Use resolutionPacket as final for GOAL, intimacyAdvanceExplicit, boundaryViolationExplicit, LandedActions, OutcomeTier, Outcome, ActionTargets, OppTargets, BenefitedObservers, and HarmedObservers.',
     BANDS:
 'BOND(B): 1 Avoid/Ignore (keeps distance, disengages). 2 Neutral/Transactional (polite, businesslike, no trust). 3 Friendly/Comfortable (cooperative, relaxed, familiar). 4 Close/Trusting (confides, seeks closeness, shows loyalty and deep personal investment). FEAR(F): 1 Unshaken (steady, not intimidated). 2 Alert/Wary (cautious, watchful). 3 Freezing/Submissive (hesitates, yields, avoids escalation). 4 Terrified/Panic (flight, surrender, desperate compliance). HOSTILITY(H): 1 Warm/Loyal (supportive, protective). 2 Neutral (no active ill will). 3 Aggressive/Obstructive (resentful, argumentative, interfering). 4 Hatred/Violent (wants harm, sabotage, escalation).',
     LOCK:
@@ -211,14 +218,13 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: read exact latest sceneTracker NPC entry for this NPC
     rule: currentDisposition = valid B[x]/F[y]/H[z] 1-4 ? exact values : null
     rule: currentRapport = valid 0-5 ? exact value : 0
-    rule: intimacyGate = valid ALLOW/DENY ? exact value : SKIP
     rule: establishedRelationship = valid Y/N ? exact value : N
     rule: slowBondEvidence = latest tracker slowBondEvidence object, default all counters 0, blockers empty
     rule: hostilePressure = valid number ? exact value : 0
     rule: hostileLandedPressure = valid number ? exact value : 0
     rule: dominantLock = valid FEAR/HOSTILITY/None ? exact value : None
     rule: pressureMode = valid none/cornered/dominated ? exact value : none
-    return {currentDisposition, currentRapport, intimacyGate, establishedRelationship, slowBondEvidence, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
+    return {currentDisposition, currentRapport, establishedRelationship, slowBondEvidence, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
 
   initPreset():
     policy: EO, FYW
@@ -248,11 +254,11 @@ function RelationshipEngine(npc, resolutionPacket) {
     rule: return harm if that outcome materially worsens this NPC's stakes as per DEF.STAKES
     rule: return none if that outcome does not materially change this NPC's stakes
     rule: do NOT return benefit merely because {{user}} succeeds at {{user}}'s own goal, negotiates successfully for {{user}}, chooses not to harm the NPC, fails to harm the NPC, de-escalates without giving the NPC a concrete gain, or because the NPC remains unharmed/safe
-    rule: if resolutionPacket.GOAL in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal], IntimacyConsent=N, and this NPC is the direct/opposing intimacy target, successful or landed outcomes [success, dominant_impact, solid_impact, light_impact] worsen this NPC's boundary/autonomy/trust stakes; return harm, not none
+    rule: if resolutionPacket.boundaryViolationExplicit=Y and this NPC is the direct/opposing boundary target, successful or landed outcomes [success, dominant_impact, solid_impact, light_impact] worsen this NPC's boundary/autonomy/trust stakes; return harm, not none
     rule: NPC_STAKES=Y when the actual outcome's stakeChangeByOutcome is benefit or harm
     rule: NPC_STAKES=N when the actual outcome's stakeChangeByOutcome is none
 
-  routeDispositionTarget(npc, resolutionPacket, audit, isAllowed):
+  routeDispositionTarget(npc, resolutionPacket, audit):
     policy: EO, FYW
     isDirect = resolutionPacket.ActionTargets.includes(npc.name)
     isOpp = resolutionPacket.OppTargets.NPC.includes(npc.name)
@@ -267,10 +273,9 @@ function RelationshipEngine(npc, resolutionPacket) {
     if !isDirect && !isOpp && isHarmed:
       if out in [dominant_impact, solid_impact] -> FearHostility
       else -> Hostility
-    if g in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal]:
-      if isAllowed=Y -> Bond
-      if g=IntimacyAdvancePhysical -> FearHostility
-      else -> Hostility, with Hostility capped at H3. Denied verbal intimacy cannot create H4.
+    if resolutionPacket.boundaryViolationExplicit=Y and (isDirect or isOpp):
+      if explicit goal/challenge is coercion, threat, force, or fear pressure -> FearHostility
+      else -> Hostility
     if explicit goal/challenge is intimidation, coercion, menacing threat, forced submission, or terrorizing display -> Fear
     if landed && (isDirect || isOpp || isHarmed):
       if out in [dominant_impact, solid_impact] -> FearHostility
@@ -385,11 +390,8 @@ function RelationshipEngine(npc, resolutionPacket) {
     if target=Hostility -> {b:-1,f:0,h:1}
     if target=Fear -> {b:-1,f:1,h:0}
     if target=FearHostility -> {b:-1,f:1,h:1}
-    if resolutionPacket.GOAL=IntimacyAdvanceVerbal and resolutionPacket.IntimacyConsent!=Y:
-      rule: any Hostility delta from denied verbal intimacy is capped so H cannot rise above 3. H4 requires hostilePhysicalIntent or activeEnemy.
-
     if currentDisposition.F=4 || currentDisposition.H=4:
-      if currentRapport>=5 && target in [Bond,No Change] && audit=Y && !(landed>0) && resolutionPacket.GOAL not in [IntimacyAdvancePhysical,IntimacyAdvanceVerbal]:
+      if currentRapport>=5 && target in [Bond,No Change] && audit=Y && !(landed>0):
         return {b:0,f:(currentDisposition.F=4?-1:0),h:(currentDisposition.H=4?-1:0),rapportReset:Y}
       else:
         return {b:0,f:0,h:0}
@@ -474,8 +476,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     update disposition and apply rapport reset if present
     if hostilePressureResult.dominatedFearBreak=Y and currentDisposition.F>=4 and currentDisposition.H>=3 -> lower currentDisposition.H by 1
     save currentRapport, hostilePressure, hostileLandedPressure, dominantLock, and pressureMode to sceneTracker
-    classify disposition, update slowBondEvidence, check slowBondEligible, resolve threshold/override, check establishedRelationship, and determine intimacy gate
-    save intimacy gate when ALLOW or DENY
+    classify disposition, update slowBondEvidence, check slowBondEligible, resolve threshold/override, and check establishedRelationship
     RelationToUserAction = {isDirect, isOpp, isBenefited, isHarmed}
     return NPC handoff including HostilePressure, HostileLandedPressure, DominantLock, PressureMode, and RelationToUserAction
 }
@@ -646,14 +647,12 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     policy: EO, FYW
     g = resolutionPacket.GOAL
     if resolutionPacket.STAKES=N -> Normal_Interaction
-    if g=IntimacyAdvancePhysical -> Intimacy_Physical
-    if g=IntimacyAdvanceVerbal -> Intimacy_Verbal
     if resolutionPacket.classifyCombatActionSequence=Y -> Combat
     if resolutionPacket.ActionTargets contains >=1 living entity -> Social
     if resolutionPacket.OppTargets.ENV != [(none)] -> Skill
     else -> Normal_Interaction
 
-  deriveImpulse(kind, lock, fin, intimacyGate, pressureMode, target):
+  deriveImpulse(kind, lock, fin, pressureMode, target):
     policy: FYW
     if pressureMode=cornered -> ANGER
     if pressureMode=dominated -> FEAR
@@ -667,7 +666,6 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       else -> ANGER
     if kind in [Combat, Social] && fin.H>=fin.F && fin.H>=fin.B -> ANGER
     if kind=Social && fin.F>=fin.H && fin.F>=fin.B -> FEAR
-    if kind in [Intimacy_Physical, Intimacy_Verbal] && intimacyGate=DENY -> ANGER
     if kind in [Normal_Interaction, Skill] && fin.B>=fin.H && fin.B>=fin.F -> BOND
     if fin.H>=fin.F && fin.H>=fin.B -> ANGER
     if fin.F>=fin.H && fin.F>=fin.B -> FEAR
@@ -703,7 +701,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if relation.isDirect || relation.isOpp || relation.isHarmed -> none
     if relation.isBenefited && handoff.Target=Bond -> DORMANT
     if handoff.NPC_STAKES=Y && handoff.Target=Bond && handoff.Landed=Y -> DORMANT
-    if handoff.Target=Bond && handoff.PressureMode=none && handoff.Lock not in [FREEZE,TERROR,HATRED] && resolutionPacket.classifyHostilePhysicalIntent!=Y && resolutionPacket.GOAL not in [IntimacyAdvancePhysical, IntimacyAdvanceVerbal] -> DORMANT
+    if handoff.Target=Bond && handoff.PressureMode=none && handoff.Lock not in [FREEZE,TERROR,HATRED] && resolutionPacket.classifyHostilePhysicalIntent!=Y -> DORMANT
     else -> none
 
   thresholdFromTier(tier):
@@ -713,7 +711,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if tier=LOW -> 13
     else -> 16
 
-  selectIntent(impulse, kind, fin, intimacyGate, override, pressureMode):
+  selectIntent(impulse, kind, fin, override, pressureMode):
     policy: FYW
     if pressureMode=cornered:
       if fin.H>=4 -> ESCALATE_VIOLENCE
@@ -722,14 +720,13 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       if fin.F>=4 -> CALL_HELP_OR_AUTHORITY
       else -> WITHDRAW_OR_BOUNDARY
     if impulse=ANGER:
-      if kind=Intimacy_Physical && intimacyGate=DENY -> BOUNDARY_PHYSICAL
       if kind=Combat || fin.H>=4 -> ESCALATE_VIOLENCE
       else -> THREAT_OR_POSTURE
     if impulse=FEAR:
       if fin.F>=4 -> CALL_HELP_OR_AUTHORITY
       else -> WITHDRAW_OR_BOUNDARY
     if impulse=BOND:
-      if (intimacyGate=ALLOW || override!=NONE) && fin.B>=3 -> INTIMACY_OR_FLIRT
+      if override!=NONE && fin.B>=3 -> INTIMACY_OR_FLIRT
       if kind in [Skill, Social] -> SUPPORT_ACT
       else -> PLAN_OR_BANTER
 
@@ -739,6 +736,10 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     rule: do not apply to ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, or THREAT_OR_POSTURE
     rule: apply only if fin.B>=4, fin.F<3, fin.H<3, handoff.Lock=None, and handoff.EstablishedRelationship!=Y
     rule: romanceStyle comes from RelationshipEngine[npc].romanceStyle: shy/reserved/guarded -> nervous; bold/outgoing/playful/direct -> flirt; unclear -> auto
+    rule: Thoughtful_Gift and Ask_Date each set a 1d20 NPC-interchange cooldown after they happen
+    rule: Thoughtful_Gift, Ask_Date, and Date_And_Confess do not repeat in the current B4 cycle if refused; Date_And_Confess refusal lowers Bond to B3 and stops this branch until Bond is rebuilt to B4
+    rule: Date_And_Confess can happen only after Thoughtful_Gift and Ask_Date have both happened and been accepted in this B4 cycle
+    rule: blocked major romance tags remap to Romantic_Attention, Romantic_Flirt, or Romantic_Nervous rather than producing no proactive beat
     romanceDie = 1d100
     if romanceDie>=96 -> Date_And_Confess
     if romanceDie>=86 -> Ask_Date
@@ -754,6 +755,10 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     rule: apply only after an NPC passes proactivity or is FORCED
     rule: do not apply to ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, THREAT_OR_POSTURE, CALL_HELP_OR_AUTHORITY, or WITHDRAW_OR_BOUNDARY
     rule: apply only if fin.B>=4, fin.F<3, fin.H<3, handoff.Lock=None, and handoff.EstablishedRelationship=Y
+    rule: Partner_Gift and Partner_Private_Time each set a 1d20 NPC-interchange cooldown after they happen
+    rule: Partner_Conflict sets a 1d50 NPC-interchange cooldown after it happens
+    rule: Partner_Intimacy has no cooldown, but remains context-aware and does not run in crisis
+    rule: blocked partner cooldown tags remap to Partner_Check_In, Partner_Affection, or Partner_Support rather than producing no proactive beat
     partnerDie = 1d150
     if partnerDie>=146 -> Partner_Conflict
     if partnerDie>=131 -> Partner_Intimacy
@@ -809,18 +814,18 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     FOR EACH NPC handoff:
       fin = parseFinalState(handoff.FinalState)
       lock = derive or load lock
-      impulse = deriveImpulse(kind, lock, fin, handoff.IntimacyGate, handoff.PressureMode, handoff.Target)
+      impulse = deriveImpulse(kind, lock, fin, handoff.PressureMode, handoff.Target)
       guard = proactivityRefereeGuard(handoff, resolutionPacket)
       if guard exists -> tier = DORMANT else tier = classifyProactivityTier(handoff, chaosBand, counterPotential)
       provisionalResult = {NPC, Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N, ProactivityTier:tier}
       if tier=FORCED:
-        intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode)
+        intent = selectIntent(impulse, kind, fin, handoff.Override, handoff.PressureMode)
         target = proactivityTarget(handoff, resolutionPacket, intent)
         candidate = {NPC,die:20,tier:FORCED,intent:intent,impulse:impulse,ProactivityTarget:target,TargetsUser:targetsUserFromProactivityTarget(target),Threshold:AUTO,passes:Y}
       else:
         roll proactivityDie, thresholdFromTier, passes
       if passes=Y:
-        intent = selectIntent(impulse, kind, fin, handoff.IntimacyGate, handoff.Override, handoff.PressureMode)
+        intent = selectIntent(impulse, kind, fin, handoff.Override, handoff.PressureMode)
         target = proactivityTarget(handoff, resolutionPacket, intent)
         store candidate
       if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N
@@ -896,6 +901,9 @@ export function createDice() {
     return {
         d20() {
             return Math.floor(Math.random() * 20) + 1;
+        },
+        d50() {
+            return Math.floor(Math.random() * 50) + 1;
         },
         d100() {
             return Math.floor(Math.random() * 100) + 1;
@@ -1009,25 +1017,21 @@ export function initPreset(flags) {
     return { label: 'neutralDefault', disposition: { B: 2, F: 2, H: 2 } };
 }
 
-export function routeDispositionTarget(npc, packet, auditInteraction, isAllowed, sem, isIntimacyTarget = true) {
+export function routeDispositionTarget(npc, packet, auditInteraction, sem) {
     const isDirect = includesName(packet.ActionTargets, npc);
     const isOpp = includesName(packet.OppTargets?.NPC, npc);
     const isBenefited = includesName(packet.BenefitedObservers, npc);
     const isHarmed = includesName(packet.HarmedObservers, npc);
     const landed = landedBool(packet.LandedActions);
-    const g = packet.GOAL;
     const out = packet.Outcome;
     const hasStakes = packet.STAKES === 'Y';
 
     if (!isDirect && !isOpp && !isBenefited && !isHarmed) return 'No Change';
-    if (!hasStakes) {
-        if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g) && isAllowed === 'Y') return 'Bond';
-        return 'No Change';
-    }
-    if (['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(g) && isIntimacyTarget) {
-        if (isAllowed === 'Y') return 'Bond';
-        if (g === 'IntimacyAdvancePhysical') return 'FearHostility';
-        return 'Hostility';
+    if (!hasStakes) return 'No Change';
+    if (packet.boundaryViolationExplicit === 'Y' && (isDirect || isOpp)) {
+        return bool(sem.explicitIntimidationOrCoercion) || packet.classifyHostilePhysicalIntent === 'Y'
+            ? 'FearHostility'
+            : 'Hostility';
     }
     if (auditInteraction === 'Y' && !isHarmed) return 'Bond';
     if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
@@ -1073,8 +1077,7 @@ export function hardStakeChangeFromTargetRole(npc, packet) {
     if ((relation.isDirect || relation.isOpp) && packet.classifyHostilePhysicalIntent === 'Y' && landed) return 'harm';
     if ((relation.isDirect || relation.isOpp) && packet.classifyPhysicalBoundaryPressure === 'Y' && positiveOutcome) return 'harm';
     if ((relation.isDirect || relation.isOpp)
-        && ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)
-        && packet.IntimacyConsent !== 'Y'
+        && packet.boundaryViolationExplicit === 'Y'
         && positiveOutcome) {
         return 'harm';
     }
@@ -1134,8 +1137,7 @@ export function proactivityRefereeGuard(handoff, packet) {
     if (handoff.Target === 'Bond'
         && handoff.PressureMode === 'none'
         && !['FREEZE', 'TERROR', 'HATRED'].includes(handoff.Lock)
-        && packet.classifyHostilePhysicalIntent !== 'Y'
-        && !['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL)) {
+        && packet.classifyHostilePhysicalIntent !== 'Y') {
         return 'Bond-routed non-hostile interaction cannot become hostile proactivity without harm, opposition, lock, or pressure evidence';
     }
     return null;
@@ -1293,16 +1295,12 @@ export function targetFromDeltas(deltas) {
 
 export function deriveDirection(target, currentDisposition, currentRapport, auditInteraction, packet = {}) {
     const landed = landedBool(packet.LandedActions);
-    const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(packet.GOAL);
 
-    if (target === 'Hostility' && packet.GOAL === 'IntimacyAdvanceVerbal' && packet.IntimacyConsent !== 'Y' && currentDisposition.H >= 3) {
-        return { b: 0, f: 0, h: 0 };
-    }
     if (target === 'Hostility') return { b: -1, f: 0, h: 1 };
     if (target === 'Fear') return { b: -1, f: 1, h: 0 };
     if (target === 'FearHostility') return { b: -1, f: 1, h: 1 };
     if (currentDisposition.F === 4 || currentDisposition.H === 4) {
-        if (currentRapport >= 5 && ['Bond', 'No Change'].includes(target) && auditInteraction === 'Y' && !landed && !isIntimacyAdvance) {
+        if (currentRapport >= 5 && ['Bond', 'No Change'].includes(target) && auditInteraction === 'Y' && !landed) {
             return { b: 0, f: currentDisposition.F === 4 ? -1 : 0, h: currentDisposition.H === 4 ? -1 : 0, rapportReset: 'Y' };
         }
         return { b: 0, f: 0, h: 0 };
@@ -1348,127 +1346,6 @@ export function checkThreshold(disposition, flags) {
     return { LockActive, OverrideActive: Override !== 'NONE' ? 'Y' : 'N', Override };
 }
 
-export function currentIntimacyGateAllows(state, disposition = state?.currentDisposition || null, threshold = null) {
-    if (disposition?.F >= 3 || disposition?.H >= 3) {
-        return { allows: false, source: 'LOCK', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
-    }
-
-    if (disposition?.B === 4 && state?.establishedRelationship === 'Y') {
-        return { allows: true, source: 'ESTABLISHED_RELATIONSHIP', evidence: { establishedRelationship: 'Y', currentDisposition: formatDisposition(disposition) } };
-    }
-
-    if (state?.intimacyGate === 'ALLOW') {
-        if (state?.intimacyGateSource === 'B4') {
-            return { allows: false, source: 'B4_DISABLED', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
-        }
-        if (String(state?.intimacyGateSource || '').startsWith('OVERRIDE:')) {
-            return { allows: true, source: state.intimacyGateSource, evidence: { priorIntimacyGate: state.intimacyGate, priorIntimacyGateSource: state.intimacyGateSource } };
-        }
-    }
-
-    if (threshold?.OverrideActive === 'Y') {
-        return { allows: true, source: `OVERRIDE:${threshold.Override}`, evidence: threshold };
-    }
-
-    return { allows: false, source: 'NONE', evidence: { currentDisposition: disposition ? formatDisposition(disposition) : null } };
-}
-
-export function getStakesOverrideEvidence(goal, intimacyTarget, targetState, preliminaryDisposition, preliminaryThreshold, intimacyAllowance, semanticHasStakes, intimacyConsent) {
-    if (!['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal)) return null;
-
-    const disposition = targetState?.currentDisposition || preliminaryDisposition || null;
-    const evidence = {
-        target: intimacyTarget || NONE,
-        currentDisposition: disposition ? formatDisposition(disposition) : null,
-        priorIntimacyGate: targetState?.intimacyGate || 'SKIP',
-        priorIntimacyGateSource: targetState?.intimacyGateSource || 'NONE',
-        checkThreshold: preliminaryThreshold,
-        allowanceSource: intimacyAllowance?.source || 'NONE',
-        intimacyConsent,
-    };
-
-    if (semanticHasStakes === 'Y' && intimacyConsent === 'Y' && intimacyAllowance?.source && intimacyAllowance.source !== 'NONE') {
-        return {
-            hasStakes: 'N',
-            rule: `hard_override_allowed_intimacy_${intimacyAllowance.source}`,
-            evidence: {
-                ...evidence,
-                hardRule: 'ResolutionEngine.hasStakes: allowed intimacy advance returns N',
-            },
-        };
-    }
-
-    if (semanticHasStakes === 'N' && intimacyConsent === 'N') {
-        return {
-            hasStakes: 'Y',
-            rule: 'hard_override_denied_intimacy_no_allow',
-            evidence: {
-                ...evidence,
-                hardRule: 'ResolutionEngine.hasStakes: denied intimacy advance returns Y',
-            },
-        };
-    }
-
-    return null;
-}
-
-export function resolveIntimacyGate(previousState, threshold, disposition, isAllowed, goal = '', isIntimacyTarget = true) {
-    const isIntimacyAdvance = ['IntimacyAdvancePhysical', 'IntimacyAdvanceVerbal'].includes(goal);
-
-    if (isIntimacyAdvance && !isIntimacyTarget) {
-        if (previousState.intimacyGate === 'ALLOW') {
-            return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
-        }
-        if (previousState.intimacyGate === 'DENY') {
-            return { IntimacyGate: 'DENY', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_DENY' };
-        }
-        return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
-    }
-
-    if (threshold.LockActive === 'Y') {
-        return { IntimacyGate: 'DENY', IntimacyGateSource: 'LOCK' };
-    }
-
-    if (disposition?.B === 4 && previousState?.establishedRelationship === 'Y') {
-        return { IntimacyGate: 'ALLOW', IntimacyGateSource: 'ESTABLISHED_RELATIONSHIP' };
-    }
-
-    if (isAllowed === 'Y') {
-        if (previousState?.establishedRelationship === 'Y') {
-            return { IntimacyGate: 'ALLOW', IntimacyGateSource: 'ESTABLISHED_RELATIONSHIP' };
-        }
-        if (threshold.OverrideActive === 'Y') {
-            return { IntimacyGate: 'ALLOW', IntimacyGateSource: `OVERRIDE:${threshold.Override}` };
-        }
-        return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_ALLOW' };
-    }
-
-    if (threshold.OverrideActive === 'Y') {
-        return { IntimacyGate: 'ALLOW', IntimacyGateSource: `OVERRIDE:${threshold.Override}` };
-    }
-
-    if (previousState.intimacyGate === 'ALLOW') {
-        if (previousState.intimacyGateSource === 'B4') {
-            return isIntimacyAdvance
-                ? { IntimacyGate: 'DENY', IntimacyGateSource: 'CURRENT_DENIED' }
-                : { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
-        }
-        if (String(previousState.intimacyGateSource || '').startsWith('OVERRIDE:')) {
-            return { IntimacyGate: 'ALLOW', IntimacyGateSource: previousState.intimacyGateSource };
-        }
-    }
-
-    if (previousState.intimacyGate === 'DENY') {
-        return { IntimacyGate: 'DENY', IntimacyGateSource: previousState.intimacyGateSource || 'PRIOR_DENY' };
-    }
-
-    if (isIntimacyAdvance && isAllowed !== 'Y') {
-        return { IntimacyGate: 'DENY', IntimacyGateSource: 'CURRENT_DENIED' };
-    }
-
-    return { IntimacyGate: 'SKIP', IntimacyGateSource: 'NONE' };
-}
-
 export function getChaosContext(handoffs, sceneSummary) {
     if (handoffs.length >= 2) return 'PUBLIC';
     if (/\b(public|crowd|open|market|tavern|street|square)\b/i.test(sceneSummary)) return 'PUBLIC';
@@ -1503,15 +1380,13 @@ export function pickVector(ctx, i, index) {
 
 export function classifyAction(packet) {
     if (packet.STAKES === 'N') return 'Normal_Interaction';
-    if (packet.GOAL === 'IntimacyAdvancePhysical') return 'Intimacy_Physical';
-    if (packet.GOAL === 'IntimacyAdvanceVerbal') return 'Intimacy_Verbal';
     if (packet.classifyCombatActionSequence === 'Y') return 'Combat';
     if (toRealArray(packet.ActionTargets).length >= 1) return 'Social';
     if (toRealArray(packet.OppTargets?.ENV).length >= 1) return 'Skill';
     return 'Normal_Interaction';
 }
 
-export function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'none', target = 'No Change') {
+export function deriveImpulse(kind, lock, fin, pressureMode = 'none', target = 'No Change') {
     if (pressureMode === 'cornered') return 'ANGER';
     if (pressureMode === 'dominated') return 'FEAR';
     if (lock === 'HATRED') return 'ANGER';
@@ -1522,7 +1397,6 @@ export function deriveImpulse(kind, lock, fin, intimacyGate, pressureMode = 'non
     if (target === 'FearHostility') return fin.F > fin.H ? 'FEAR' : 'ANGER';
     if (['Combat', 'Social'].includes(kind) && fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
     if (kind === 'Social' && fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
-    if (['Intimacy_Physical', 'Intimacy_Verbal'].includes(kind) && intimacyGate === 'DENY') return 'ANGER';
     if (['Normal_Interaction', 'Skill'].includes(kind) && fin.B >= fin.H && fin.B >= fin.F) return 'BOND';
     if (fin.H >= fin.F && fin.H >= fin.B) return 'ANGER';
     if (fin.F >= fin.H && fin.F >= fin.B) return 'FEAR';
@@ -1570,7 +1444,7 @@ export function thresholdFromTier(tier) {
     return 16;
 }
 
-export function selectIntent(impulse, kind, fin, intimacyGate, override, pressureMode = 'none') {
+export function selectIntent(impulse, kind, fin, override, pressureMode = 'none') {
     if (pressureMode === 'cornered') {
         return fin.H >= 4 ? 'ESCALATE_VIOLENCE' : 'BOUNDARY_PHYSICAL';
     }
@@ -1580,7 +1454,6 @@ export function selectIntent(impulse, kind, fin, intimacyGate, override, pressur
     }
 
     if (impulse === 'ANGER') {
-        if (kind === 'Intimacy_Physical' && intimacyGate === 'DENY') return 'BOUNDARY_PHYSICAL';
         if (kind === 'Combat' || fin.H >= 4) return 'ESCALATE_VIOLENCE';
         return 'THREAT_OR_POSTURE';
     }
@@ -1588,7 +1461,7 @@ export function selectIntent(impulse, kind, fin, intimacyGate, override, pressur
         if (fin.F >= 4) return 'CALL_HELP_OR_AUTHORITY';
         return 'WITHDRAW_OR_BOUNDARY';
     }
-    if ((intimacyGate === 'ALLOW' || override !== 'NONE') && fin.B >= 3) return 'INTIMACY_OR_FLIRT';
+    if (override !== 'NONE' && fin.B >= 3) return 'INTIMACY_OR_FLIRT';
     if (['Skill', 'Social'].includes(kind)) return 'SUPPORT_ACT';
     return 'PLAN_OR_BANTER';
 }
@@ -1611,7 +1484,7 @@ export function isImmediateAttackIntentForType(intent, attackType) {
 export function buildNarrationGuidance(resolution, handoffs, chaos, proactivity, aggression) {
     return {
         resolution: `${resolution.OutcomeTier}/${resolution.Outcome}`,
-        relationshipStates: handoffs.map(h => `${h.NPC}:${h.FinalState}:${h.Behavior}:${h.IntimacyGate}`),
+        relationshipStates: handoffs.map(h => `${h.NPC}:${h.FinalState}:${h.Behavior}`),
         chaos: chaos.CHAOS,
         proactivity,
         aggression,
@@ -1622,7 +1495,7 @@ export function buildNarrationGuidance(resolution, handoffs, chaos, proactivity,
 export function buildPersistencePolicy() {
     return {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
-        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
+        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'personalitySummary', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
         playerPersistentRuleMutated: ['condition', 'wounds', 'statusEffects', 'gear', 'inventory', 'tasks', 'commitments'],
         perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
@@ -1645,7 +1518,7 @@ export function trackerSummary(trackerUpdate) {
             `tier:${value?.persistenceTier ?? 'Recurring'}`,
             `life:${value?.lifecycle ?? 'Active'}`,
             `rapport:${value?.currentRapport ?? 0}`,
-            `gate:${value?.intimacyGate ?? 'SKIP'}`,
+            `personality:${value?.personalitySummary ? 'Y' : 'N'}`,
             stats,
             `cond:${value?.condition ?? 'healthy'}`,
             `wounds:${(value?.wounds || []).length}`,
@@ -1732,10 +1605,10 @@ export function normalizeTrackerEntry(value) {
     return {
         currentDisposition: normalizeDisposition(value?.currentDisposition),
         currentRapport: clamp(Number(value?.currentRapport ?? 0), 0, 5),
-        intimacyGate: ['ALLOW', 'DENY', 'SKIP'].includes(value?.intimacyGate) ? value.intimacyGate : 'SKIP',
-        intimacyGateSource: normalizeIntimacyGateSource(value?.intimacyGateSource),
         establishedRelationship: value?.establishedRelationship === 'Y' ? 'Y' : 'N',
+        personalitySummary: normalizePersonalitySummary(value?.personalitySummary),
         slowBondEvidence: normalizeSlowBondEvidence(value?.slowBondEvidence),
+        proactivityMemory: normalizeProactivityMemory(value?.proactivityMemory),
         currentCoreStats: value?.currentCoreStats ? normalizeCore(value.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 }) : null,
         hostilePressure: clamp(Number(value?.hostilePressure ?? 0), 0, 20),
         hostileLandedPressure: clamp(Number(value?.hostileLandedPressure ?? 0), 0, 20),
@@ -1752,6 +1625,48 @@ export function normalizeTrackerEntry(value) {
         statusEffects: normalizeTrackerStringList(value?.statusEffects),
         gear: normalizeTrackerStringList(value?.gear),
     };
+}
+
+const ROMANCE_MEMORY_TAGS = Object.freeze(['Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess']);
+const PROACTIVITY_COOLDOWN_TAGS = Object.freeze(['Thoughtful_Gift', 'Ask_Date', 'Partner_Gift', 'Partner_Private_Time', 'Partner_Conflict']);
+
+export function normalizeProactivityMemory(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const cooldowns = source.cooldowns && typeof source.cooldowns === 'object' ? source.cooldowns : {};
+    return {
+        interchangeCount: normalizeMemoryCount(source.interchangeCount),
+        romanceCycle: normalizeMemoryCount(source.romanceCycle),
+        romanceBlocked: source.romanceBlocked === 'Y' ? 'Y' : 'N',
+        pendingTag: normalizeMemoryTag(source.pendingTag),
+        pendingSince: normalizeMemoryCount(source.pendingSince),
+        acceptedTags: normalizeMemoryTagList(source.acceptedTags, ROMANCE_MEMORY_TAGS),
+        refusedTags: normalizeMemoryTagList(source.refusedTags, ROMANCE_MEMORY_TAGS),
+        cooldowns: Object.fromEntries(PROACTIVITY_COOLDOWN_TAGS.map(tag => [
+            tag,
+            normalizeMemoryCount(cooldowns[tag] ?? source[tag]),
+        ])),
+    };
+}
+
+function normalizeMemoryCount(value) {
+    return clamp(Math.floor(Number(value ?? 0) || 0), 0, 1000000);
+}
+
+function normalizeMemoryTag(value) {
+    const text = String(value ?? '').trim();
+    return ROMANCE_MEMORY_TAGS.includes(text) ? text : 'NONE';
+}
+
+function normalizeMemoryTagList(value, allowed) {
+    const canonical = new Map(allowed.map(item => [item.toLowerCase(), item]));
+    const result = [];
+    for (const item of normalizeTrackerStringList(value)) {
+        const tag = canonical.get(String(item).toLowerCase());
+        if (!tag || result.includes(tag)) continue;
+        result.push(tag);
+        if (result.length >= allowed.length) break;
+    }
+    return result;
 }
 
 export function normalizeTrackerUserState(value) {
@@ -1796,6 +1711,16 @@ export function normalizeTrackerStringList(value) {
     return result;
 }
 
+export function normalizePersonalitySummary(value) {
+    const text = String(value ?? '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .replace(/^["']|["']$/g, '')
+        .trim();
+    if (!text || ['(none)', 'none', 'null', 'n/a', 'unknown', 'unchanged'].includes(text.toLowerCase())) return '';
+    return text.slice(0, 160);
+}
+
 export function normalizePresence(value) {
     return value === 'Absent' ? 'Absent' : 'Present';
 }
@@ -1807,13 +1732,6 @@ export function normalizeLifecycle(value) {
 
 export function normalizePersistenceTier(value) {
     return value === 'Temporary' ? 'Temporary' : 'Recurring';
-}
-
-export function normalizeIntimacyGateSource(value) {
-    const text = String(value ?? 'NONE');
-    if (text === 'B4' || text === 'LOCK' || text === 'NONE' || text === 'PRIOR_ALLOW' || text === 'PRIOR_DENY' || text === 'CURRENT_DENIED' || text === 'ESTABLISHED_RELATIONSHIP') return text;
-    if (text.startsWith('OVERRIDE:')) return text;
-    return 'NONE';
 }
 
 export function normalizeDisposition(value) {
@@ -1865,14 +1783,6 @@ export function sanitizeTargets(targets, classifier, options = {}) {
     for (const name of targets.HarmedObservers) {
         if (classifier.isLiving(name)) harmedCandidates.push(name);
         else oppEnv.push(name);
-    }
-
-    if (options.goal === 'IntimacyAdvancePhysical' && options.intimacyConsent !== 'Y') {
-        for (const name of actionTargets) {
-            if (!oppNpc.some(existing => sameName(existing, name))) {
-                oppNpc.push(name);
-            }
-        }
     }
 
     const directOrOpposed = new Set([...actionTargets, ...oppNpc].map(normalizeNameKey));
@@ -1973,18 +1883,6 @@ export function applyMapStatsHardRules(semantic, goal, targets, mapStats, audit,
         oppStat = 'PHY';
     }
 
-    if (isDeniedPhysicalIntimacyChallenge(semantic, goal, options.intimacyConsent)) {
-        if (userStat !== 'PHY' || oppStat !== 'PHY') {
-            evidence.push({
-                hardRule: 'ResolutionEngine.mapStats: denied/opposed physical intimacy is USER=PHY and OPP=PHY',
-                from: { USER: userStat, OPP: oppStat },
-                to: { USER: 'PHY', OPP: 'PHY' },
-            });
-        }
-        userStat = 'PHY';
-        oppStat = 'PHY';
-    }
-
     const socialRule = classifySocialMapStatsRule(semantic, targets);
     if (socialRule) {
         if (userStat !== 'CHA' || oppStat !== socialRule.oppStat) {
@@ -2019,8 +1917,6 @@ export function classifySocialMapStatsRule(semantic, targets) {
     if (!firstReal(targets.OppTargets?.NPC)) return null;
     if (bool(semantic.classifyHostilePhysicalIntent)) return null;
     if (isBodyAffectingMagic(semantic, semantic.identifyGoal, targets)) return null;
-    if (isDeniedPhysicalIntimacyChallenge(semantic, semantic.identifyGoal, semantic.IntimacyConsent)) return null;
-
     const source = [
         semantic.identifyGoal,
         semantic.identifyChallenge,
@@ -2060,24 +1956,6 @@ export function isBodyAffectingMagic(semantic, goal, targets) {
     const hasMagic = /\b(magic|magical|spell|arcane|hex|curse|supernatural|enchant|enchantment|sorcery|power)\b/.test(source);
     const affectsBody = /\b(paraly[sz]e|paralysis|poison|venom|blind|blindness|deafen|numb|sleep|pain|muscle|blood|breath|choke|disease|sicken|transmut|petrif|bind|bodily|body|immobiliz|lock|freeze|stun)\b/.test(source);
     return hasMagic && affectsBody;
-}
-
-export function isDeniedPhysicalIntimacyChallenge(semantic, goal, intimacyConsent = 'N') {
-    return goal === 'IntimacyAdvancePhysical' && intimacyConsent !== 'Y';
-}
-
-export function isPhysicalIntimacyChallenge(semantic, goal, targets) {
-    if (goal !== 'IntimacyAdvancePhysical' && semantic?.intimacyAdvance !== 'physical') return false;
-    if (!firstReal(targets.OppTargets?.NPC)) return false;
-
-    const source = [
-        semantic.identifyGoal,
-        goal,
-        semantic.identifyChallenge,
-        semantic.explicitMeans,
-    ].filter(Boolean).join(' ').toLowerCase();
-
-    return /\b(kiss|touch|grab|grope|fondl|caress|pin|press|hold|pull|tilt|cup|embrace|hug|tear|rip|undress|clothes|dress|shirt|skirt|panties|underwear|mouth|lips|body|physical|contact)\b/.test(source);
 }
 
 export function parseFinalState(value) {

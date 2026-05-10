@@ -1733,6 +1733,7 @@ function findExistingTrackerName(npcs, wantedName) {
 function trackerDeltaHasChanges(delta, includePlayerFields) {
     if (!delta || typeof delta !== 'object') return false;
     if (normalizeTrackerDeltaCondition(delta.condition) !== 'unchanged') return true;
+    if (!includePlayerFields && cleanPersonalitySummary(delta.personalitySummary)) return true;
     const fields = includePlayerFields
         ? ['woundsAdd', 'woundsRemove', 'statusAdd', 'statusRemove', 'gearAdd', 'gearRemove', 'inventoryAdd', 'inventoryRemove', 'tasksAdd', 'tasksRemove', 'commitmentsAdd', 'commitmentsRemove']
         : ['woundsAdd', 'woundsRemove', 'statusAdd', 'statusRemove', 'gearAdd', 'gearRemove'];
@@ -1764,11 +1765,14 @@ function applyTrackerDeltaToUserState(before, delta) {
 function applyTrackerDeltaToNpcState(before, delta) {
     const source = normalizeTrackerEntry(before || {});
     const result = {
+        personalitySummary: source.personalitySummary || '',
         condition: source.condition,
         wounds: [...source.wounds],
         statusEffects: [...source.statusEffects],
         gear: [...source.gear],
     };
+    const personalitySummary = cleanPersonalitySummary(delta?.personalitySummary);
+    if (personalitySummary) result.personalitySummary = personalitySummary;
     const condition = normalizeTrackerDeltaCondition(delta?.condition);
     if (condition !== 'unchanged') result.condition = condition;
     result.wounds = applyTrackerListDelta(result.wounds, delta?.woundsAdd, delta?.woundsRemove);
@@ -1815,6 +1819,12 @@ function cleanTrackerDeltaText(value) {
     const text = String(value ?? '').trim().replace(/^\[/, '').replace(/\]$/, '').replace(/^["']|["']$/g, '').trim();
     if (!text || ['(none)', 'none', 'null', 'n/a', 'unchanged'].includes(text.toLowerCase())) return '';
     return text.slice(0, 140);
+}
+
+function cleanPersonalitySummary(value) {
+    const text = String(value ?? '').trim().replace(/\s+/g, ' ').replace(/^["']|["']$/g, '').trim();
+    if (!text || ['(none)', 'none', 'null', 'n/a', 'unknown', 'unchanged'].includes(text.toLowerCase())) return '';
+    return text.slice(0, 160);
 }
 
 function applyDisplayPresenceCorrections(presentNames, trackedNames, latestUserText) {
@@ -2105,8 +2115,9 @@ function buildTrackerDisplayHtml(snapshot) {
                 <div class="structured-preflight-tracker-name">${escapeHtml(name)}</div>
                 <div>Toward User <code>${escapeHtml(relationshipTowardUser(disposition, classified))}</code></div>
                 <div>Condition <code>${escapeHtml(formatTrackerCondition(entry.condition))}</code></div>
+                ${entry.personalitySummary ? `<div>Personality <code>${escapeHtml(entry.personalitySummary)}</code></div>` : ''}
                 <div><code>${escapeHtml(formatDisposition(disposition))}</code> | Lock <code>${escapeHtml(classified.lock)}</code> | Behavior <code>${escapeHtml(classified.behavior)}</code></div>
-                <div>Rapport <code>${escapeHtml(entry.currentRapport)}/5</code> | Gate <code>${escapeHtml(entry.intimacyGate)}</code></div>
+                <div>Rapport <code>${escapeHtml(entry.currentRapport)}/5</code> | Relationship <code>${escapeHtml(entry.establishedRelationship || 'N')}</code></div>
                 <div>Stats <code>${escapeHtml(formatCoreStats(entry.currentCoreStats))}</code></div>
                 ${trackerListLine('Wounds', entry.wounds)}
                 ${trackerListLine('Status', entry.statusEffects)}
@@ -3083,7 +3094,7 @@ function stripNarratorMetaPrefix(text) {
         if (
             !line
             || /^[-*]\s+/.test(line)
-            || /^(The user|User Action|Decisive Action|Roll Used|Outcome|Outcome Meaning|Margin|Landed Actions|Result|Action Count|Stakes|Intimacy Consent|Consent Gate|Targets|Counter Potential|NPC State|Relationship Result|Chaos|Proactivity|Aggression|Aggression Guide|GUIDE|BINDING_NARRATION_DIRECTIVE|MODEL_INSTRUCTION|PROMPT|STORY_ENGINE_NARRATOR_DIRECTIVE|PRIVATE_MECHANICS_AUDIT)\b/i.test(line)
+            || /^(The user|User Action|Decisive Action|Roll Used|Outcome|Outcome Meaning|Margin|Landed Actions|Result|Action Count|Stakes|Targets|Counter Potential|NPC State|Relationship Result|Chaos|Proactivity|Aggression|Aggression Guide|GUIDE|BINDING_NARRATION_DIRECTIVE|MODEL_INSTRUCTION|PROMPT|STORY_ENGINE_NARRATOR_DIRECTIVE|PRIVATE_MECHANICS_AUDIT)\b/i.test(line)
             || /\b(preflight|mechanics|formatting rules|Length target|Hard maximum|PRIVATE HANDOFF|should be|Let me)\b/i.test(line)
         ) {
             cut = index + 1;

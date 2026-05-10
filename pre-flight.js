@@ -77,14 +77,12 @@ function buildReadableSemanticDebug(ledger) {
             npc.NPC ?? '(none)',
             npc.currentDisposition ?? 'null',
             `rapport:${npc.currentRapport ?? 0}`,
-            `gate:${npc.intimacyGate ?? 'SKIP'}`,
             `cond:${npc.condition ?? 'healthy'}`,
         ].join('/')).join('; ') || 'none'),
         '',
         'ResolutionEngine:',
         'identifyGoal=' + valueOrNone(resolution.identifyGoal),
         'identifyChallenge=' + valueOrNone(resolution.identifyChallenge),
-        'intimacyAdvance=' + valueOrNone(resolution.intimacyAdvance),
         'explicitMeans=' + valueOrNone(resolution.explicitMeans),
         'identifyTargets:',
         'ActionTargets=' + list(targets.ActionTargets),
@@ -92,6 +90,8 @@ function buildReadableSemanticDebug(ledger) {
         'OppTargets.ENV=' + list(oppTargets.ENV),
         'BenefitedObservers=' + list(targets.BenefitedObservers),
         'HarmedObservers=' + list(targets.HarmedObservers),
+        'intimacyAdvanceExplicit=' + String(Boolean(resolution.intimacyAdvanceExplicit)),
+        'boundaryViolationExplicit=' + String(Boolean(resolution.boundaryViolationExplicit)),
         'hasStakes=' + String(Boolean(resolution.hasStakes)),
         'actionCount=' + list(resolution.actionCount),
         'mapStats=' + inline(resolution.mapStats ?? {}),
@@ -133,7 +133,8 @@ function buildReadableDeterministicDebug(handoff) {
 
     return [
         'resolutionPacket.GOAL=' + valueOrNone(resolution.GOAL),
-        'resolutionPacket.IntimacyConsent=' + valueOrNone(resolution.IntimacyConsent),
+        'resolutionPacket.intimacyAdvanceExplicit=' + valueOrNone(resolution.intimacyAdvanceExplicit),
+        'resolutionPacket.boundaryViolationExplicit=' + valueOrNone(resolution.boundaryViolationExplicit),
         'resolutionPacket.STAKES=' + valueOrNone(resolution.STAKES),
         'resolutionPacket.actions=' + list(resolution.actions),
         'resolutionPacket.OutcomeTier=' + valueOrNone(resolution.OutcomeTier),
@@ -159,9 +160,12 @@ function buildReadableDeterministicDebug(handoff) {
             `npcHandoffs[${index}].FinalState=${valueOrNone(npc.FinalState)}`,
             `npcHandoffs[${index}].Lock=${valueOrNone(npc.Lock)}`,
             `npcHandoffs[${index}].Behavior=${valueOrNone(npc.Behavior)}`,
+            `npcHandoffs[${index}].PersonalitySummary=${valueOrNone(npc.PersonalitySummary)}`,
             `npcHandoffs[${index}].Target=${valueOrNone(npc.Target)}`,
             `npcHandoffs[${index}].NPC_STAKES=${valueOrNone(npc.NPC_STAKES)}`,
-            `npcHandoffs[${index}].IntimacyGate=${valueOrNone(npc.IntimacyGate)}`,
+            `npcHandoffs[${index}].IntimacyBoundary=${valueOrNone(npc.IntimacyBoundary)}`,
+            `npcHandoffs[${index}].IntimacyBoundarySource=${valueOrNone(npc.IntimacyBoundarySource)}`,
+            `npcHandoffs[${index}].IntimacyRefusalStyle=${valueOrNone(npc.IntimacyRefusalStyle)}`,
             `npcHandoffs[${index}].RelationToUserAction=${inline(npc.RelationToUserAction ?? {})}`,
             `npcHandoffs[${index}].BoundaryPressure=${valueOrNone(npc.BoundaryPressure)}`,
             `npcHandoffs[${index}].PressureMode=${valueOrNone(npc.PressureMode)}`,
@@ -213,7 +217,9 @@ function formatMechanicsResultList(summary, resolution) {
         ['resolution.outcome', summary.outcome],
         ['resolution.outcomeMeaning', summary.result],
         ['resolution.landedActions', summary.landedActions],
-        ['intimacy.consentGate', summary.consentGate],
+        ['resolution.intimacyAdvanceExplicit', valueOrNone(resolution.intimacyAdvanceExplicit)],
+        ['intimacy.boundary', summary.intimacyBoundary],
+        ['resolution.boundaryViolationExplicit', valueOrNone(resolution.boundaryViolationExplicit)],
         ['resolution.counterPotential', summary.counter],
         ['resolution.targets', summary.targets],
         ['impairment.user', summary.userImpairment],
@@ -247,7 +253,7 @@ export function formatNarratorModelPromptContext(report) {
 function narratorModelInstruction() {
     return [
         'Mandatory, non-negotiable: follow the prompt below exactly to narrate the scene.',
-        'The prompt is the controlling instruction for outcome, consent, proactivity, aggression, injuries, impairment, limits, and stopping point.',
+        'The prompt is the controlling instruction for outcome, boundaries, proactivity, aggression, injuries, impairment, limits, and stopping point.',
         'If chat history, character tone, relationship vibes, or prior narration conflict with the prompt, obey the prompt.',
         'Do not output mechanics, labels, analysis, bullets, preamble, or audit text.',
         'Do not narrate voluntary {{user}} actions, thoughts, feelings, decisions, counterattacks, or dialogue beyond the explicit user input.',
@@ -263,12 +269,13 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         h.FinalState,
         h.Behavior,
         h.Target,
-        `gate:${h.IntimacyGate}`,
         `stakes:${h.NPC_STAKES}`,
         `landed:${h.Landed}`,
+        `intimacy:${h.IntimacyBoundary ?? 'SKIP'}/${h.IntimacyBoundarySource ?? 'NONE'}/${h.IntimacyRefusalStyle ?? 'NONE'}`,
         `boundary:${h.BoundaryPressure ?? 'N'}`,
         `pressure:${h.HostilePressure ?? 0}/${h.HostileLandedPressure ?? 0}/${h.DominantLock ?? 'None'}/${h.PressureMode ?? 'none'}`,
-    ].join('/')).join(';') || 'none';
+        h.PersonalitySummary && !isNoneText(h.PersonalitySummary) ? `personality:${h.PersonalitySummary}` : '',
+    ].filter(Boolean).join('/')).join(';') || 'none';
     const npcGuidance = buildNpcGuidanceSummary(handoff.npcHandoffs ?? []);
 
     const chaos = handoff.chaosHandoff?.CHAOS ?? {};
@@ -311,6 +318,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
 
     const result = naturalOutcomeSummary(resolution);
     const rollAudit = rollAuditFromResultLine(handoff.resultLine, resolution);
+    const intimacyBoundary = intimacyBoundarySummary(handoff);
     const bindingDirective = cleanNarratorDirective(buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment, inflictedNpcInjury, inflictedUserInjury }));
 
     return {
@@ -323,11 +331,10 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         margin: rollAudit.margin,
         actionCount: actionCountSummary(resolution.actions),
         landedActions: resolution.LandedActions ?? '(none)',
-        consentGate: consentGateSummary(handoff, resolution),
+        intimacyBoundary,
         relationshipResult: relationshipResultSummary(handoff, resolution),
         actions: list(resolution.actions),
         stakes: resolution.STAKES ?? 'N',
-        consent: intimacyConsentSummary(resolution),
         targets: targetSummary(resolution),
         counter: resolution.CounterPotential ?? 'none',
         userImpairment,
@@ -376,20 +383,27 @@ function outcomeAuditLabel(resolution) {
     return tier || outcome || 'Computed Outcome';
 }
 
-function consentGateSummary(handoff, resolution) {
-    if (resolution.GOAL !== 'IntimacyAdvancePhysical' && resolution.GOAL !== 'IntimacyAdvanceVerbal') return 'not applicable';
-    return strongestIntimacyGate(handoff, resolution);
-}
-
 function relationshipResultSummary(handoff, resolution) {
     const npcs = Array.isArray(handoff?.npcHandoffs) ? handoff.npcHandoffs : [];
     if (!npcs.length) return 'none';
     return npcs.map(npc => [
         npc.NPC || '(unknown)',
         `target:${npc.Target ?? 'No Change'}`,
-        `gate:${npc.IntimacyGate ?? 'SKIP'}`,
+        `intimacy:${npc.IntimacyBoundary ?? 'SKIP'}/${npc.IntimacyBoundarySource ?? 'NONE'}`,
         `boundary:${npc.BoundaryPressure ?? 'N'}`,
         `pressure:${npc.HostilePressure ?? 0}/${npc.HostileLandedPressure ?? 0}`,
+    ].join('/')).join('; ');
+}
+
+function intimacyBoundarySummary(handoff) {
+    const npcs = Array.isArray(handoff?.npcHandoffs) ? handoff.npcHandoffs : [];
+    const relevant = npcs.filter(npc => npc?.IntimacyBoundary && npc.IntimacyBoundary !== 'SKIP');
+    if (!relevant.length) return 'none';
+    return relevant.map(npc => [
+        npc.NPC || '(unknown)',
+        npc.IntimacyBoundary,
+        `source:${npc.IntimacyBoundarySource ?? 'NONE'}`,
+        `style:${npc.IntimacyRefusalStyle ?? 'NONE'}`,
     ].join('/')).join('; ');
 }
 
@@ -402,10 +416,13 @@ function buildNpcGuidanceSummary(npcHandoffs) {
 function relationshipNarrationGuide(npc) {
     const behavior = behaviorNarrationGuide(npc?.Behavior);
     const target = relationshipTargetNarrationGuide(npc?.Target);
+    const personality = npc?.PersonalitySummary && !isNoneText(npc.PersonalitySummary)
+        ? ` Use this stable personality note as soft guidance, not a hard script: ${npc.PersonalitySummary}.`
+        : '';
     const boundary = npc?.BoundaryPressure === 'Y'
         ? ' Respect active boundary pressure through space, refusal, guarded movement, or physical protection.'
         : '';
-    return `${behavior} ${target}${boundary}`.trim();
+    return `${behavior} ${target}${personality}${boundary}`.trim();
 }
 
 function cleanNarratorDirective(text) {
@@ -632,27 +649,18 @@ function targetSummary(resolution) {
 }
 
 function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment }) {
-    const goal = resolution.GOAL ?? 'normal';
     const outcome = naturalOutcomeSummary(resolution);
-    const primaryNpc = handoff.npcHandoffs?.[0];
+    const primaryNpc = primaryNarrationNpc(handoff, resolution);
     const npcName = primaryNpc?.NPC || list(resolution.ActionTargets) || 'the NPC';
     const npcGuide = primaryNpc ? relationshipNarrationGuide(primaryNpc) : `Use the listed NPC state naturally: ${npcText}.`;
-    const gate = strongestIntimacyGate(handoff, resolution);
-    const isIntimacyAdvance = goal === 'IntimacyAdvancePhysical' || goal === 'IntimacyAdvanceVerbal';
-    const intimacyDenied = isIntimacyAdvance
-        && (resolution.IntimacyConsent !== 'Y' || gate === 'DENY');
-    const intimacyAllowed = isIntimacyAdvance
-        && !intimacyDenied
-        && (resolution.IntimacyConsent === 'Y' || resolution.STAKES === 'N' || gate === 'ALLOW');
+    const intimacyBoundaryGuide = buildIntimacyBoundaryGuide(resolution, handoff);
     const chaosNote = chaosText !== 'none' ? ` ${chaosGuide}` : '';
     const aggressionNote = aggressionText !== 'none'
         ? ` ${aggressionGuide}`
         : '';
-    const proactiveNote = aggressionText === 'none' && proactiveText !== 'none'
-        ? ' Let the NPC initiative appear only as denial, boundary, refusal, retreat, resistance, or escalation consistent with the consent limit.'
-        : '';
-    const naturalProactiveNote = proactiveText !== 'none'
-        ? ` In the same beat, include this NPC initiative: ${proactivityGuide} Render it naturally through personality, body language, speech, and setting. If no attack result is listed, do not invent a resolved NPC hit.`
+    const compatibleProactivityGuide = buildBoundaryCompatibleProactivityGuide(handoff.proactivityResults ?? {}, handoff.aggressionResults ?? {}, handoff);
+    const naturalProactiveNote = compatibleProactivityGuide !== 'none'
+        ? ` In the same beat, include this NPC initiative: ${compatibleProactivityGuide} Render it naturally through personality, body language, speech, and setting. If no attack result is listed, do not invent a resolved NPC hit.`
         : '';
     const boundaryNote = resolution.classifyPhysicalBoundaryPressure === 'Y'
         ? ' Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance without inventing a landed attack.'
@@ -665,31 +673,28 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const inflictedAggressionNpcInstruction = inflictedAggressionNpcInjuryGuide(handoff.aggressionResults);
     const injuryInstruction = `${inflictedNpcInstruction}${inflictedUserInstruction}${inflictedAggressionNpcInstruction}`;
 
-    if (intimacyDenied) {
-        if (goal === 'IntimacyAdvancePhysical') {
-            return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Consent is denied: any successful physical attempt may land or create contact or positioning, but ${npcName} does not cooperate, reciprocate, or become willing. Narrate rejection, recoil, pushing away, rebuke, resistance, flight, or escalation with this behavior: ${npcGuide}${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
-        }
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Consent is denied: any successful verbal attempt may affect ${npcName}, but the request is refused. Narrate a boundary, rebuke, annoyance, anger, fear, or refusal with this behavior: ${npcGuide} Never narrate compliance with the intimacy request.${aggressionNote}${proactiveNote}${chaosNote}${nameInstruction}`;
-    }
-
     if (aggressionText !== 'none') {
         return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} ${aggressionGuide}${naturalProactiveNote} Do not invent any user follow-up.${nameInstruction}`;
     }
 
-    if (proactiveText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote}${naturalProactiveNote}${nameInstruction}`;
+    if (intimacyBoundaryGuide.mode === 'DENY' && resolution.boundaryViolationExplicit !== 'Y') {
+        return `The user action is ${userAction}; no roll is needed. ${intimacyBoundaryGuide.text}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${naturalProactiveNote}${chaosNote}${nameInstruction}`;
     }
 
-    if (isIntimacyAdvance) {
-        const gateText = intimacyAllowed
-            ? `${npcName} may receive it according to the current consent state and this behavior: ${npcGuide}`
-            : `${npcName} refuses or sets a boundary because consent is not allowing it`;
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} ${gateText}.${chaosNote}${nameInstruction}`;
+    if (proactiveText !== 'none') {
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote}${intimacyBoundaryGuide.text ? ` ${intimacyBoundaryGuide.text}` : ''}${naturalProactiveNote}${nameInstruction}`;
     }
 
     if (resolution.STAKES === 'N') {
         const chaosNote = chaosText !== 'none' ? ` ${chaosGuide}` : '';
-        return `The user action is ${userAction}; no roll is needed.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Keep ${npcName}'s response aligned with this behavior: ${npcGuide} Do not invent hostility or extra mechanics${chaosNote}.${nameInstruction}`;
+        if (intimacyBoundaryGuide.mode === 'ALLOW') {
+            return `The user action is ${userAction}; no roll is needed. ${intimacyBoundaryGuide.text}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${chaosNote}${nameInstruction}`;
+        }
+        return `The user action is ${userAction}; no roll is needed.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Keep ${npcName}'s response aligned with this behavior: ${npcGuide} Romantic, flirtatious, affectionate, suggestive, sexual, or intimate conversation should continue naturally according to context and personality; do not invent hostility, refusal, or extra mechanics unless a boundary is actually violated or the NPC state supports it${chaosNote}.${nameInstruction}`;
+    }
+
+    if (resolution.boundaryViolationExplicit === 'Y') {
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} This is an explicit boundary violation or pressure past refusal; narrate refusal, guardedness, resistance, withdrawal, anger, fear, call for help, or escalation as fits this behavior: ${npcGuide}${aggressionNote}${chaosNote}${nameInstruction}`;
     }
 
     if (resolution.classifyPhysicalBoundaryPressure === 'Y') {
@@ -701,6 +706,76 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Narrate the NPC response with this behavior: ${npcGuide} Keep targets limited to the named scene targets.${nameInstruction}`;
+}
+
+function primaryNarrationNpc(handoff, resolution) {
+    const npcs = Array.isArray(handoff?.npcHandoffs) ? handoff.npcHandoffs : [];
+    const intimacyNpc = npcs.find(npc => npc?.IntimacyBoundary && npc.IntimacyBoundary !== 'SKIP');
+    if (intimacyNpc) return intimacyNpc;
+    const actionTarget = firstNamedTarget(resolution?.ActionTargets);
+    if (actionTarget) {
+        const match = npcs.find(npc => namesEqual(npc?.NPC, actionTarget));
+        if (match) return match;
+    }
+    return npcs[0];
+}
+
+function firstNamedTarget(value) {
+    const items = Array.isArray(value) ? value : [value];
+    return items.map(item => String(item ?? '').trim()).find(item => item && !isNoneText(item)) || '';
+}
+
+function namesEqual(a, b) {
+    return String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+}
+
+function buildIntimacyBoundaryGuide(resolution, handoff) {
+    if (resolution?.intimacyAdvanceExplicit !== 'Y') return { mode: 'SKIP', text: '' };
+    const npcs = Array.isArray(handoff?.npcHandoffs) ? handoff.npcHandoffs : [];
+    const targets = npcs.filter(npc => npc?.IntimacyBoundary && npc.IntimacyBoundary !== 'SKIP');
+    if (!targets.length) return { mode: 'SKIP', text: '' };
+    const hasDeny = targets.some(npc => npc.IntimacyBoundary === 'DENY');
+    return {
+        mode: hasDeny ? 'DENY' : 'ALLOW',
+        text: targets.map(intimacyBoundaryText).join(' '),
+    };
+}
+
+function intimacyBoundaryText(target) {
+    const npcName = valueOrNone(target.NPC);
+    const npcGuide = relationshipNarrationGuide(target);
+    if (target.IntimacyBoundary === 'ALLOW') {
+        return `Intimacy is permitted for ${npcName} because ${intimacyBoundarySourceText(target.IntimacyBoundarySource)}; narrate the NPC response naturally according to context, privacy, safety, mood, and personality. Do not force explicit intimacy if the scene makes it implausible. Keep ${npcName}'s behavior aligned with: ${npcGuide}`;
+    }
+    if (target.IntimacyBoundary === 'DENY') {
+        return `Intimacy is not permitted for ${npcName} here. Narrate a refusal, deflection, pause, boundary, non-cooperation, or backing off; do not narrate reciprocation, compliance, arousal, escalating intimacy, or a successful intimate result. This denial alone is not a dice roll or relationship penalty. Tune the refusal as ${intimacyRefusalGuide(target)} Keep ${npcName}'s behavior aligned with: ${npcGuide}`;
+    }
+    return '';
+}
+
+function intimacyBoundarySourceText(source) {
+    const text = String(source ?? 'NONE');
+    if (text === 'ESTABLISHED_RELATIONSHIP') return 'an established relationship exists';
+    if (text === 'NPC_INITIATED') return 'the NPC initiated or invited this intimacy and {{user}} is accepting';
+    if (text.startsWith('OVERRIDE:')) return `the NPC has the ${text.slice('OVERRIDE:'.length)} override`;
+    return 'the intimacy boundary allows it';
+}
+
+function intimacyRefusalGuide(npc) {
+    switch (npc?.IntimacyRefusalStyle) {
+        case 'PANIC':
+            return 'panicked, urgent, self-protective, or fleeing.';
+        case 'FEARFUL':
+            return 'fearful, avoidant, guarded, or withdrawn.';
+        case 'HOSTILE':
+            return 'firm, angry, suspicious, contemptuous, or openly resistant.';
+        case 'SOFT':
+            return 'softly, awkwardly, playfully, gently, or affectionately without anger when possible.';
+        case 'CLEAR':
+            return 'clear, direct, practical, or reserved.';
+        default:
+            return 'appropriate to the NPC disposition.';
+    }
 }
 
 function nameGenerationGuide(nameGeneration) {
@@ -804,27 +879,12 @@ function naturalOutcomeSummary(resolution) {
     return 'the computed outcome, expressed only as natural scene prose';
 }
 
-function strongestIntimacyGate(handoff, resolution) {
-    const targets = toComparableSet(resolution?.ActionTargets);
-    const targetHandoffs = (handoff?.npcHandoffs ?? []).filter(h => targets.has(String(h?.NPC ?? '').toLowerCase()));
-    const relevantHandoffs = targetHandoffs.length ? targetHandoffs : (handoff?.npcHandoffs ?? []);
-    const gates = relevantHandoffs.map(h => h?.IntimacyGate);
-    if (gates.includes('DENY')) return 'DENY';
-    if (gates.includes('ALLOW')) return 'ALLOW';
-    return gates.find(Boolean) || 'SKIP';
-}
-
 function toComparableSet(value) {
     const items = Array.isArray(value) ? value : [value];
     return new Set(items
         .map(item => String(item ?? '').trim())
         .filter(item => !isNoneText(item))
         .map(item => item.toLowerCase()));
-}
-
-function intimacyConsentSummary(resolution) {
-    if (resolution.GOAL !== 'IntimacyAdvancePhysical' && resolution.GOAL !== 'IntimacyAdvanceVerbal') return 'not applicable';
-    return resolution.IntimacyConsent ?? 'N';
 }
 
 function formatProactivityForNarration(proactivity) {
@@ -867,18 +927,89 @@ function isAggressionRollApplicableProactivity(value) {
     return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(value.Intent);
 }
 
+function buildBoundaryCompatibleProactivityGuide(proactivity, aggressionResults = {}, handoff = {}) {
+    const active = Object.entries(proactivity ?? {}).filter(([, value]) => value?.Proactive === 'Y');
+    if (!active.length) return 'none';
+    const denied = new Set((handoff.npcHandoffs ?? [])
+        .filter(npc => npc?.IntimacyBoundary === 'DENY')
+        .map(npc => String(npc.NPC ?? '').toLowerCase()));
+    const parts = [];
+    for (const [name, value] of active) {
+        const intent = proactivityNarrationIntent(value);
+        const target = value?.ProactivityTarget && value.ProactivityTarget !== '(none)'
+            ? value.ProactivityTarget
+            : '{{user}}';
+        const deniedForNpc = denied.has(String(name ?? '').toLowerCase());
+        const compatibleDescription = deniedForNpc
+            ? deniedIntimacyCompatibleProactivityDescription(name, intent, target)
+            : null;
+        if (compatibleDescription === '') continue;
+        const description = compatibleDescription || personalizeNpcInstruction(name, proactivityIntentDescription(intent, target));
+        const noAttack = isAggressiveProactivityIntent(intent)
+            ? (aggressionResults?.[name]
+                ? ' Use the listed attack result for any resolved hit.'
+                : ' Show only intent, pressure, motion, preparation, or interruption; no resolved hit occurs.')
+            : ' This is not a resolved attack.';
+        const relationshipLimit = isRomanceInitiativeIntent(intent)
+            ? ' Do not establish a relationship unless acceptance happens in-scene; do not force intimacy.'
+            : '';
+        const partnerLimit = isPartnerInitiativeIntent(intent)
+            ? ' Keep it consistent with the established relationship, privacy, danger, urgency, and mood.'
+            : '';
+        const companionLimit = isCompanionInitiativeIntent(intent)
+            ? ' Keep it grounded in the immediate danger, the NPC\'s bond level, self-preservation, and the listed target.'
+            : '';
+        const crisisAttackLimit = intent === 'Companion_Attack'
+            ? ' This must target only the listed hostile target, never {{user}} or a bystander.'
+            : '';
+        const denialLimit = deniedForNpc
+            ? ' Keep this fully compatible with the intimacy denial; do not turn it into consent, arousal, relationship acceptance, or intimate escalation.'
+            : '';
+        parts.push(`${description}${noAttack}${relationshipLimit}${partnerLimit}${companionLimit}${crisisAttackLimit}${denialLimit}`);
+    }
+    return parts.join(' ') || 'none';
+}
+
+function proactivityNarrationIntent(value) {
+    return value?.CompanionInitiative === 'Y'
+        ? value.CompanionInitiativeTag
+        : value?.PartnerInitiative === 'Y'
+        ? value.PartnerInitiativeTag
+        : value?.RomanceInitiative === 'Y'
+        ? value.RomanceInitiativeTag
+        : value?.Intent;
+}
+
+function deniedIntimacyCompatibleProactivityDescription(name, intent, target = '{{user}}') {
+    const npc = valueOrNone(name);
+    switch (intent) {
+        case 'Romantic_Nervous':
+            return `${npc} shows romantic nervousness as part of the refusal: hesitation, awkward warmth, flustered body language, or careful wording while keeping the boundary clear.`;
+        case 'Romantic_Flirt':
+            return `${npc} handles the refusal with playful or flirtatious deflection toward ${target}, keeping the tone warm if appropriate while still refusing intimacy.`;
+        case 'Romantic_Attention':
+            return `${npc} gives ${target} focused romantic attention without allowing intimacy: closeness, careful notice, lingering presence, or a personal gesture while keeping the boundary clear.`;
+        case 'Thoughtful_Gift':
+            return `${npc} may still offer or prepare a small thoughtful gift for ${target}, chosen in a way that fits the NPC, setting, and current relationship.`;
+        case 'Ask_Date':
+            return `${npc} may redirect toward a non-intimate romantic date or private time later, with a believable plan, while making clear that intimacy is not happening now.`;
+        case 'Date_And_Confess':
+            return '';
+        case 'Partner_Intimacy':
+            return `${npc} shifts the partner intimacy impulse into affection, a check-in, or a private boundary-respecting moment without sexual or intimate escalation.`;
+        case 'INTIMACY_OR_FLIRT':
+            return `${npc} may show only boundary-compatible flirtation or warmth toward ${target}; do not narrate intimacy.`;
+        default:
+            return null;
+    }
+}
+
 function buildProactivityGuide(proactivity, aggressionResults = {}) {
     const active = Object.entries(proactivity ?? {}).filter(([, value]) => value?.Proactive === 'Y');
     if (!active.length) return 'none';
 
     return active.map(([name, value]) => {
-        const intent = value?.CompanionInitiative === 'Y'
-            ? value.CompanionInitiativeTag
-            : value?.PartnerInitiative === 'Y'
-            ? value.PartnerInitiativeTag
-            : value?.RomanceInitiative === 'Y'
-            ? value.RomanceInitiativeTag
-            : value?.Intent;
+        const intent = proactivityNarrationIntent(value);
         const target = value?.ProactivityTarget && value.ProactivityTarget !== '(none)'
             ? value.ProactivityTarget
             : '{{user}}';
@@ -928,7 +1059,7 @@ function proactivityIntentDescription(intent, target = '{{user}}') {
         case 'PLAN_OR_BANTER':
             return 'NPC responds with planning, practical talk, comment, banter, or scene-advancing dialogue.';
         case 'INTIMACY_OR_FLIRT':
-            return 'NPC shows permitted intimacy or flirtation consistent with the current gate or override.';
+            return 'NPC shows intimacy or flirtation only when it fits the current relationship, context, privacy, mood, and boundaries.';
         case 'Romantic_Nervous':
             return 'NPC shows romantic nervousness around {{user}}.';
         case 'Romantic_Flirt':
