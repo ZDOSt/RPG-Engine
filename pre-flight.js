@@ -277,16 +277,19 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
 
     const proactiveText = Object.entries(formatProactivityForNarration(handoff.proactivityResults ?? {}))
         .filter(([, value]) => value?.Proactive === 'Y')
-        .map(([name, value]) => [
-            `${name}: ${value.Intent}`,
-            `impulse:${value.Impulse}`,
-            `target:${value.ProactivityTarget ?? '(none)'}`,
-            value.RomanceInitiative === 'Y' ? `romanceDie:${value.RomanceInitiativeDie ?? 'unknown'}` : '',
-            value.RomanceInitiative === 'Y' ? `romanceContext:${value.RomanceInitiativeContext ?? 'unknown'}` : '',
-            value.PartnerInitiative === 'Y' ? `partnerDie:${value.PartnerInitiativeDie ?? 'unknown'}` : '',
-            value.PartnerInitiative === 'Y' ? `partnerContext:${value.PartnerInitiativeContext ?? 'unknown'}` : '',
-            `triggersAggressionRoll:${value.triggersAggressionRoll}`,
-        ].filter(Boolean).join('/')).join(';') || 'none';
+        .map(([name, value]) => {
+            const aggressionAudit = proactivityAggressionAudit(value, handoff.aggressionResults?.[name]);
+            return [
+                `${name}: ${value.Intent}`,
+                `impulse:${value.Impulse}`,
+                `target:${value.ProactivityTarget ?? '(none)'}`,
+                value.RomanceInitiative === 'Y' ? `romanceDie:${value.RomanceInitiativeDie ?? 'unknown'}` : '',
+                value.RomanceInitiative === 'Y' ? `romanceContext:${value.RomanceInitiativeContext ?? 'unknown'}` : '',
+                value.PartnerInitiative === 'Y' ? `partnerDie:${value.PartnerInitiativeDie ?? 'unknown'}` : '',
+                value.PartnerInitiative === 'Y' ? `partnerContext:${value.PartnerInitiativeContext ?? 'unknown'}` : '',
+                aggressionAudit,
+            ].filter(Boolean).join('/');
+        }).join(';') || 'none';
     const proactivityGuide = buildProactivityGuide(handoff.proactivityResults ?? {});
 
     const aggressionText = Object.entries(handoff.aggressionResults ?? {}).map(([name, value]) =>
@@ -815,7 +818,6 @@ function formatProactivityForNarration(proactivity) {
             Intent: value?.Intent ?? 'NONE',
             Impulse: value?.Impulse ?? 'NONE',
             ProactivityTarget: value?.ProactivityTarget ?? '(none)',
-            triggersAggressionRoll: value?.ProactivityTarget && value.ProactivityTarget !== '(none)' ? 'Y' : value?.TargetsUser === 'Y' ? 'Y' : 'N',
             ProactivityTier: value?.ProactivityTier,
             ProactivityDie: value?.ProactivityDie,
             Threshold: value?.Threshold,
@@ -830,6 +832,17 @@ function formatProactivityForNarration(proactivity) {
         };
     }
     return formatted;
+}
+
+function proactivityAggressionAudit(value, aggressionResult) {
+    if (!isAggressionRollApplicableProactivity(value)) return '';
+    return `triggersAggressionRoll:${aggressionResult ? 'Y' : 'N'}`;
+}
+
+function isAggressionRollApplicableProactivity(value) {
+    if (!value || value.Proactive !== 'Y') return false;
+    if (value.RomanceInitiativeTag === 'Companion_Attack' || value.PartnerInitiativeTag === 'Companion_Attack') return true;
+    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(value.Intent);
 }
 
 function buildProactivityGuide(proactivity) {
