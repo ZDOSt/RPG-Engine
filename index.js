@@ -408,6 +408,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     semanticConnectionProfile: '',
     semanticPreset: '',
     disableSemanticThinking: true,
+    writingStyleEnabled: true,
     writingStylePrompt: DEFAULT_WRITING_STYLE_PROMPT,
     proseRulesEnabled: true,
     proseRulesPrompt: DEFAULT_PROSE_RULES_PROMPT,
@@ -727,13 +728,18 @@ function refreshSettingsControls() {
     const presetSelect = document.getElementById('structured_preflight_semantic_preset');
     const enabledCheckbox = document.getElementById('structured_preflight_use_separate_semantic_settings');
     const disableThinkingCheckbox = document.getElementById('structured_preflight_disable_semantic_thinking');
+    const writingStyleEnabled = document.getElementById('structured_preflight_writing_style_enabled');
+    const writingStyleDrawer = document.getElementById('structured_preflight_writing_style_drawer');
     const writingStylePrompt = document.getElementById('structured_preflight_writing_style_prompt');
     const proseRulesEnabled = document.getElementById('structured_preflight_prose_rules_enabled');
+    const proseRulesDrawer = document.getElementById('structured_preflight_prose_rules_drawer');
+    const finalReminderDrawer = document.getElementById('structured_preflight_final_reminder_drawer');
     const proseRulesPrompt = document.getElementById('structured_preflight_prose_rules_prompt');
     const finalReminderPrompt = document.getElementById('structured_preflight_final_reminder_prompt');
 
     if (enabledCheckbox) enabledCheckbox.checked = enabled;
     if (disableThinkingCheckbox) disableThinkingCheckbox.checked = settings.disableSemanticThinking !== false;
+    if (writingStyleEnabled) writingStyleEnabled.checked = settings.writingStyleEnabled !== false;
     if (writingStylePrompt && writingStylePrompt.value !== settings.writingStylePrompt) {
         writingStylePrompt.value = String(settings.writingStylePrompt ?? DEFAULT_WRITING_STYLE_PROMPT);
     }
@@ -761,6 +767,20 @@ function refreshSettingsControls() {
 
     if (profileSelect) profileSelect.disabled = !enabled;
     if (presetSelect) presetSelect.disabled = !enabled;
+    if (writingStylePrompt) writingStylePrompt.disabled = settings.writingStyleEnabled === false;
+    if (writingStyleDrawer) {
+        writingStyleDrawer.hidden = settings.writingStyleEnabled === false;
+        if (writingStyleDrawer.hidden) writingStyleDrawer.open = false;
+    }
+    const proseRulesHidden = settings.proseRulesEnabled === false;
+    if (proseRulesDrawer) {
+        proseRulesDrawer.hidden = proseRulesHidden;
+        if (proseRulesHidden) proseRulesDrawer.open = false;
+    }
+    if (finalReminderDrawer) {
+        finalReminderDrawer.hidden = proseRulesHidden;
+        if (proseRulesHidden) finalReminderDrawer.open = false;
+    }
     if (proseRulesPrompt) proseRulesPrompt.disabled = settings.proseRulesEnabled === false;
     if (finalReminderPrompt) finalReminderPrompt.disabled = settings.proseRulesEnabled === false;
 
@@ -829,10 +849,14 @@ function renderSettingsPanel() {
                 </label>
                 <small>Applies only to Story Engine semantic, tracker, and player setup calls. Main narration keeps its own profile settings.</small>
                 <hr>
-                <details data-structured-preflight-prompt-drawer>
+                <label class="checkbox_label flexNoGap">
+                    <input id="structured_preflight_writing_style_enabled" type="checkbox">
+                    <span>Enable Writing Style</span>
+                </label>
+                <details id="structured_preflight_writing_style_drawer" data-structured-preflight-prompt-drawer>
                     <summary class="flex-container alignitemscenter">
-                        <b class="flex1">Edit Writing Style</b>
-                        <button id="structured_preflight_reset_writing_style" class="menu_button" type="button">Reset Writing Style</button>
+                        <button class="menu_button flex1" type="button" data-structured-preflight-edit-toggle>Edit Writing Style</button>
+                        <button id="structured_preflight_reset_writing_style" class="menu_button" type="button">Reset</button>
                     </summary>
                     <small>Injected into the regular SillyTavern prompt stack after Main Prompt. Edit freely; whatever text is here will be sent as writing style context.</small>
                     <textarea id="structured_preflight_writing_style_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
@@ -843,18 +867,18 @@ function renderSettingsPanel() {
                     <span>Enable Prose Rules</span>
                 </label>
                 <small>When disabled, both the persistent prose rules and final reminder are skipped.</small>
-                <details data-structured-preflight-prompt-drawer>
+                <details id="structured_preflight_prose_rules_drawer" data-structured-preflight-prompt-drawer>
                     <summary class="flex-container alignitemscenter">
-                        <b class="flex1">Edit Prose Rules</b>
-                        <button id="structured_preflight_reset_prose_rules" class="menu_button" type="button">Reset Prose Rules</button>
+                        <button class="menu_button flex1" type="button" data-structured-preflight-edit-toggle>Edit Prose Rules</button>
+                        <button id="structured_preflight_reset_prose_rules" class="menu_button" type="button">Reset</button>
                     </summary>
                     <small>Injected as SYSTEM context in the regular SillyTavern prompt stack after Main Prompt and Writing Style.</small>
                     <textarea id="structured_preflight_prose_rules_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
                 </details>
-                <details data-structured-preflight-prompt-drawer>
+                <details id="structured_preflight_final_reminder_drawer" data-structured-preflight-prompt-drawer>
                     <summary class="flex-container alignitemscenter">
-                        <b class="flex1">Edit Final Reminder</b>
-                        <button id="structured_preflight_reset_final_reminder" class="menu_button" type="button">Reset Final Reminder</button>
+                        <button class="menu_button flex1" type="button" data-structured-preflight-edit-toggle>Edit Final Reminder</button>
+                        <button id="structured_preflight_reset_final_reminder" class="menu_button" type="button">Reset</button>
                     </summary>
                     <small>Inserted immediately before the Story Engine narrator prompt for the final narration pass only.</small>
                     <textarea id="structured_preflight_final_reminder_prompt" class="text_pole textarea_compact" rows="12" spellcheck="false"></textarea>
@@ -872,6 +896,14 @@ function renderSettingsPanel() {
     collapsePromptOptionDrawers(container);
     container.querySelector('.inline-drawer-toggle')?.addEventListener('click', () => {
         setTimeout(() => collapsePromptOptionDrawers(container), 0);
+    });
+    container.querySelectorAll('[data-structured-preflight-edit-toggle]').forEach(button => {
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const drawer = button.closest('details');
+            if (drawer) drawer.open = !drawer.open;
+        });
     });
 
     const settings = getSettings();
@@ -892,12 +924,20 @@ function renderSettingsPanel() {
         settings.disableSemanticThinking = Boolean(event.target?.checked);
         saveExtensionSettings();
     });
+    document.getElementById('structured_preflight_writing_style_enabled')?.addEventListener('change', event => {
+        settings.writingStyleEnabled = Boolean(event.target?.checked);
+        refreshSettingsControls();
+        injectWritingStylePrompt();
+        saveExtensionSettings();
+    });
     document.getElementById('structured_preflight_writing_style_prompt')?.addEventListener('input', event => {
         settings.writingStylePrompt = String(event.target?.value ?? '');
         injectWritingStylePrompt();
         saveExtensionSettings();
     });
-    document.getElementById('structured_preflight_reset_writing_style')?.addEventListener('click', () => {
+    document.getElementById('structured_preflight_reset_writing_style')?.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
         settings.writingStylePrompt = DEFAULT_WRITING_STYLE_PROMPT;
         refreshSettingsControls();
         injectWritingStylePrompt();
@@ -918,13 +958,17 @@ function renderSettingsPanel() {
         settings.finalReminderPrompt = String(event.target?.value ?? '');
         saveExtensionSettings();
     });
-    document.getElementById('structured_preflight_reset_prose_rules')?.addEventListener('click', () => {
+    document.getElementById('structured_preflight_reset_prose_rules')?.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
         settings.proseRulesPrompt = DEFAULT_PROSE_RULES_PROMPT;
         refreshSettingsControls();
         injectProseRulesPrompt();
         saveExtensionSettings();
     });
-    document.getElementById('structured_preflight_reset_final_reminder')?.addEventListener('click', () => {
+    document.getElementById('structured_preflight_reset_final_reminder')?.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
         settings.finalReminderPrompt = DEFAULT_FINAL_REMINDER_PROMPT;
         refreshSettingsControls();
         saveExtensionSettings();
@@ -1018,6 +1062,11 @@ function injectWritingStylePrompt() {
     }
 
     const settings = getSettings();
+    if (settings.writingStyleEnabled === false) {
+        if (context.extensionPrompts) delete context.extensionPrompts[WRITING_STYLE_PROMPT_KEY];
+        return;
+    }
+
     const promptText = String(settings.writingStylePrompt ?? DEFAULT_WRITING_STYLE_PROMPT);
     context.setExtensionPrompt(
         WRITING_STYLE_PROMPT_KEY,
