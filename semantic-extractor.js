@@ -680,6 +680,7 @@ function buildSemanticPreflightSchema() {
                         'initFlags',
                         'timeLapseExplicit',
                         'establishedRelationship',
+                        'romanceStyle',
                         'slowBondEvidence',
                         'explicitIntimidationOrCoercion',
                         'stakeChangeByOutcome',
@@ -705,6 +706,7 @@ function buildSemanticPreflightSchema() {
                         },
                         timeLapseExplicit: { type: 'boolean' },
                         establishedRelationship: { type: 'boolean' },
+                        romanceStyle: { type: 'string', enum: ['auto', 'nervous', 'flirt'] },
                         slowBondEvidence: {
                             type: 'object',
                             additionalProperties: false,
@@ -889,7 +891,8 @@ const COMPACT_LEDGER_CONTRACT = [
     '- Use comma-separated names or (none) for lists. Use Y/N for booleans. Use benefit/harm/none for stakeChangeByOutcome values.',
     '- RelationshipEngine entries must use RelationshipEngine[0], RelationshipEngine[1], etc. Include one entry for each relevant living NPC.',
     '- If no living NPC is relevant, output RelationshipEngine.count=0 and no RelationshipEngine[index] lines.',
-    '- RelationshipEngine[index].establishedRelationship is true only if this NPC already has B4 relationship state and tracker establishedRelationship=Y, or the current explicit scene shows a direct romantic/love/relationship declaration or request from {{user}} accepted by that NPC, or from that NPC accepted by {{user}}. It must establish an actual romantic relationship, partnership, lovers status, dating/courting bond, or equivalent committed romantic connection. Flirting, attraction, arousal, sex, prior intimacy, affection, kindness, trust, loyalty, closeness, friendship, gratitude, protectiveness, or B4 alone does not count.',
+    '- RelationshipEngine[index].establishedRelationship is true only if this NPC already has B4 relationship state and tracker establishedRelationship=Y, or the current explicit scene shows a direct romantic/love/relationship declaration or request from {{user}} accepted by that NPC, or from that NPC accepted by {{user}}. If the immediately previous NPC message contains a clear love/relationship confession or request, and the current user input accepts it verbally or through unmistakable romantic reciprocation such as kissing/embracing without refusal, return true. If the immediately previous user input contains a clear love/relationship confession or request, and the current NPC response accepted it, return true. It must establish an actual romantic relationship, partnership, lovers status, dating/courting bond, or equivalent committed romantic connection. Flirting, attraction, arousal, sex, prior intimacy, affection, kindness, trust, loyalty, closeness, friendship, gratitude, protectiveness, or B4 alone does not count.',
+    '- RelationshipEngine[index].romanceStyle is for B4 pre-relationship initiative only. Return nervous if explicit card/lore/context portrays this NPC as shy, reserved, guarded, restrained, formal, awkward, timid, emotionally cautious, or likely to show romantic interest through hesitation. Return flirt if explicit card/lore/context portrays this NPC as bold, outgoing, playful, teasing, direct, seductive, socially confident, or likely to show romantic interest through open flirtation. Return auto if unclear or mixed.',
     '- RelationshipEngine[index].slowBondEvidence is scene-local semantic evidence for slow B3-to-B4 trust growth. Mark only categories explicitly shown in the latest scene/current immediate context. respectfulContact=welcome/respectful physical contact or physical help; cooperation=constructive cooperation toward a shared purpose; comfortInProximity=NPC remains or settles close without fear, duty, coercion, or forced circumstance; boundaryRespect={{user}} respects refusal, hesitation, privacy, space, limits, consent, or a stated boundary; sharedRoutine=repeated or mundane togetherness such as eating/traveling/working/resting/training/tending camp; playfulness=mutual light teasing, joking, banter, or relaxed warmth; teamwork=coordinated effort under pressure/danger/conflict/crisis; personalAttention=specific attention to NPC needs, preferences, wellbeing, vulnerability, history, comfort, or concerns. blockers include coercion, intimidation, betrayal, humiliation, unwanted intimacy pressure, boundary violation, unresolved harm, exploitation, active fear, active hostility, or trapped/dependent/powerless circumstances that make closeness unsafe to count.',
     '- RelationshipEngine[index].timeLapseExplicit is strict and unambiguous. Return Y only if the user input clearly establishes that the scene has advanced across at least one night or into a new calendar day. This includes explicit or strongly implied new-day/overnight framing such as "next day", "next morning", "the following morning/day", "the next evening", "overnight", "after sleeping", "when I woke up", "morning came", "the sun rose again", any clear overnight sleep plus wake-up, or a major time-skip that crosses days such as "two days later" or "a week later". Return N for all intra-day or same-day time progression, even if hours have passed: "a few hours later", "later that day/afternoon/evening", "that evening", "after dinner/lunch", "once it got dark", "several hours passed", "some time later" while still the same day, or any later framing that does not cross overnight or into a new day. Return N for future-tense plans, intentions, promises, brief pauses, momentary silence, or same-scene continuation.',
     '- All genStats groups must include Rank, MainStat, PHY, MND, CHA.',
@@ -1589,6 +1592,7 @@ function parseCompactLedger(text, trackerSnapshot) {
             `${prefix}.initPreset.fearImmunity`,
             `${prefix}.timeLapseExplicit`,
             `${prefix}.establishedRelationship`,
+            `${prefix}.romanceStyle`,
             `${prefix}.slowBondEvidence.respectfulContact`,
             `${prefix}.slowBondEvidence.cooperation`,
             `${prefix}.slowBondEvidence.comfortInProximity`,
@@ -1645,6 +1649,7 @@ function parseCompactLedger(text, trackerSnapshot) {
             },
             timeLapseExplicit: readBoolean(fields, `${prefix}.timeLapseExplicit`, false),
             establishedRelationship: readBoolean(fields, `${prefix}.establishedRelationship`, false),
+            romanceStyle: normalizeRomanceStyle(fields.get(`${prefix}.romanceStyle`)),
             slowBondEvidence: {
                 respectfulContact: readBoolean(fields, `${prefix}.slowBondEvidence.respectfulContact`, false),
                 cooperation: readBoolean(fields, `${prefix}.slowBondEvidence.cooperation`, false),
@@ -2201,6 +2206,11 @@ function normalizeIntimacyAdvance(value) {
     return ['physical', 'verbal', 'none'].includes(text) ? text : 'none';
 }
 
+function normalizeRomanceStyle(value) {
+    const text = cleanScalar(value).toLowerCase();
+    return ['auto', 'nervous', 'flirt'].includes(text) ? text : 'auto';
+}
+
 function normalizeDetectMode(value) {
     const text = cleanScalar(value).toLowerCase();
     if (text === 'person') return 'PERSON';
@@ -2304,6 +2314,7 @@ function normalizeLedger(ledger) {
         item.initFlags.activeEnemy = toBoolean(item.initFlags.activeEnemy, false);
         item.stakeChangeByOutcome = item.stakeChangeByOutcome || {};
         item.overrideFlags = item.overrideFlags || {};
+        item.romanceStyle = normalizeRomanceStyle(item.romanceStyle);
         item.slowBondEvidence = item.slowBondEvidence || {};
         item.slowBondEvidence.respectfulContact = toBoolean(item.slowBondEvidence.respectfulContact, false);
         item.slowBondEvidence.cooperation = toBoolean(item.slowBondEvidence.cooperation, false);

@@ -195,7 +195,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     UNIVERSAL:
 'Use resolutionPacket as final for GOAL, IntimacyConsent, LandedActions, OutcomeTier, Outcome, ActionTargets, OppTargets, BenefitedObservers, and HarmedObservers.',
     BANDS:
-'BOND(B): 1 Avoid/Ignore (keeps distance, disengages). 2 Neutral/Transactional (polite, businesslike, no trust). 3 Friendly/Comfortable (cooperative, relaxed, familiar). 4 Close/Trusting (confides, seeks closeness; intimacy possible). FEAR(F): 1 Unshaken (steady, not intimidated). 2 Alert/Wary (cautious, watchful). 3 Freezing/Submissive (hesitates, yields, avoids escalation). 4 Terrified/Panic (flight, surrender, desperate compliance). HOSTILITY(H): 1 Warm/Loyal (supportive, protective). 2 Neutral (no active ill will). 3 Aggressive/Obstructive (resentful, argumentative, interfering). 4 Hatred/Violent (wants harm, sabotage, escalation).',
+'BOND(B): 1 Avoid/Ignore (keeps distance, disengages). 2 Neutral/Transactional (polite, businesslike, no trust). 3 Friendly/Comfortable (cooperative, relaxed, familiar). 4 Close/Trusting (confides, seeks closeness, shows loyalty and deep personal investment). FEAR(F): 1 Unshaken (steady, not intimidated). 2 Alert/Wary (cautious, watchful). 3 Freezing/Submissive (hesitates, yields, avoids escalation). 4 Terrified/Panic (flight, surrender, desperate compliance). HOSTILITY(H): 1 Warm/Loyal (supportive, protective). 2 Neutral (no active ill will). 3 Aggressive/Obstructive (resentful, argumentative, interfering). 4 Hatred/Violent (wants harm, sabotage, escalation).',
     LOCK:
 'If F=4 -> TERROR. Else if H=4 -> HATRED. Else if F=3 or H=3 -> FREEZE. If lock is active, behavior must equal lock.'
   });
@@ -727,16 +727,19 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       else -> PLAN_OR_BANTER
 
   romanceInitiative(candidate, handoff, fin, diceBudget):
-    policy: LOCKED, DETERMINISTIC
+    policy: LOCKED, DETERMINISTIC, CONTEXT-AWARE
     rule: apply only after an NPC passes proactivity or is FORCED
     rule: do not apply to ESCALATE_VIOLENCE, BOUNDARY_PHYSICAL, or THREAT_OR_POSTURE
     rule: apply only if fin.B>=4, fin.F<3, fin.H<3, handoff.Lock=None, and handoff.EstablishedRelationship!=Y
+    rule: romanceStyle comes from RelationshipEngine[npc].romanceStyle: shy/reserved/guarded -> nervous; bold/outgoing/playful/direct -> flirt; unclear -> auto
     romanceDie = 1d100
-    if romanceDie>=91 -> Date_And_Confess
-    if romanceDie>=71 -> Ask_Date
-    if romanceDie>=51 -> Thoughtful_Gift
-    if romanceDie>=26 -> Romantic_Flirt
-    else -> Romantic_Nervous
+    if romanceDie>=96 -> Date_And_Confess
+    if romanceDie>=86 -> Ask_Date
+    if romanceDie>=71 -> Thoughtful_Gift
+    if romanceDie>=51 -> Romantic_Attention
+    else -> Romantic_Nervous or Romantic_Flirt from romanceStyle
+    if current context is active -> remap Ask_Date or Date_And_Confess to Romantic_Attention
+    if current context is combat, immediate danger, hostile action, counterattack opening, or crisis -> remap romance tags to Protective_Support, Teamwork_Under_Pressure, or Companion_Attack when a valid hostile target exists
     set Intent to selected romance tag, Impulse=BOND, ProactivityTarget={{user}}, TargetsUser=Y
 
   partnerInitiative(candidate, handoff, fin, diceBudget):
@@ -753,8 +756,17 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if partnerDie>=51 -> Partner_Support
     if partnerDie>=26 -> Partner_Affection
     else -> Partner_Check_In
-    if current context is combat, immediate danger, hostile action, counterattack opening, or crisis -> remap Partner_Intimacy, Partner_Private_Time, Partner_Tease, Partner_Gift, Partner_Affection, or Partner_Conflict to Partner_Support or Partner_Check_In
+    if current context is active -> remap Partner_Intimacy, Partner_Private_Time, or Partner_Conflict to Partner_Check_In
+    if current context is combat, immediate danger, hostile action, counterattack opening, or crisis -> remap partner tags to Protective_Support, Teamwork_Under_Pressure, or Companion_Attack when a valid hostile target exists
     set Intent to selected/remapped partner tag, Impulse=BOND, ProactivityTarget={{user}}, TargetsUser=Y
+
+  companionCrisisTarget(handoff, resolutionPacket):
+    policy: LOCKED, DETERMINISTIC
+    rule: applies only to B4 close companions and established partners during crisis remaps
+    rule: never target {{user}}
+    rule: do not use ActionTargets or HarmedObservers as friendly attack targets
+    if OppTargets.NPC has a valid hostile target not equal to acting NPC -> that NPC
+    else -> (none), downgrade to support/protect/teamwork without attack roll
 
   proactivityTarget(handoff, resolutionPacket, intent):
     policy: FYW
@@ -792,7 +804,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N
     sort candidates by die descending
     promote up to cap candidates to proactive results
-    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|Romantic_Nervous|Romantic_Flirt|Thoughtful_Gift|Ask_Date|Date_And_Confess|Partner_Check_In|Partner_Affection|Partner_Support|Partner_Tease|Partner_Private_Time|Partner_Gift|Partner_Intimacy|Partner_Conflict|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?,RomanceInitiative:[Y/N]?,RomanceInitiativeTag:[tag|(none)]?,RomanceInitiativeDie:[1-100]?,PartnerInitiative:[Y/N]?,PartnerInitiativeTag:[tag|(none)]?,PartnerInitiativeDie:[1-150]?,PartnerInitiativeContext:[calm|active|crisis]?}...}
+    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|Romantic_Nervous|Romantic_Flirt|Romantic_Attention|Thoughtful_Gift|Ask_Date|Date_And_Confess|Partner_Check_In|Partner_Affection|Partner_Support|Partner_Tease|Partner_Private_Time|Partner_Gift|Partner_Intimacy|Partner_Conflict|Protective_Support|Teamwork_Under_Pressure|Companion_Attack|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?,RomanceInitiative:[Y/N]?,RomanceInitiativeTag:[tag|(none)]?,RomanceInitiativeDie:[1-100]?,RomanceInitiativeContext:[calm|active|crisis]?,PartnerInitiative:[Y/N]?,PartnerInitiativeTag:[tag|(none)]?,PartnerInitiativeDie:[1-150]?,PartnerInitiativeContext:[calm|active|crisis]?}...}
 }
 ----------------
 function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSnapshot, trackerUpdate, diceBudget) {
@@ -1568,6 +1580,7 @@ export function isImmediateAttackIntent(intent) {
 }
 
 export function isImmediateAttackIntentForType(intent, attackType) {
+    if (attackType === 'CompanionAttack') return intent === 'ESCALATE_VIOLENCE';
     if (attackType === 'ProactiveAttack') return intent === 'ESCALATE_VIOLENCE';
     if (['CounterAttack', 'Retaliation'].includes(attackType)) return isImmediateAttackIntent(intent);
     return false;

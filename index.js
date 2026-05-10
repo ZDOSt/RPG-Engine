@@ -7,7 +7,7 @@ import { setPersonaDescription, user_avatar } from '../../../../scripts/personas
 import { getPresetManager } from '../../../../scripts/preset-manager.js';
 import { rotateSecret, SECRET_KEYS, secret_state } from '../../../../scripts/secrets.js';
 import { SlashCommandParser } from '../../../../scripts/slash-commands/SlashCommandParser.js';
-import { formatNarratorPromptContext } from './pre-flight.js';
+import { formatNarratorModelPromptContext, formatNarratorPromptContext } from './pre-flight.js';
 import { extractPostReplyTrackerDelta, extractSemanticLedger, POST_REPLY_TRACKER_STOP_SENTINEL, SEMANTIC_PREFLIGHT_STOP_SENTINEL, sendSemanticProfileTextRequest } from './semantic-extractor.js';
 import { buildPlayerTrackerSnapshot, buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
 
@@ -783,6 +783,12 @@ function refreshSettingsControls() {
     }
 }
 
+function collapsePromptOptionDrawers(container = document) {
+    container.querySelectorAll('[data-structured-preflight-prompt-drawer]').forEach(details => {
+        details.open = false;
+    });
+}
+
 function renderSettingsPanel() {
     const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
     if (!host) {
@@ -823,19 +829,21 @@ function renderSettingsPanel() {
                 </label>
                 <small>Applies only to Story Engine semantic, tracker, and player setup calls. Main narration keeps its own profile settings.</small>
                 <hr>
-                <div class="flex-container alignitemscenter">
-                    <b class="flex1">Edit Writing Style</b>
-                    <button id="structured_preflight_reset_writing_style" class="menu_button">Reset Writing Style</button>
-                </div>
-                <small>Injected into the regular SillyTavern prompt stack after Main Prompt. Edit freely; whatever text is here will be sent as writing style context.</small>
-                <textarea id="structured_preflight_writing_style_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
+                <details data-structured-preflight-prompt-drawer>
+                    <summary class="flex-container alignitemscenter">
+                        <b class="flex1">Edit Writing Style</b>
+                        <button id="structured_preflight_reset_writing_style" class="menu_button" type="button">Reset Writing Style</button>
+                    </summary>
+                    <small>Injected into the regular SillyTavern prompt stack after Main Prompt. Edit freely; whatever text is here will be sent as writing style context.</small>
+                    <textarea id="structured_preflight_writing_style_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
+                </details>
                 <hr>
                 <label class="checkbox_label flexNoGap">
                     <input id="structured_preflight_prose_rules_enabled" type="checkbox">
                     <span>Enable Prose Rules</span>
                 </label>
                 <small>When disabled, both the persistent prose rules and final reminder are skipped.</small>
-                <details open>
+                <details data-structured-preflight-prompt-drawer>
                     <summary class="flex-container alignitemscenter">
                         <b class="flex1">Edit Prose Rules</b>
                         <button id="structured_preflight_reset_prose_rules" class="menu_button" type="button">Reset Prose Rules</button>
@@ -843,7 +851,7 @@ function renderSettingsPanel() {
                     <small>Injected as SYSTEM context in the regular SillyTavern prompt stack after Main Prompt and Writing Style.</small>
                     <textarea id="structured_preflight_prose_rules_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
                 </details>
-                <details>
+                <details data-structured-preflight-prompt-drawer>
                     <summary class="flex-container alignitemscenter">
                         <b class="flex1">Edit Final Reminder</b>
                         <button id="structured_preflight_reset_final_reminder" class="menu_button" type="button">Reset Final Reminder</button>
@@ -859,8 +867,12 @@ function renderSettingsPanel() {
                     <button id="structured_preflight_reset_player_setup" class="menu_button">Reset Chat Setup</button>
                 </div>
             </div>
-        </div>`;
+	        </div>`;
     host.prepend(container);
+    collapsePromptOptionDrawers(container);
+    container.querySelector('.inline-drawer-toggle')?.addEventListener('click', () => {
+        setTimeout(() => collapsePromptOptionDrawers(container), 0);
+    });
 
     const settings = getSettings();
     document.getElementById('structured_preflight_use_separate_semantic_settings')?.addEventListener('change', event => {
@@ -1166,12 +1178,16 @@ function getCharacterCardFieldsSafe(context = getContext()) {
 
 function getPersonaText(context = getContext()) {
     const fields = getCharacterCardFieldsSafe(context);
-    return String(fields.persona || '').trim();
+    const avatarId = String(user_avatar || '').trim();
+    return [
+        fields.persona,
+        power_user?.persona_description,
+        avatarId ? power_user?.persona_descriptions?.[avatarId]?.description : '',
+    ].map(value => String(value || '').trim()).find(Boolean) || '';
 }
 
 function getPersonaCoreStats(context = getContext()) {
-    const persona = String(getCharacterCardFieldsSafe(context).persona || '').trim();
-    return parseCoreStatsBlock(persona);
+    return parseCoreStatsBlock(getPersonaText(context));
 }
 
 function getPlayerCoreStats(context = getContext()) {
@@ -1227,16 +1243,107 @@ function normalizeCoreStats(stats) {
 }
 
 function parseCoreStatsBlock(text) {
-    const source = String(text ?? '');
+    const raw = String(text ?? '');
+    const source = normalizeCoreStatsParseText(raw);
     if (!source.trim()) return null;
 
     const stats = {};
     for (const stat of PLAYER_STATS) {
-        const match = source.match(new RegExp(`\\b${stat}\\s*[:=\\-]?\\s*(10|[1-9])\\b`, 'i'));
-        if (!match) return null;
-        stats[stat] = Number(match[1]);
+        const value = findCoreStatValue(source, stat);
+        if (!value) return parseCoreStatsTable(raw);
+        stats[stat] = value;
     }
     return isValidCoreStats(stats) ? normalizeCoreStats(stats) : null;
+}
+
+function normalizeCoreStatsParseText(text) {
+    return String(text ?? '')
+        .normalize('NFKC')
+        .replace(/[：﹕]/g, ':')
+        .replace(/[＝]/g, '=')
+        .replace(/[–—−]/g, '-')
+        .replace(/[`*_~#>]/g, ' ')
+        .replace(/[|/\\,;]+/g, ' ')
+        .replace(/[()[\]{}]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function findCoreStatValue(source, stat) {
+    const numberPattern = '(10|[1-9]|one|two|three|four|five|six|seven|eight|nine|ten)';
+    const statPattern = new RegExp(
+        `(?:^|[^A-Za-z0-9])${stat}\\s*(?:stat|score|rating|attribute|value)?\\s*(?:(?:is|at|as|=|:|-)\\s*)?${numberPattern}(?:\\s*(?:out\\s+of\\s+10|of\\s+10))?(?=$|[^A-Za-z0-9])`,
+        'i',
+    );
+    const match = statPattern.exec(source);
+    if (!match) return null;
+    return parseCoreStatNumber(match[1]);
+}
+
+function parseCoreStatsTable(text) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+        const headerStats = extractCoreStatLabels(lines[index]);
+        if (new Set(headerStats).size !== PLAYER_STATS.length) continue;
+
+        const sameLineValues = extractCoreStatNumbers(normalizeCoreStatsParseText(lines[index]));
+        const sameLineStats = buildStatsFromOrderedValues(headerStats, sameLineValues);
+        if (isValidCoreStats(sameLineStats)) return normalizeCoreStats(sameLineStats);
+
+        for (let lookahead = index + 1; lookahead < Math.min(lines.length, index + 5); lookahead += 1) {
+            if (isLikelyMarkdownSeparator(lines[lookahead])) continue;
+            const nextLineValues = extractCoreStatNumbers(normalizeCoreStatsParseText(lines[lookahead]));
+            const nextLineStats = buildStatsFromOrderedValues(headerStats, nextLineValues);
+            if (isValidCoreStats(nextLineStats)) return normalizeCoreStats(nextLineStats);
+        }
+    }
+    return null;
+}
+
+function extractCoreStatLabels(line) {
+    return [...String(line ?? '').matchAll(/\b(PHY|MND|CHA)\b/gi)].map(match => match[1].toUpperCase());
+}
+
+function extractCoreStatNumbers(line) {
+    const numbers = [];
+    const pattern = /\b(10|[1-9]|one|two|three|four|five|six|seven|eight|nine|ten)\b/gi;
+    for (const match of String(line ?? '').matchAll(pattern)) {
+        const before = String(line ?? '').slice(Math.max(0, match.index - 12), match.index).toLowerCase();
+        if (/\b(?:out\s+of|of)\s*$/.test(before)) continue;
+        const value = parseCoreStatNumber(match[1]);
+        if (value) numbers.push(value);
+    }
+    return numbers;
+}
+
+function buildStatsFromOrderedValues(labels, values) {
+    if (!Array.isArray(labels) || !Array.isArray(values) || labels.length < PLAYER_STATS.length || values.length < PLAYER_STATS.length) return null;
+    const stats = {};
+    for (let index = 0; index < PLAYER_STATS.length; index += 1) {
+        stats[labels[index]] = values[index];
+    }
+    return stats;
+}
+
+function isLikelyMarkdownSeparator(line) {
+    return /^[\s|:.-]+$/.test(String(line ?? '').trim());
+}
+
+function parseCoreStatNumber(value) {
+    const text = String(value ?? '').trim().toLowerCase();
+    const words = {
+        one: 1,
+        two: 2,
+        three: 3,
+        four: 4,
+        five: 5,
+        six: 6,
+        seven: 7,
+        eight: 8,
+        nine: 9,
+        ten: 10,
+    };
+    return words[text] || Number(text) || null;
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -2798,7 +2905,7 @@ function firstChangedIndex(before, after) {
 }
 
 function stripComputedDebugPrefix(text) {
-    return stripStructuredArtifacts(text).trimStart();
+    return stripNarratorMetaPrefix(stripStructuredArtifacts(text)).trimStart();
 }
 
 function extractLegacyNarratorHandoff(text) {
@@ -2814,6 +2921,7 @@ function stripStructuredArtifacts(text) {
         .replace(/````text\s*\n?<pre_flight>[\s\S]*?<\/pre_flight>\s*````\s*/gi, '')
         .replace(/````text\s*\n?<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*````\s*/gi, '')
         .replace(/\[STORY_ENGINE_NARRATOR_HANDOFF[\s\S]*?==BINDING_NARRATION_DIRECTIVE==[\s\S]*?(?=BEGIN_FINAL_NARRATION|$)/gi, '')
+        .replace(/\[STORY_ENGINE_NARRATOR_DIRECTIVE[\s\S]*?==PROMPT==\s*/gi, '')
         .replace(/&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*/gi, '')
         .replace(/<pre_flight>[\s\S]*?<\/pre_flight>\s*/gi, '')
         .replace(/<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*/gi, '')
@@ -2890,9 +2998,14 @@ function stripNarratorMetaPrefix(text) {
     const source = String(text ?? '').trim();
     if (!source) return source;
 
+    const promptDirective = source.match(/(?:^|\n)\s*==PROMPT==\s*\n+/i);
+    if (promptDirective && promptDirective.index < 4000) {
+        return stripNarratorMetaPrefix(source.slice(promptDirective.index + promptDirective[0].length).trim());
+    }
+
     const bindingDirective = source.match(/(?:^|\n)\s*==BINDING_NARRATION_DIRECTIVE==\s*\n+/i);
     if (bindingDirective && bindingDirective.index < 4000) {
-        return source.slice(bindingDirective.index + bindingDirective[0].length).trim();
+        return stripNarratorMetaPrefix(source.slice(bindingDirective.index + bindingDirective[0].length).trim());
     }
 
     const lengthTarget = source.match(/(?:^|\n)\s*(?:Length target|Hard maximum):\s*[^\n]*\n+/i);
@@ -2906,7 +3019,7 @@ function stripNarratorMetaPrefix(text) {
     }
 
     const prefix = source.slice(0, 2500);
-    if (!/\b(preflight|mechanics|NPC State|Proactivity|Chaos|GUIDE|BINDING_NARRATION_DIRECTIVE|PRIVATE_MECHANICS_AUDIT|narrator prompt|formatting rules)\b/i.test(prefix)) {
+    if (!/\b(preflight|mechanics|NPC State|Proactivity|Chaos|GUIDE|BINDING_NARRATION_DIRECTIVE|MODEL_INSTRUCTION|PROMPT|STORY_ENGINE_NARRATOR_DIRECTIVE|PRIVATE_MECHANICS_AUDIT|narrator prompt|formatting rules|The user action)\b/i.test(prefix)) {
         return source;
     }
 
@@ -2917,7 +3030,7 @@ function stripNarratorMetaPrefix(text) {
         if (
             !line
             || /^[-*]\s+/.test(line)
-            || /^(The user|User Action|Decisive Action|Roll Used|Outcome|Outcome Meaning|Margin|Landed Actions|Result|Action Count|Stakes|Intimacy Consent|Consent Gate|Targets|Counter Potential|NPC State|Relationship Result|Chaos|Proactivity|Aggression|Aggression Guide|GUIDE|BINDING_NARRATION_DIRECTIVE|PRIVATE_MECHANICS_AUDIT)\b/i.test(line)
+            || /^(The user|User Action|Decisive Action|Roll Used|Outcome|Outcome Meaning|Margin|Landed Actions|Result|Action Count|Stakes|Intimacy Consent|Consent Gate|Targets|Counter Potential|NPC State|Relationship Result|Chaos|Proactivity|Aggression|Aggression Guide|GUIDE|BINDING_NARRATION_DIRECTIVE|MODEL_INSTRUCTION|PROMPT|STORY_ENGINE_NARRATOR_DIRECTIVE|PRIVATE_MECHANICS_AUDIT)\b/i.test(line)
             || /\b(preflight|mechanics|formatting rules|Length target|Hard maximum|PRIVATE HANDOFF|should be|Let me)\b/i.test(line)
         ) {
             cut = index + 1;
@@ -3292,6 +3405,7 @@ async function handleChatCompletionPromptReady(eventData) {
         const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, state.pendingGeneration.type);
 
         const narratorContext = formatNarratorPromptContext(report);
+        const narratorModelContext = formatNarratorModelPromptContext(report);
         state.pendingRun = {
             type: state.pendingGeneration.type || 'normal',
             trackerBefore: trackerSnapshot,
@@ -3308,7 +3422,7 @@ async function handleChatCompletionPromptReady(eventData) {
 
         sanitizeFinalPromptHistory(eventData.chat);
         appendEngineSentinelToPrompt(eventData.chat);
-        appendNarratorContextToPrompt(eventData.chat, narratorContext);
+        appendNarratorContextToPrompt(eventData.chat, narratorModelContext);
         clearAllProgress();
     } catch (error) {
         state.lastNarratorHandoff = '';

@@ -185,60 +185,72 @@ export function formatNarratorPromptContext(report) {
     const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {});
 
     const lines = [
-        '[STORY_ENGINE_NARRATOR_HANDOFF v0.7 - PRIVATE AUTHORITATIVE]',
+        '[STORY_ENGINE_NARRATOR_HANDOFF v0.8 - AUDIT DISPLAY]',
+        'This displayed handoff is for audit. The narrator model receives only MODEL_INSTRUCTION and PROMPT, not MECHANICS_RESULTS.',
         '',
-        'PRIVATE HANDOFF. Never quote, summarize, mention, label, list, or explain this block.',
-        'Write only the final in-character narration.',
-        'No analysis, bullet points, preamble, audit text, mechanics text, or result labels.',
-        'Wrap the answer with BEGIN_FINAL_NARRATION and END_FINAL_NARRATION.',
-        'Inside those tags, begin directly with scene prose.',
+        '==MECHANICS_RESULTS==',
+        ...formatMechanicsResultList(summary, resolution),
         '',
-        'The BINDING_NARRATION_DIRECTIVE is mandatory and overrides ordinary narrative preference.',
-        'Use it as the final authority for success, failure, denial, proactivity, aggression, consent, impairment, and limits.',
+        '==MODEL_INSTRUCTION==',
+        narratorModelInstruction(),
         '',
-        'Outcome names and mechanics labels are private.',
-        'Never print result categories, impact categories, roll data, action counts, dice math, margins, gates, handoff field names, or system labels.',
-        '',
-        'For intimacy: IntimacyGate=DENY means no cooperation, reciprocation, consent, compliance, softening, or romantic ambiguity, even if the user roll succeeds.',
-        '',
-        'Never narrate voluntary {{user}} actions, counterattacks, thoughts, feelings, decisions, or dialogue beyond the explicit user input.',
-        'Only immediate involuntary physical reactions caused by computed external impact/restraint are allowed.',
-        '',
-        'Length target: 200-300 words.',
-        'Hard maximum: 600 words.',
-        'Use the maximum only for complex combat, multi-character scenes, intimacy-boundary scenes, proactivity, aggression, chaos, or major consequences.',
-        '',
-        '==PRIVATE_MECHANICS_AUDIT==',
-        'User Action: ' + summary.userAction,
-        'Decisive Action: ' + summary.decisiveAction,
-        'Stakes: ' + summary.stakes,
-        'Roll Used: ' + summary.rollUsed,
-        'Outcome: ' + summary.outcome,
-        'Margin: ' + summary.margin,
-        'Outcome Meaning: ' + summary.result,
-        'Landed Actions: ' + summary.landedActions,
-        'Consent Gate: ' + summary.consentGate,
-        'Counter Potential: ' + summary.counter,
-        'Targets: ' + summary.targets,
-        'User Impairment: ' + summary.userImpairment,
-        'NPC Impairment: ' + summary.npcImpairment,
-        'Inflicted NPC Injury: ' + summary.inflictedNpcInjury,
-        'Inflicted User Injury: ' + summary.inflictedUserInjury,
-        'NPC State: ' + summary.npc,
-        'NPC Guidance: ' + summary.npcGuidance,
-        'Relationship Result: ' + summary.relationshipResult,
-        'Chaos: ' + summary.chaos,
-        'Proactivity: ' + summary.proactive,
-        'Proactivity Guide: ' + summary.proactivityGuide,
-        'Aggression: ' + summary.aggression,
-        'Aggression Guide: ' + summary.aggressionGuide,
-        'Generated Name: ' + summary.generatedName,
-        '',
-        '==BINDING_NARRATION_DIRECTIVE==',
+        '==PROMPT==',
         summary.bindingDirective,
     ];
 
     return lines.join('\n');
+}
+
+function formatMechanicsResultList(summary, resolution) {
+    return [
+        ['userAction', summary.userAction],
+        ['resolution.GOAL', valueOrNone(resolution.GOAL)],
+        ['resolution.STAKES', summary.stakes],
+        ['resolution.actionCount', summary.actionCount],
+        ['resolution.rollFull', summary.rollFull],
+        ['resolution.outcome', summary.outcome],
+        ['resolution.outcomeMeaning', summary.result],
+        ['resolution.landedActions', summary.landedActions],
+        ['intimacy.consentGate', summary.consentGate],
+        ['resolution.counterPotential', summary.counter],
+        ['resolution.targets', summary.targets],
+        ['impairment.user', summary.userImpairment],
+        ['impairment.npc', summary.npcImpairment],
+        ['injury.inflictedNpc', summary.inflictedNpcInjury],
+        ['injury.inflictedUser', summary.inflictedUserInjury],
+        ['npc.state', summary.npc],
+        ['relationship.result', summary.relationshipResult],
+        ['chaos.result', summary.chaos],
+        ['proactivity.result', summary.proactive],
+        ['aggression.result', summary.aggression],
+        ['nameGeneration.result', summary.generatedName],
+    ].map(([key, value]) => `- ${key}: ${valueOrNone(value)}`);
+}
+
+export function formatNarratorModelPromptContext(report) {
+    const handoff = report?.finalNarrativeHandoff ?? {};
+    const resolution = handoff.resolutionPacket ?? {};
+    const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {});
+
+    return [
+        '[STORY_ENGINE_NARRATOR_DIRECTIVE v0.8 - PRIVATE AUTHORITATIVE]',
+        '',
+        narratorModelInstruction(),
+        '',
+        '==PROMPT==',
+        summary.bindingDirective,
+    ].join('\n');
+}
+
+function narratorModelInstruction() {
+    return [
+        'Mandatory, non-negotiable: follow the prompt below exactly to narrate the scene.',
+        'The prompt is the controlling instruction for outcome, consent, proactivity, aggression, injuries, impairment, limits, and stopping point.',
+        'If chat history, character tone, relationship vibes, or prior narration conflict with the prompt, obey the prompt.',
+        'Do not output mechanics, labels, analysis, bullets, preamble, or audit text.',
+        'Do not narrate voluntary {{user}} actions, thoughts, feelings, decisions, counterattacks, or dialogue beyond the explicit user input.',
+        'Return only final in-character narration, wrapped with BEGIN_FINAL_NARRATION and END_FINAL_NARRATION.',
+    ].join('\n');
 }
 
 function buildNarratorSummary(handoff, resolution, ledger = {}) {
@@ -261,6 +273,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
     const chaosText = chaos.triggered
         ? `${chaos.band}/${chaos.magnitude}/${chaos.anchor}/${chaos.vector}`
         : 'none';
+    const chaosGuide = buildChaosGuide(chaos);
 
     const proactiveText = Object.entries(formatProactivityForNarration(handoff.proactivityResults ?? {}))
         .filter(([, value]) => value?.Proactive === 'Y')
@@ -269,6 +282,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
             `impulse:${value.Impulse}`,
             `target:${value.ProactivityTarget ?? '(none)'}`,
             value.RomanceInitiative === 'Y' ? `romanceDie:${value.RomanceInitiativeDie ?? 'unknown'}` : '',
+            value.RomanceInitiative === 'Y' ? `romanceContext:${value.RomanceInitiativeContext ?? 'unknown'}` : '',
             value.PartnerInitiative === 'Y' ? `partnerDie:${value.PartnerInitiativeDie ?? 'unknown'}` : '',
             value.PartnerInitiative === 'Y' ? `partnerContext:${value.PartnerInitiativeContext ?? 'unknown'}` : '',
             `triggersAggressionRoll:${value.triggersAggressionRoll}`,
@@ -292,15 +306,17 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
 
     const result = naturalOutcomeSummary(resolution);
     const rollAudit = rollAuditFromResultLine(handoff.resultLine, resolution);
-    const bindingDirective = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, aggressionText, userImpairment, npcImpairment, inflictedNpcInjury, inflictedUserInjury });
+    const bindingDirective = buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment, inflictedNpcInjury, inflictedUserInjury });
 
     return {
         userAction,
         decisiveAction: userAction,
         result,
         rollUsed: rollAudit.rollUsed,
+        rollFull: rollAudit.rollFull,
         outcome: outcomeAuditLabel(resolution),
         margin: rollAudit.margin,
+        actionCount: actionCountSummary(resolution.actions),
         landedActions: resolution.LandedActions ?? '(none)',
         consentGate: consentGateSummary(handoff, resolution),
         relationshipResult: relationshipResultSummary(handoff, resolution),
@@ -316,6 +332,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
         npc: npcText,
         npcGuidance,
         chaos: chaosText,
+        chaosGuide,
         proactive: proactiveText,
         proactivityGuide,
         aggression: aggressionText,
@@ -326,7 +343,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
 }
 
 function rollAuditFromResultLine(resultLine, resolution) {
-    if (resolution?.STAKES === 'N') return { rollUsed: 'none', margin: 'none' };
+    if (resolution?.STAKES === 'N') return { rollUsed: 'none', rollFull: 'none', margin: 'none' };
     const text = String(resultLine ?? '').trim();
     const marginMatch = text.match(/=\s*(-?\d+)\s*vs\s*1d20\(\d+\)(?:\s*\+\s*[A-Z]+\(\d+\))?(?:\s*\+\s*impairment\(-?\d+\))?\s*=\s*(-?\d+)/i);
     const statMatch = text.match(/\+\s*(PHY|MND|CHA)\(\d+\).*?vs\s*1d20\(\d+\)(?:\s*\+\s*(PHY|MND|CHA)\(\d+\))?/i);
@@ -337,8 +354,14 @@ function rollAuditFromResultLine(resultLine, resolution) {
     const oppStat = statMatch?.[2] || (text.includes('vs 1d20') ? 'ENV' : 'OPP');
     return {
         rollUsed: `${userStat} vs ${oppStat}`,
+        rollFull: text || 'unknown',
         margin,
     };
+}
+
+function actionCountSummary(actions) {
+    if (!Array.isArray(actions) || !actions.length) return '0';
+    return `${actions.length} (${list(actions)})`;
 }
 
 function outcomeAuditLabel(resolution) {
@@ -417,6 +440,79 @@ function relationshipTargetNarrationGuide(target) {
             return 'Do not change the relationship state in this beat.';
         default:
             return 'Apply the listed relationship change only as natural scene behavior.';
+    }
+}
+
+function buildChaosGuide(chaos) {
+    if (!chaos?.triggered) return 'none';
+    const band = chaosBandGuide(chaos.band);
+    const magnitude = chaosMagnitudeGuide(chaos.magnitude);
+    const anchor = chaosAnchorGuide(chaos.anchor);
+    const vector = chaosVectorGuide(chaos.vector);
+    return `Brief chaos beat: ${band} ${magnitude} Anchor it to ${anchor}; source/vector: ${vector}. Choose the concrete implementation freely in scene prose, but do not override the main outcome, gates, aggression, injuries, or relationship results, and do not invent extra mechanics.`;
+}
+
+function chaosBandGuide(band) {
+    switch (String(band ?? '').toUpperCase()) {
+        case 'HOSTILE':
+            return 'worsens danger or opposition.';
+        case 'COMPLICATION':
+            return 'adds friction, cost, delay, or uncertainty.';
+        case 'BENEFICIAL':
+            return 'creates a useful opening, information, or advantage.';
+        default:
+            return 'adds a small contextual disruption or opening.';
+    }
+}
+
+function chaosMagnitudeGuide(magnitude) {
+    switch (String(magnitude ?? '').toUpperCase()) {
+        case 'MINOR':
+            return 'Keep it small and quick; do not let it hijack the scene.';
+        case 'MODERATE':
+            return 'Make it noticeable but brief.';
+        case 'MAJOR':
+            return 'Make it strong scene pressure or a strong opportunity.';
+        case 'EXTREME':
+            return 'Make it a rare scene-changing disruption or reveal.';
+        default:
+            return 'Keep it proportional to the scene.';
+    }
+}
+
+function chaosAnchorGuide(anchor) {
+    switch (String(anchor ?? '').toUpperCase()) {
+        case 'GOAL':
+            return "the user's current goal or action";
+        case 'ENVIRONMENT':
+            return 'terrain, weather, objects, or physical surroundings';
+        case 'KNOWN_NPC':
+            return 'a known NPC acting or being affected';
+        case 'RESOURCE':
+            return 'tools, supplies, access, gear, money, or other resources';
+        case 'CLUE':
+            return 'information, evidence, a sign, or an overheard detail';
+        default:
+            return 'the immediate scene';
+    }
+}
+
+function chaosVectorGuide(vector) {
+    switch (String(vector ?? '').toUpperCase()) {
+        case 'NPC':
+            return 'an NPC';
+        case 'CROWD':
+            return 'crowd, bystanders, or nearby people';
+        case 'AUTHORITY':
+            return 'guards, officials, leaders, or authority';
+        case 'ENVIRONMENT':
+            return 'the physical environment';
+        case 'SYSTEM':
+            return 'infrastructure, rules, magic, alarms, or system pressure';
+        case 'ENTITY':
+            return 'an entity, force, or presence';
+        default:
+            return 'the most plausible scene source';
     }
 }
 
@@ -521,7 +617,7 @@ function targetSummary(resolution) {
     return parts.join('; ') || 'none';
 }
 
-function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, aggressionText, userImpairment, npcImpairment }) {
+function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment }) {
     const goal = resolution.GOAL ?? 'normal';
     const outcome = naturalOutcomeSummary(resolution);
     const primaryNpc = handoff.npcHandoffs?.[0];
@@ -534,9 +630,9 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const intimacyAllowed = isIntimacyAdvance
         && !intimacyDenied
         && (resolution.IntimacyConsent === 'Y' || resolution.STAKES === 'N' || gate === 'ALLOW');
-    const chaosNote = chaosText !== 'none' ? ' Include the listed chaos beat without changing that gate result.' : '';
+    const chaosNote = chaosText !== 'none' ? ` Include the Chaos Guide as a brief scene beat without changing that gate result: ${chaosGuide}` : '';
     const aggressionNote = aggressionText !== 'none'
-        ? ' Then narrate the listed NPC attack result exactly and stop at the aggression guide boundary.'
+        ? ` Then narrate this NPC aggression result exactly: ${aggressionGuide}`
         : '';
     const proactiveNote = aggressionText === 'none' && proactiveText !== 'none'
         ? ' Then let the listed proactive NPC action happen only as denial, boundary, refusal, retreat, resistance, or escalation consistent with the gate.'
@@ -563,7 +659,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     if (aggressionText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Then narrate the listed NPC attack result against its listed target. Stop at the aggression guide boundary and do not invent any user follow-up.${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Then narrate this NPC aggression result exactly: ${aggressionGuide} Do not invent any user follow-up.${nameInstruction}`;
     }
 
     if (proactiveText !== 'none') {
@@ -578,7 +674,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     if (resolution.STAKES === 'N') {
-        const chaosNote = chaosText !== 'none' ? ' and include the listed chaos beat as a brief scene event' : '';
+        const chaosNote = chaosText !== 'none' ? ` and include the Chaos Guide as a brief scene event: ${chaosGuide}` : '';
         return `The user action is ${userAction}; no roll is needed.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Keep ${npcName}'s response aligned with this NPC guidance: ${npcGuide} Do not invent hostility or extra mechanics${chaosNote}.${nameInstruction}`;
     }
 
@@ -587,7 +683,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     if (chaosText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Include the listed chaos beat while keeping NPC state anchored to this NPC guidance: ${npcGuide}${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Include the Chaos Guide while keeping NPC state anchored to this NPC guidance: ${npcGuide}. ${chaosGuide}${nameInstruction}`;
     }
 
     return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Narrate the NPC response according to this NPC guidance: ${npcGuide} Use the listed targets.${nameInstruction}`;
@@ -726,6 +822,7 @@ function formatProactivityForNarration(proactivity) {
             RomanceInitiative: value?.RomanceInitiative ?? 'N',
             RomanceInitiativeTag: value?.RomanceInitiativeTag ?? '(none)',
             RomanceInitiativeDie: value?.RomanceInitiativeDie,
+            RomanceInitiativeContext: value?.RomanceInitiativeContext ?? '(none)',
             PartnerInitiative: value?.PartnerInitiative ?? 'N',
             PartnerInitiativeTag: value?.PartnerInitiativeTag ?? '(none)',
             PartnerInitiativeDie: value?.PartnerInitiativeDie,
@@ -758,7 +855,10 @@ function buildProactivityGuide(proactivity) {
         const partnerLimit = isPartnerInitiativeIntent(intent)
             ? ` This is established-relationship behavior; keep it consistent with privacy, danger, urgency, mood, and the listed partner context (${value?.PartnerInitiativeContext ?? 'unknown'}).`
             : '';
-        return `${name}/${intent}: ${description}${noAttack}${relationshipLimit}${partnerLimit}`;
+        const crisisAttackLimit = intent === 'Companion_Attack'
+            ? ' This must target only the listed hostile target, never {{user}} or a bystander.'
+            : '';
+        return `${name}/${intent}: ${description}${noAttack}${relationshipLimit}${partnerLimit}${crisisAttackLimit}`;
     }).join(' ');
 }
 
@@ -784,6 +884,8 @@ function proactivityIntentDescription(intent, target = '{{user}}') {
             return 'NPC shows romantic nervousness around {{user}}.';
         case 'Romantic_Flirt':
             return 'NPC is flirtatious toward {{user}}.';
+        case 'Romantic_Attention':
+            return 'NPC gives {{user}} focused romantic attention through closeness, careful notice, lingering presence, or a personal gesture without forcing a confession, date, or intimacy.';
         case 'Thoughtful_Gift':
             return 'NPC offers or prepares a small thoughtful gift for {{user}}, chosen in a way that fits the NPC, setting, and current relationship.';
         case 'Ask_Date':
@@ -806,21 +908,27 @@ function proactivityIntentDescription(intent, target = '{{user}}') {
             return 'NPC initiates romantic or sexual closeness with {{user}} in a way that fits current privacy, safety, mood, and relationship; do not force explicit intimacy in public, danger, crisis, combat, or implausible circumstances.';
         case 'Partner_Conflict':
             return 'NPC raises an established-partner worry, concern, jealousy, disagreement, or vulnerable tension when context supports a real relationship conversation.';
+        case 'Protective_Support':
+            return 'NPC protects, shields, warns, steadies, heals, covers, pulls clear, guards, or otherwise helps {{user}} through immediate danger without making a resolved attack unless Aggression lists one.';
+        case 'Teamwork_Under_Pressure':
+            return 'NPC coordinates under pressure, covers a flank, creates an opening, follows {{user}}\'s opening, or acts in sync with {{user}} against the current danger without making a resolved attack unless Aggression lists one.';
+        case 'Companion_Attack':
+            return `NPC attacks or directly fights the valid hostile target ${target} while acting as {{user}}'s close companion or partner; narrate the attack only according to the listed Aggression result.`;
         default:
             return 'NPC takes a proactive scene beat consistent with the listed intent and impulse.';
     }
 }
 
 function isAggressiveProactivityIntent(intent) {
-    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(intent);
+    return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE', 'Companion_Attack'].includes(intent);
 }
 
 function isRomanceInitiativeIntent(intent) {
-    return ['Romantic_Nervous', 'Romantic_Flirt', 'Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess'].includes(intent);
+    return ['Romantic_Nervous', 'Romantic_Flirt', 'Romantic_Attention', 'Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess'].includes(intent);
 }
 
 function isPartnerInitiativeIntent(intent) {
-    return ['Partner_Check_In', 'Partner_Affection', 'Partner_Support', 'Partner_Tease', 'Partner_Private_Time', 'Partner_Gift', 'Partner_Intimacy', 'Partner_Conflict'].includes(intent);
+    return ['Partner_Check_In', 'Partner_Affection', 'Partner_Support', 'Partner_Tease', 'Partner_Private_Time', 'Partner_Gift', 'Partner_Intimacy', 'Partner_Conflict', 'Protective_Support', 'Teamwork_Under_Pressure', 'Companion_Attack'].includes(intent);
 }
 
 function buildAggressionGuide(aggressionResults) {
@@ -829,8 +937,10 @@ function buildAggressionGuide(aggressionResults) {
             ? 'retaliation after the user action'
             : value.AttackType === 'CounterAttack'
                 ? `counterattack exploiting the opening (${value.CounterPotential}+${value.CounterBonus})`
-                : value.AttackType === 'ProactiveAttack'
-                    ? 'proactive attack from current hostile state'
+            : value.AttackType === 'ProactiveAttack'
+                ? 'proactive attack from current hostile state'
+                : value.AttackType === 'CompanionAttack'
+                    ? `companion attack against ${value.ProactivityTarget ?? 'the hostile target'}`
                     : 'immediate NPC attack';
         const userImpairment = userImpairmentGuide(value.UserImpairment, userImpairmentSummary(value.UserImpairment));
         const npcImpairment = npcImpairmentGuide(value.NPCImpairment, npcImpairmentSummary(value.NPCImpairment));
@@ -861,8 +971,12 @@ function buildNoAggressionGuide(resolution, handoff) {
         value?.Proactive === 'Y'
         && ((value?.ProactivityTarget && value.ProactivityTarget !== '(none)') || value?.TargetsUser === 'Y')
         && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(value?.Intent));
+    const hasCompanionAttack = Object.values(handoff.proactivityResults ?? {}).some(value =>
+        value?.Proactive === 'Y'
+        && (value?.RomanceInitiativeTag === 'Companion_Attack' || value?.PartnerInitiativeTag === 'Companion_Attack'));
 
     if (!hasAggressiveProactivity) return 'none';
+    if (hasCompanionAttack) return 'Companion attack was selected but no Aggression result was produced; show positioning, preparation, cover, or interrupted motion only. Do not narrate a landed companion hit.';
     if (resolution.OutcomeTier === 'Critical_Success') {
         return 'The user result is strong enough that no immediate NPC attack is resolved. Show only survival, pain, guard, stagger, retreat, or failed preparation.';
     }
