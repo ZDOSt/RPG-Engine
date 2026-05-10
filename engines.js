@@ -45,6 +45,11 @@ function ResolutionEngine(input) {
     rule: return false for casual proximity, ordinary movement, normal item handling, conversation, non-forceful requests, pure social pressure, or any no-stakes action
     rule: this is not combat and must not produce multi-action LandedActions, CounterPotential, or H4 by itself
 
+  activeHostileThreat(input, finalGoal, targets, context):
+    policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
+    rule: return Y only if the current scene contains an immediate hostile danger from an NPC/entity: attacking, charging, preparing to attack, pursuing, ambushing, threatening violence, monster/hostile creature engagement, armed standoff, capture attempt, or imminent physical/supernatural harm
+    rule: return N for negotiation, refusal, bargaining, argument, social resistance, authority denial, suspicion, rivalry, nonviolent obstruction, or ordinary OppTargets.NPC without immediate danger
+
   identifyTargets(input, challenge, finalGoal, context):
     policy: LOCKED, EXPLICIT-ONLY
     ActionTargets = LIVING entities {{user}} directly tries to affect as the main resolution target
@@ -170,6 +175,7 @@ function ResolutionEngine(input) {
     finalGoal = identifyGoal(input)
     challenge = identifyChallenge(input, finalGoal, context)
     targets = identifyTargets(input, challenge, finalGoal, context)
+    activeHostileThreat = activeHostileThreat(input, finalGoal, targets, context)
     IntimacyConsent = checkIntimacyGate(finalGoal, targets, context)
     STAKES = hasStakes(input, finalGoal, challenge, targets, IntimacyConsent, context)
     actions = actionCount(input, challenge)
@@ -183,7 +189,7 @@ function ResolutionEngine(input) {
         if missing -> targetCore = genStats(first OppTargets.NPC, context)
       outcome = resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore)
     NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, and relationshipEngine entries
-    return {GOAL:finalGoal, actions:actions, IntimacyConsent:IntimacyConsent, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
+    return {GOAL:finalGoal, actions:actions, IntimacyConsent:IntimacyConsent, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
 }
 ---------------------------
 function RelationshipEngine(npc, resolutionPacket) {
@@ -676,8 +682,9 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     Landed = handoff.Landed if present else N
     if counterPotential in [light,medium,severe] && lock in [HATRED,FREEZE] -> FORCED
     if lock=HATRED && (Target!=No Change || NPC_STAKES=Y || Landed=Y || handoff.PressureMode!=none || relation.isDirect || relation.isOpp || relation.isHarmed) -> FORCED
+    if companion crisis eligible and context is active combat, immediate hostile danger, hostile physical action, counterattack opening, urgent environmental threat, or crisis -> LOW
     if NPC_STAKES=N && Target=No Change && chaosBand=None:
-      if fin.B>=4 && fin.F<3 && fin.H<3 && handoff.EstablishedRelationship=Y -> HIGH in calm/no-stakes scenes; MEDIUM in active scenes; LOW in combat, immediate danger, hostile action, counterattack opening, or crisis
+      if fin.B>=4 && fin.F<3 && fin.H<3 && handoff.EstablishedRelationship=Y -> HIGH in calm/no-stakes scenes; MEDIUM in active scenes
       if fin.B>=4 && fin.F<3 && fin.H<3 && handoff.EstablishedRelationship!=Y -> HIGH
       if fin.B>=3 || fin.H>=3 -> MEDIUM
       else -> DORMANT
@@ -739,7 +746,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if romanceDie>=51 -> Romantic_Attention
     else -> Romantic_Nervous or Romantic_Flirt from romanceStyle
     if current context is active -> remap Ask_Date or Date_And_Confess to Romantic_Attention
-    if current context is combat, immediate danger, hostile action, counterattack opening, or crisis -> remap romance tags to Protective_Support, Teamwork_Under_Pressure, or Companion_Attack when a valid hostile target exists
+    if current context is active combat, immediate hostile danger, hostile physical action, counterattack opening, urgent environmental threat, or crisis -> handled by companionCrisisInitiative instead
     set Intent to selected romance tag, Impulse=BOND, ProactivityTarget={{user}}, TargetsUser=Y
 
   partnerInitiative(candidate, handoff, fin, diceBudget):
@@ -757,12 +764,27 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     if partnerDie>=26 -> Partner_Affection
     else -> Partner_Check_In
     if current context is active -> remap Partner_Intimacy, Partner_Private_Time, or Partner_Conflict to Partner_Check_In
-    if current context is combat, immediate danger, hostile action, counterattack opening, or crisis -> remap partner tags to Protective_Support, Teamwork_Under_Pressure, or Companion_Attack when a valid hostile target exists
+    if current context is active combat, immediate hostile danger, hostile physical action, counterattack opening, urgent environmental threat, or crisis -> handled by companionCrisisInitiative instead
     set Intent to selected/remapped partner tag, Impulse=BOND, ProactivityTarget={{user}}, TargetsUser=Y
+
+  companionCrisisInitiative(candidate, handoff, fin, diceBudget):
+    policy: LOCKED, DETERMINISTIC, CONTEXT-AWARE
+    rule: apply only after an NPC passes proactivity or is FORCED
+    rule: apply only in crisis context: active combat, immediate hostile danger, hostile physical action, counterattack opening, urgent environmental threat, or other direct danger/threat. Do not apply to ordinary social opposition, negotiation, bargaining, refusal, suspicion, or nonviolent OppTargets.NPC.
+    rule: apply only if fin.B>=2, fin.F<=2, fin.H<=2, handoff.Lock=None, and the NPC is not the direct/opposing/harmed target
+    rule: B1 is excluded
+    companionDie = 1d100
+    if B2 and not dire: 1-35 Companion_Warn, 36-70 Companion_Assist, 71-85 Companion_Cover, 86-100 Companion_Attack if valid hostile target exists else support/cover/warn
+    if B2 and dire: 1-25 Companion_Warn, 26-50 Companion_Assist, 51-65 Companion_Cover, 66-80 Companion_Attack if valid hostile target exists else support/cover/warn, 81-100 Companion_Retreat
+    if B3 and not dire: 1-20 Companion_Warn, 21-55 Companion_Assist, 56-80 Companion_Cover, 81-100 Companion_Attack if valid hostile target exists else support/cover/warn
+    if B3 and dire: 1-15 Companion_Warn, 16-45 Companion_Assist, 46-75 Companion_Cover, 76-95 Companion_Attack if valid hostile target exists else support/cover/warn, 96-100 Companion_Retreat
+    if B4 or established relationship and not dire: 1-5 Companion_Warn, 6-35 Companion_Assist, 36-75 Companion_Cover, 76-100 Companion_Attack if valid hostile target exists else support/cover
+    if B4 or established relationship and dire: 1-5 Companion_Warn, 6-35 Companion_Assist, 36-75 Companion_Cover, 76-99 Companion_Attack if valid hostile target exists else support/cover, 100 Companion_Retreat only if the NPC is badly wounded, critical, or incapacitated; otherwise support/cover/attack
+    set Intent=ESCALATE_VIOLENCE only for Companion_Attack; otherwise Intent=SUPPORT_ACT
 
   companionCrisisTarget(handoff, resolutionPacket):
     policy: LOCKED, DETERMINISTIC
-    rule: applies only to B4 close companions and established partners during crisis remaps
+    rule: applies only to companion crisis initiative during crisis remaps
     rule: never target {{user}}
     rule: do not use ActionTargets or HarmedObservers as friendly attack targets
     if OppTargets.NPC has a valid hostile target not equal to acting NPC -> that NPC
@@ -804,7 +826,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
       if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N
     sort candidates by die descending
     promote up to cap candidates to proactive results
-    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|Romantic_Nervous|Romantic_Flirt|Romantic_Attention|Thoughtful_Gift|Ask_Date|Date_And_Confess|Partner_Check_In|Partner_Affection|Partner_Support|Partner_Tease|Partner_Private_Time|Partner_Gift|Partner_Intimacy|Partner_Conflict|Protective_Support|Teamwork_Under_Pressure|Companion_Attack|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?,RomanceInitiative:[Y/N]?,RomanceInitiativeTag:[tag|(none)]?,RomanceInitiativeDie:[1-100]?,RomanceInitiativeContext:[calm|active|crisis]?,PartnerInitiative:[Y/N]?,PartnerInitiativeTag:[tag|(none)]?,PartnerInitiativeDie:[1-150]?,PartnerInitiativeContext:[calm|active|crisis]?}...}
+    return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|Romantic_Nervous|Romantic_Flirt|Romantic_Attention|Thoughtful_Gift|Ask_Date|Date_And_Confess|Partner_Check_In|Partner_Affection|Partner_Support|Partner_Tease|Partner_Private_Time|Partner_Gift|Partner_Intimacy|Partner_Conflict|Companion_Warn|Companion_Assist|Companion_Cover|Companion_Attack|Companion_Retreat|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?,RomanceInitiative:[Y/N]?,RomanceInitiativeTag:[tag|(none)]?,RomanceInitiativeDie:[1-100]?,RomanceInitiativeContext:[calm|active|crisis]?,PartnerInitiative:[Y/N]?,PartnerInitiativeTag:[tag|(none)]?,PartnerInitiativeDie:[1-150]?,PartnerInitiativeContext:[calm|active|crisis]?,CompanionInitiative:[Y/N]?,CompanionInitiativeTag:[tag|(none)]?,CompanionInitiativeDie:[1-100]?,CompanionInitiativeContext:[crisis]?,CompanionCrisisDire:[Y/N]?}...}
 }
 ----------------
 function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSnapshot, trackerUpdate, diceBudget) {
@@ -1602,7 +1624,7 @@ export function buildPersistencePolicy() {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
         npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'intimacyGate', 'intimacyGateSource', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
         playerPersistentRuleMutated: ['condition', 'wounds', 'statusEffects', 'gear', 'inventory', 'tasks', 'commitments'],
-        perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
+        perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
 }
 

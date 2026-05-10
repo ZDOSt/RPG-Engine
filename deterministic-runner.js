@@ -454,6 +454,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         CounterPotential: outcome.CounterPotential,
         classifyHostilePhysicalIntent: hostilePhysical ? 'Y' : 'N',
         classifyCombatActionSequence: combatActionSequence ? 'Y' : 'N',
+        activeHostileThreat: bool(semantic.activeHostileThreat) ? 'Y' : 'N',
         classifyPhysicalBoundaryPressure: boundaryReferee.value ? 'Y' : 'N',
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
@@ -685,6 +686,9 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             BoundaryPressure: boundaryPressureResult ? 'Y' : 'N',
             DominantLock: dominantLock,
             PressureMode: pressureMode,
+            Condition: state.condition || 'healthy',
+            Wounds: state.wounds || [],
+            StatusEffects: state.statusEffects || [],
             RelationToUserAction: relationToUserAction(npc, resolutionPacket),
         };
         handoffs.push(handoff);
@@ -2325,6 +2329,11 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             PartnerInitiativeTag: candidate.PartnerInitiativeTag || NONE,
             PartnerInitiativeDie: candidate.PartnerInitiativeDie ?? null,
             PartnerInitiativeContext: candidate.PartnerInitiativeContext || NONE,
+            CompanionInitiative: candidate.CompanionInitiative || 'N',
+            CompanionInitiativeTag: candidate.CompanionInitiativeTag || NONE,
+            CompanionInitiativeDie: candidate.CompanionInitiativeDie ?? null,
+            CompanionInitiativeContext: candidate.CompanionInitiativeContext || NONE,
+            CompanionCrisisDire: candidate.CompanionCrisisDire || 'N',
         };
     }
 
@@ -2334,14 +2343,60 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
 }
 
 function applyInitiativeOverridesIfEligible(candidate, handoff, fin, dice, audit, context) {
+    const companionCandidate = applyCompanionCrisisInitiativeIfEligible(candidate, handoff, fin, dice, audit, context);
+    if (companionCandidate !== candidate) return companionCandidate;
     const partnerCandidate = applyPartnerInitiativeIfEligible(candidate, handoff, fin, dice, audit, context);
     if (partnerCandidate !== candidate) return partnerCandidate;
     return applyRomanceInitiativeIfEligible(candidate, handoff, fin, dice, audit, context);
 }
 
+function applyCompanionCrisisInitiativeIfEligible(candidate, handoff, fin, dice, audit, context = {}) {
+    if (!isCompanionCrisisInitiativeEligible(handoff, fin, context)) return candidate;
+
+    const companionDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
+    const companionContext = classifyCompanionInitiativeContext(context);
+    const attackTarget = resolveFriendlyCrisisAttackTarget(handoff, context);
+    const crisisDire = isDireCompanionCrisis(context) ? 'Y' : 'N';
+    const canRetreat = canCompanionRetreatInCrisis(handoff, fin, crisisDire);
+    const tag = companionCrisisTagFromDie(companionDie, fin, handoff?.EstablishedRelationship === 'Y', crisisDire, canRetreat, attackTarget);
+    const target = tag === 'Companion_Attack' ? attackTarget : USER_PROACTIVITY_TARGET;
+    audit.push(`6.5c.1 ${handoff.NPC}.CompanionInitiativeDie=${companionDie}`);
+    audit.push(`6.5c.2 ${handoff.NPC}.CompanionInitiativeContext=${companionContext}`);
+    audit.push(`6.5c.3 ${handoff.NPC}.CompanionCrisisDire=${crisisDire}`);
+    audit.push(`6.5c.4 ${handoff.NPC}.CompanionInitiativeTag=${tag}`);
+    if (!attackTarget) {
+        audit.push(`6.5c.5 ${handoff.NPC}.CompanionAttackTarget=${NONE}`);
+    }
+    return {
+        ...candidate,
+        intent: tag === 'Companion_Attack' ? 'ESCALATE_VIOLENCE' : 'SUPPORT_ACT',
+        impulse: 'BOND',
+        ProactivityTarget: target,
+        TargetsUser: tag === 'Companion_Attack' ? 'N' : 'Y',
+        CompanionInitiative: 'Y',
+        CompanionInitiativeTag: tag,
+        CompanionInitiativeDie: companionDie,
+        CompanionInitiativeContext: companionContext,
+        CompanionCrisisDire: crisisDire,
+    };
+}
+
+function isCompanionCrisisInitiativeEligible(handoff, fin, context = {}) {
+    const relation = handoff?.RelationToUserAction || {};
+    return fin.B >= 2
+        && fin.F <= 2
+        && fin.H <= 2
+        && (handoff?.Lock || 'None') === 'None'
+        && !relation.isDirect
+        && !relation.isOpp
+        && !relation.isHarmed
+        && classifyCompanionInitiativeContext(context) === 'crisis';
+}
+
 function applyRomanceInitiativeIfEligible(candidate, handoff, fin, dice, audit, context = {}) {
     if (!isRomanceInitiativeEligible(handoff, fin)) return candidate;
     if (candidate.intent === 'ESCALATE_VIOLENCE' || candidate.intent === 'BOUNDARY_PHYSICAL' || candidate.intent === 'THREAT_OR_POSTURE') return candidate;
+    if (classifyCompanionInitiativeContext(context) === 'crisis') return candidate;
 
     const romanceDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
     const rawTag = romanceInitiativeTagFromDie(romanceDie, handoff?.RomanceStyle);
@@ -2387,6 +2442,7 @@ function romanceInitiativeTagFromDie(die, romanceStyle = 'auto') {
 function applyPartnerInitiativeIfEligible(candidate, handoff, fin, dice, audit, context) {
     if (!isPartnerInitiativeEligible(handoff, fin)) return candidate;
     if (isBlockedPartnerBaseIntent(candidate.intent)) return candidate;
+    if (classifyCompanionInitiativeContext(context) === 'crisis') return candidate;
 
     const partnerDie = typeof dice.d150 === 'function' ? dice.d150() : Math.floor(Math.random() * 150) + 1;
     const rawTag = partnerInitiativeTagFromDie(partnerDie);
@@ -2418,8 +2474,11 @@ function isPartnerInitiativeEligible(handoff, fin) {
 }
 
 function adjustCompanionProactivityTier(tier, handoff, fin, context) {
-    if (!isPartnerInitiativeEligible(handoff, fin) && !isRomanceInitiativeEligible(handoff, fin)) return tier;
     const companionContext = classifyCompanionInitiativeContext(context);
+    if (isCompanionCrisisInitiativeEligible(handoff, fin, context)) {
+        return tier === 'FORCED' ? 'FORCED' : 'LOW';
+    }
+    if (!isPartnerInitiativeEligible(handoff, fin) && !isRomanceInitiativeEligible(handoff, fin)) return tier;
     if (companionContext === 'calm') return 'HIGH';
     if (companionContext === 'active') return tier === 'DORMANT' ? 'MEDIUM' : tier;
     return tier === 'FORCED' ? 'FORCED' : 'LOW';
@@ -2440,10 +2499,79 @@ function partnerInitiativeTagFromDie(die) {
     return 'Partner_Check_In';
 }
 
+function companionCrisisTagFromDie(die, fin, establishedRelationship, dire, canRetreat, attackTarget) {
+    const bond = Number(fin?.B ?? 1);
+    const closeBond = bond >= 4 || establishedRelationship;
+    const hasAttackTarget = Boolean(attackTarget);
+    const normalized = clamp(Number(die || 1), 1, 100);
+    const remapBlockedAttack = fallbackCompanionCrisisSupportTag(normalized, closeBond);
+
+    if (closeBond) {
+        if (dire === 'Y' && canRetreat && normalized === 100) return 'Companion_Retreat';
+        if (normalized <= 5) return 'Companion_Warn';
+        if (normalized <= 35) return 'Companion_Assist';
+        if (normalized <= 75) return 'Companion_Cover';
+        return hasAttackTarget ? 'Companion_Attack' : remapBlockedAttack;
+    }
+
+    if (bond >= 3) {
+        if (dire === 'Y' && canRetreat && normalized >= 96) return 'Companion_Retreat';
+        if (normalized <= (dire === 'Y' ? 15 : 20)) return 'Companion_Warn';
+        if (normalized <= (dire === 'Y' ? 45 : 55)) return 'Companion_Assist';
+        if (normalized <= (dire === 'Y' ? 75 : 80)) return 'Companion_Cover';
+        return hasAttackTarget ? 'Companion_Attack' : remapBlockedAttack;
+    }
+
+    if (dire === 'Y') {
+        if (canRetreat && normalized >= 81) return 'Companion_Retreat';
+        if (normalized <= 25) return 'Companion_Warn';
+        if (normalized <= 50) return 'Companion_Assist';
+        if (normalized <= 65) return 'Companion_Cover';
+        return hasAttackTarget ? 'Companion_Attack' : remapBlockedAttack;
+    }
+
+    if (normalized <= 35) return 'Companion_Warn';
+    if (normalized <= 70) return 'Companion_Assist';
+    if (normalized <= 85) return 'Companion_Cover';
+    return hasAttackTarget ? 'Companion_Attack' : remapBlockedAttack;
+}
+
+function fallbackCompanionCrisisSupportTag(die, closeBond) {
+    if (closeBond) return die % 2 === 0 ? 'Companion_Cover' : 'Companion_Assist';
+    return die % 3 === 0 ? 'Companion_Warn' : die % 2 === 0 ? 'Companion_Cover' : 'Companion_Assist';
+}
+
+function isDireCompanionCrisis(context = {}) {
+    const packet = context.resolutionPacket || {};
+    if (context.counterPotential === 'severe') return true;
+    if (packet.OutcomeTier === 'Critical_Failure') return true;
+    if (packet.STAKES === 'Y' && packet.classifyCombatActionSequence === 'Y' && environmentThreatLooksUrgent(packet)) return true;
+    if (packet.STAKES === 'Y' && packet.classifyCombatActionSequence === 'Y' && firstReal(packet.OppTargets?.NPC) && context.counterPotential && context.counterPotential !== 'none') return true;
+    if (packet.STAKES === 'Y' && firstReal(packet.OppTargets?.ENV) && environmentThreatLooksUrgent(packet)) return true;
+    return false;
+}
+
+function canCompanionRetreatInCrisis(handoff, fin, dire) {
+    if (dire !== 'Y') return false;
+    const closeBond = fin.B >= 4 || handoff?.EstablishedRelationship === 'Y';
+    if (!closeBond) return true;
+    return isNpcBadlyWoundedOrIncapacitated(handoff);
+}
+
+function isNpcBadlyWoundedOrIncapacitated(handoff) {
+    const condition = String(handoff?.Condition || '').toLowerCase();
+    if (['badly_wounded', 'critical', 'dead'].includes(condition)) return true;
+    const text = [
+        ...(Array.isArray(handoff?.Wounds) ? handoff.Wounds : []),
+        ...(Array.isArray(handoff?.StatusEffects) ? handoff.StatusEffects : []),
+    ].join(' ').toLowerCase();
+    return /\b(badly wounded|critical|crippled|maimed|mangled|broken|bleeding out|incapacitated|unconscious|stunned|paralyzed|paralysed|restrained|pinned|immobilized|immobilised)\b/.test(text);
+}
+
 function classifyCompanionInitiativeContext(context = {}) {
     const packet = context.resolutionPacket || {};
     if (context.counterPotential && context.counterPotential !== 'none') return 'crisis';
-    if (packet.classifyCombatActionSequence === 'Y' || packet.classifyHostilePhysicalIntent === 'Y' || firstReal(packet.OppTargets?.NPC)) return 'crisis';
+    if (packet.classifyCombatActionSequence === 'Y' || packet.classifyHostilePhysicalIntent === 'Y' || packet.activeHostileThreat === 'Y') return 'crisis';
     if (context.chaosBand && context.chaosBand !== 'None') return 'active';
     if (packet.STAKES === 'Y' && firstReal(packet.OppTargets?.ENV) && environmentThreatLooksUrgent(packet)) return 'crisis';
     if (packet.STAKES === 'Y') return context.kind === 'Skill' || context.kind === 'Social' ? 'active' : 'crisis';
@@ -2468,12 +2596,7 @@ function remapCompanionInitiativeForContext(tag, context, die, handoff, engineCo
         }
         return { tag, intent: tag, target: USER_PROACTIVITY_TARGET };
     }
-
-    const attackTarget = resolveFriendlyCrisisAttackTarget(handoff, engineContext);
-    if (attackTarget && die % 2 === 0) {
-        return { tag: 'Companion_Attack', intent: 'ESCALATE_VIOLENCE', target: attackTarget };
-    }
-    return { tag: die % 2 === 0 ? 'Teamwork_Under_Pressure' : 'Protective_Support', intent: 'SUPPORT_ACT', target: USER_PROACTIVITY_TARGET };
+    return { tag: 'Companion_Cover', intent: 'SUPPORT_ACT', target: USER_PROACTIVITY_TARGET };
 }
 
 function remapPartnerInitiativeForContext(tag, context, die, handoff, engineContext = {}) {
@@ -2483,11 +2606,7 @@ function remapPartnerInitiativeForContext(tag, context, die, handoff, engineCont
         if (tag === 'Partner_Conflict') return { tag: 'Partner_Check_In', intent: 'Partner_Check_In', target: USER_PROACTIVITY_TARGET };
         return { tag, intent: tag, target: USER_PROACTIVITY_TARGET };
     }
-    const attackTarget = resolveFriendlyCrisisAttackTarget(handoff, engineContext);
-    if (attackTarget && die % 2 === 0) {
-        return { tag: 'Companion_Attack', intent: 'ESCALATE_VIOLENCE', target: attackTarget };
-    }
-    return { tag: die % 2 === 0 ? 'Teamwork_Under_Pressure' : 'Protective_Support', intent: 'SUPPORT_ACT', target: USER_PROACTIVITY_TARGET };
+    return { tag: 'Companion_Cover', intent: 'SUPPORT_ACT', target: USER_PROACTIVITY_TARGET };
 }
 
 function resolveFriendlyCrisisAttackTarget(handoff, context = {}) {
@@ -2545,43 +2664,55 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     const counterBonus = counterBonusFromPotential(counterPotential);
     const criticalSuccess = resolutionPacket?.OutcomeTier === 'Critical_Success';
     const retaliationAllowed = resolutionPacket?.classifyHostilePhysicalIntent === 'Y';
-    const proactiveAttackAllowed = Object.values(proactivityResults || {}).some(result =>
-        result?.Proactive === 'Y'
-        && hasAggressionProactivityTarget(result)
-        && result?.Intent === 'ESCALATE_VIOLENCE');
-    const companionAttackPresent = Object.values(proactivityResults || {}).some(result =>
+    const proactivityEntries = Object.entries(proactivityResults || {});
+    const isCompanionAttack = result => result?.RomanceInitiativeTag === 'Companion_Attack'
+        || result?.PartnerInitiativeTag === 'Companion_Attack'
+        || result?.CompanionInitiativeTag === 'Companion_Attack';
+    const companionAggressive = proactivityEntries.filter(([, result]) =>
         result?.Proactive === 'Y'
         && hasAggressionProactivityTarget(result)
         && result?.Intent === 'ESCALATE_VIOLENCE'
-        && (result?.RomanceInitiativeTag === 'Companion_Attack' || result?.PartnerInitiativeTag === 'Companion_Attack'));
-    const attackType = criticalSuccess && !companionAttackPresent
+        && isCompanionAttack(result));
+    const proactiveAttackAllowed = proactivityEntries.some(([, result]) =>
+        result?.Proactive === 'Y'
+        && hasAggressionProactivityTarget(result)
+        && result?.Intent === 'ESCALATE_VIOLENCE'
+        && !isCompanionAttack(result));
+    const companionAttackPresent = companionAggressive.length > 0;
+    const baseAttackType = criticalSuccess
         ? 'None'
         : counterAllowed
             ? 'CounterAttack'
             : retaliationAllowed
-                ? (companionAttackPresent ? 'CompanionAttack' : 'Retaliation')
+                ? 'Retaliation'
                 : proactiveAttackAllowed
-                    ? (companionAttackPresent ? 'CompanionAttack' : 'ProactiveAttack')
+                    ? 'ProactiveAttack'
                     : 'None';
-    const proactiveAggressive = Object.entries(proactivityResults).filter(([, result]) =>
-        attackType !== 'None'
-        &&
-        result.Proactive === 'Y'
+    const proactiveAggressive = proactivityEntries.filter(([, result]) =>
+        baseAttackType !== 'None'
+        && result.Proactive === 'Y'
         && hasAggressionProactivityTarget(result)
-        && isImmediateAttackIntentForType(result.Intent, attackType));
+        && !isCompanionAttack(result)
+        && isImmediateAttackIntentForType(result.Intent, baseAttackType));
     const counterTarget = counterAllowed ? firstReal(resolutionPacket?.OppTargets?.NPC) || firstReal(resolutionPacket?.ActionTargets) : null;
     const aggressive = counterAllowed && !criticalSuccess && counterTarget
-        ? [proactiveAggressive.find(([npc]) => sameName(npc, counterTarget)) || [counterTarget, {
-            Proactive: 'Y',
-            Intent: 'BOUNDARY_PHYSICAL',
-            Impulse: 'ANGER',
-            ProactivityTarget: USER_PROACTIVITY_TARGET,
-            TargetsUser: 'Y',
-            ProactivityTier: 'FORCED',
-            ProactivityDie: 20,
-            Threshold: 'AUTO',
-        }]]
-        : proactiveAggressive;
+        ? uniqueAggressionEntries([
+            proactiveAggressive.find(([npc]) => sameName(npc, counterTarget)) || [counterTarget, {
+                Proactive: 'Y',
+                Intent: 'BOUNDARY_PHYSICAL',
+                Impulse: 'ANGER',
+                ProactivityTarget: USER_PROACTIVITY_TARGET,
+                TargetsUser: 'Y',
+                ProactivityTier: 'FORCED',
+                ProactivityDie: 20,
+                Threshold: 'AUTO',
+            }],
+            ...companionAggressive,
+        ])
+        : uniqueAggressionEntries([
+            ...proactiveAggressive,
+            ...companionAggressive,
+        ]);
     const results = {};
     let userTrackerDelta = null;
     const npcTrackerDeltas = [];
@@ -2589,7 +2720,7 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     audit.push('STEP 7: EXECUTE NPCAggressionResolution');
     audit.push(`7.1 counterPotential=${counterPotential}`);
     audit.push(`7.1a counterBonus=${counterBonus}`);
-    audit.push(`7.1b immediateAttackType=${attackType}`);
+    audit.push(`7.1b immediateAttackType=${baseAttackType}`);
     audit.push(`7.1c counterTarget=${counterTarget || NONE}`);
     audit.push(`7.1d companionAttackPresent=${companionAttackPresent ? 'Y' : 'N'}`);
     audit.push(`7.2 AggressionPresent=${aggressive.length ? 'Y' : 'N'}`);
@@ -2610,9 +2741,9 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     for (const [npc, proactivityResult] of aggressive) {
         const target = normalizeProactivityTarget(proactivityResult?.ProactivityTarget || USER_PROACTIVITY_TARGET);
         const targetIsUser = target === USER_PROACTIVITY_TARGET;
-        const resultAttackType = proactivityResult?.RomanceInitiativeTag === 'Companion_Attack' || proactivityResult?.PartnerInitiativeTag === 'Companion_Attack'
+        const resultAttackType = isCompanionAttack(proactivityResult)
             ? 'CompanionAttack'
-            : attackType;
+            : baseAttackType;
         const npcCore = normalizeCore(trackerUpdate[npc]?.currentCoreStats || trackerSnapshot[npc]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
         const npcImpairment = evaluateNpcAggressionImpairment(npc, trackerUpdate, trackerSnapshot, proactivityResult);
         const npcImpairmentPenalty = Number(npcImpairment?.AppliedToRoll === 'Y' ? npcImpairment.RollPenalty : 0);
@@ -2663,6 +2794,19 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
     audit.push(`7.7 AGGRESSION_RESULTS=${compact(results)}`);
     audit.push('---');
     return { results, userTrackerDelta, npcTrackerDeltas };
+}
+
+function uniqueAggressionEntries(entries) {
+    const result = [];
+    const seen = new Set();
+    for (const entry of entries || []) {
+        const npc = entry?.[0];
+        const key = String(npc || '').toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        result.push(entry);
+    }
+    return result;
 }
 
 

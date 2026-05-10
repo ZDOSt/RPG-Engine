@@ -96,6 +96,7 @@ function buildReadableSemanticDebug(ledger) {
         'actionCount=' + list(resolution.actionCount),
         'mapStats=' + inline(resolution.mapStats ?? {}),
         'classifyHostilePhysicalIntent=' + String(Boolean(resolution.classifyHostilePhysicalIntent)),
+        'activeHostileThreat=' + String(Boolean(resolution.activeHostileThreat)),
         'classifyPhysicalBoundaryPressure=' + String(Boolean(resolution.classifyPhysicalBoundaryPressure)),
         'genStats=' + coreLine(resolution.genStats),
         '',
@@ -140,6 +141,7 @@ function buildReadableDeterministicDebug(handoff) {
         'resolutionPacket.LandedActions=' + valueOrNone(resolution.LandedActions),
         'resolutionPacket.CounterPotential=' + valueOrNone(resolution.CounterPotential),
         'resolutionPacket.classifyHostilePhysicalIntent=' + valueOrNone(resolution.classifyHostilePhysicalIntent),
+        'resolutionPacket.activeHostileThreat=' + valueOrNone(resolution.activeHostileThreat),
         'resolutionPacket.classifyPhysicalBoundaryPressure=' + valueOrNone(resolution.classifyPhysicalBoundaryPressure),
         'resolutionPacket.UserImpairment=' + inline(resolution.UserImpairment ?? {}),
         'resolutionPacket.NPCImpairment=' + inline(resolution.NPCImpairment ?? {}),
@@ -671,7 +673,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     }
 
     if (aggressionText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} ${aggressionGuide} Do not invent any user follow-up.${nameInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} ${aggressionGuide}${naturalProactiveNote} Do not invent any user follow-up.${nameInstruction}`;
     }
 
     if (proactiveText !== 'none') {
@@ -726,7 +728,7 @@ function npcImpairmentGuide(impairment, summaryText) {
 function inflictedNpcInjuryGuide(injuries) {
     if (!Array.isArray(injuries) || !injuries.length) return '';
     return ' ' + injuries.map(injury =>
-        `${valueOrNone(injury.NPC)} receives ${valueOrNone(injury.condition)} condition with ${list(injury.woundsAdd)}${list(injury.statusAdd) !== 'none' ? ` and ${list(injury.statusAdd)}` : ''}. This injury is mechanically persistent; narrate it as the concrete lasting result of the landed user attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
+        `${valueOrNone(injury.NPC)} receives ${valueOrNone(injury.condition)} condition${injuryDetailPhrase(injury)}. This injury is mechanically persistent; narrate it as the concrete lasting result of the landed user attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
     ).join(' ');
 }
 
@@ -736,7 +738,7 @@ function inflictedUserInjuryGuide(aggressionResults) {
         .filter(item => item.injury);
     if (!injuries.length) return '';
     return ' ' + injuries.map(({ name, injury }) =>
-        `The user receives ${valueOrNone(injury.condition)} condition from ${valueOrNone(name)} with ${list(injury.woundsAdd)}${list(injury.statusAdd) !== 'none' ? ` and ${list(injury.statusAdd)}` : ''}. This injury is mechanically persistent; narrate it as the concrete lasting result of the NPC attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
+        `The user receives ${valueOrNone(injury.condition)} condition from ${valueOrNone(name)}${injuryDetailPhrase(injury)}. This injury is mechanically persistent; narrate it as the concrete lasting result of the NPC attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
     ).join(' ');
 }
 
@@ -746,8 +748,14 @@ function inflictedAggressionNpcInjuryGuide(aggressionResults) {
         .filter(item => item.injury?.targetType === 'npc');
     if (!injuries.length) return '';
     return ' ' + injuries.map(({ name, injury }) =>
-        `${valueOrNone(injury.target)} receives ${valueOrNone(injury.condition)} condition from ${valueOrNone(name)} with ${list(injury.woundsAdd)}${list(injury.statusAdd) !== 'none' ? ` and ${list(injury.statusAdd)}` : ''}. This injury is mechanically persistent; narrate it as the concrete lasting result of the NPC attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
+        `${valueOrNone(injury.target)} receives ${valueOrNone(injury.condition)} condition from ${valueOrNone(name)}${injuryDetailPhrase(injury)}. This injury is mechanically persistent; narrate it as the concrete lasting result of the NPC attack, with severity limiting later offense, defense, movement, focus, or other affected actions.`,
     ).join(' ');
+}
+
+function injuryDetailPhrase(injury) {
+    const details = [list(injury?.woundsAdd), list(injury?.statusAdd)]
+        .filter(item => !isNoneText(item));
+    return details.length ? ` with ${details.join(' and ')}` : '';
 }
 
 function humanizeImpairmentFunctions(value) {
@@ -838,6 +846,11 @@ function formatProactivityForNarration(proactivity) {
             PartnerInitiativeTag: value?.PartnerInitiativeTag ?? '(none)',
             PartnerInitiativeDie: value?.PartnerInitiativeDie,
             PartnerInitiativeContext: value?.PartnerInitiativeContext ?? '(none)',
+            CompanionInitiative: value?.CompanionInitiative ?? 'N',
+            CompanionInitiativeTag: value?.CompanionInitiativeTag ?? '(none)',
+            CompanionInitiativeDie: value?.CompanionInitiativeDie,
+            CompanionInitiativeContext: value?.CompanionInitiativeContext ?? '(none)',
+            CompanionCrisisDire: value?.CompanionCrisisDire ?? 'N',
         };
     }
     return formatted;
@@ -850,7 +863,7 @@ function proactivityAggressionAudit(value, aggressionResult) {
 
 function isAggressionRollApplicableProactivity(value) {
     if (!value || value.Proactive !== 'Y') return false;
-    if (value.RomanceInitiativeTag === 'Companion_Attack' || value.PartnerInitiativeTag === 'Companion_Attack') return true;
+    if (value.RomanceInitiativeTag === 'Companion_Attack' || value.PartnerInitiativeTag === 'Companion_Attack' || value.CompanionInitiativeTag === 'Companion_Attack') return true;
     return ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(value.Intent);
 }
 
@@ -859,7 +872,9 @@ function buildProactivityGuide(proactivity, aggressionResults = {}) {
     if (!active.length) return 'none';
 
     return active.map(([name, value]) => {
-        const intent = value?.PartnerInitiative === 'Y'
+        const intent = value?.CompanionInitiative === 'Y'
+            ? value.CompanionInitiativeTag
+            : value?.PartnerInitiative === 'Y'
             ? value.PartnerInitiativeTag
             : value?.RomanceInitiative === 'Y'
             ? value.RomanceInitiativeTag
@@ -879,10 +894,13 @@ function buildProactivityGuide(proactivity, aggressionResults = {}) {
         const partnerLimit = isPartnerInitiativeIntent(intent)
             ? ' Keep it consistent with the established relationship, privacy, danger, urgency, and mood.'
             : '';
+        const companionLimit = isCompanionInitiativeIntent(intent)
+            ? ' Keep it grounded in the immediate danger, the NPC\'s bond level, self-preservation, and the listed target.'
+            : '';
         const crisisAttackLimit = intent === 'Companion_Attack'
             ? ' This must target only the listed hostile target, never {{user}} or a bystander.'
             : '';
-        return `${description}${noAttack}${relationshipLimit}${partnerLimit}${crisisAttackLimit}`;
+        return `${description}${noAttack}${relationshipLimit}${partnerLimit}${companionLimit}${crisisAttackLimit}`;
     }).join(' ');
 }
 
@@ -939,12 +957,16 @@ function proactivityIntentDescription(intent, target = '{{user}}') {
             return 'NPC initiates romantic or sexual closeness with {{user}} in a way that fits current privacy, safety, mood, and relationship; do not force explicit intimacy in public, danger, crisis, combat, or implausible circumstances.';
         case 'Partner_Conflict':
             return 'NPC raises an established-partner worry, concern, jealousy, disagreement, or vulnerable tension when context supports a real relationship conversation.';
-        case 'Protective_Support':
-            return 'NPC protects, shields, warns, steadies, heals, covers, pulls clear, guards, or otherwise helps {{user}} through immediate danger without making a resolved attack unless Aggression lists one.';
-        case 'Teamwork_Under_Pressure':
-            return 'NPC coordinates under pressure, covers a flank, creates an opening, follows {{user}}\'s opening, or acts in sync with {{user}} against the current danger without making a resolved attack unless Aggression lists one.';
+        case 'Companion_Warn':
+            return 'NPC warns {{user}} about immediate danger, calls out a threat, gives urgent tactical advice, or alerts others without directly attacking.';
+        case 'Companion_Assist':
+            return 'NPC helps {{user}} under pressure through practical aid, positioning, supplies, magic, guidance, steadying, or quick intervention without directly attacking.';
+        case 'Companion_Cover':
+            return 'NPC covers, shields, intercepts, blocks, pulls clear, buys time, or otherwise protects {{user}} from immediate danger without directly attacking.';
         case 'Companion_Attack':
             return `NPC attacks or directly fights the valid hostile target ${target} while acting as {{user}}'s close companion or partner; narrate the attack only according to the listed Aggression result.`;
+        case 'Companion_Retreat':
+            return 'NPC tries to retreat, pull back, escape, or get out of danger because the situation is dire; if the NPC is deeply bonded or a partner, show strong hesitation, conflict, reluctance, guilt, or an attempt to stay connected while retreating.';
         default:
             return 'NPC takes a proactive scene beat consistent with the listed intent and impulse.';
     }
@@ -959,7 +981,11 @@ function isRomanceInitiativeIntent(intent) {
 }
 
 function isPartnerInitiativeIntent(intent) {
-    return ['Partner_Check_In', 'Partner_Affection', 'Partner_Support', 'Partner_Tease', 'Partner_Private_Time', 'Partner_Gift', 'Partner_Intimacy', 'Partner_Conflict', 'Protective_Support', 'Teamwork_Under_Pressure', 'Companion_Attack'].includes(intent);
+    return ['Partner_Check_In', 'Partner_Affection', 'Partner_Support', 'Partner_Tease', 'Partner_Private_Time', 'Partner_Gift', 'Partner_Intimacy', 'Partner_Conflict'].includes(intent);
+}
+
+function isCompanionInitiativeIntent(intent) {
+    return ['Companion_Warn', 'Companion_Assist', 'Companion_Cover', 'Companion_Attack', 'Companion_Retreat'].includes(intent);
 }
 
 function buildAggressionGuide(aggressionResults) {
@@ -1004,7 +1030,7 @@ function buildNoAggressionGuide(resolution, handoff) {
         && ['ESCALATE_VIOLENCE', 'BOUNDARY_PHYSICAL', 'THREAT_OR_POSTURE'].includes(value?.Intent));
     const hasCompanionAttack = Object.values(handoff.proactivityResults ?? {}).some(value =>
         value?.Proactive === 'Y'
-        && (value?.RomanceInitiativeTag === 'Companion_Attack' || value?.PartnerInitiativeTag === 'Companion_Attack'));
+        && (value?.RomanceInitiativeTag === 'Companion_Attack' || value?.PartnerInitiativeTag === 'Companion_Attack' || value?.CompanionInitiativeTag === 'Companion_Attack'));
 
     if (!hasAggressiveProactivity) return 'none';
     if (hasCompanionAttack) return 'Companion attack was selected but no Aggression result was produced; show positioning, preparation, cover, or interrupted motion only. Do not narrate a landed companion hit.';
