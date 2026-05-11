@@ -4,12 +4,11 @@ import { extension_settings } from '../../../../scripts/extensions.js';
 import { addEphemeralStoppingString, flushEphemeralStoppingStrings } from '../../../../scripts/power-user.js';
 import { persona_description_positions, power_user } from '../../../../scripts/power-user.js';
 import { setPersonaDescription, user_avatar } from '../../../../scripts/personas.js';
-import { getPresetManager } from '../../../../scripts/preset-manager.js';
 import { rotateSecret, SECRET_KEYS, secret_state } from '../../../../scripts/secrets.js';
 import { SlashCommandParser } from '../../../../scripts/slash-commands/SlashCommandParser.js';
 import { formatNarratorModelPromptContext, formatNarratorPromptContext } from './pre-flight.js';
 import { extractPostReplyTrackerDelta, extractSemanticLedger, POST_REPLY_TRACKER_STOP_SENTINEL, SEMANTIC_PREFLIGHT_STOP_SENTINEL, sendSemanticProfileTextRequest } from './semantic-extractor.js';
-import { buildPlayerTrackerSnapshot, buildTrackerSnapshot, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
+import { buildPlayerTrackerSnapshot, buildTrackerSnapshot, normalizeRapportClockState, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
 
 const EXTENSION_NAME = 'Story Engine';
 const SETTINGS_KEY = 'structuredPreflightEngines';
@@ -408,7 +407,6 @@ DO NOT output any of this text in your final response.
 const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,
     semanticConnectionProfile: '',
-    semanticPreset: '',
     disableSemanticThinking: true,
     writingStyleEnabled: true,
     writingStylePrompt: DEFAULT_WRITING_STYLE_PROMPT,
@@ -534,56 +532,6 @@ async function applyConnectionProfileName(profileName) {
     await command.callback({ 'await': 'true', timeout: '10000' }, normalized);
 }
 
-function getPresetNames() {
-    const manager = getPresetManager();
-    if (!manager?.getAllPresets) return [];
-    try {
-        return manager.getAllPresets()
-            .map(name => String(name || '').trim())
-            .filter(Boolean);
-    } catch (error) {
-        console.warn(`[${EXTENSION_NAME}] could not list presets for current API.`, error);
-        return [];
-    }
-}
-
-function getActivePresetName() {
-    const manager = getPresetManager();
-    if (!manager?.getSelectedPresetName) return '';
-    try {
-        return String(manager.getSelectedPresetName() || '');
-    } catch (error) {
-        console.warn(`[${EXTENSION_NAME}] could not read active preset.`, error);
-        return '';
-    }
-}
-
-function applyPresetName(presetName) {
-    const wanted = String(presetName || '').trim();
-    if (!wanted) return;
-
-    const manager = getPresetManager();
-    if (!manager?.getAllPresets || !manager?.findPreset || !manager?.selectPreset) {
-        throw new Error(`Preset switching is unavailable for the current API; could not apply "${wanted}".`);
-    }
-
-    const exact = manager.getAllPresets()
-        .map(name => String(name || ''))
-        .find(name => name.toLowerCase().trim() === wanted.toLowerCase());
-    if (!exact) {
-        throw new Error(`Preset "${wanted}" was not found for the active API after applying the semantic connection profile.`);
-    }
-
-    const value = manager.findPreset(exact);
-    if (value === undefined || value === null) {
-        throw new Error(`Preset "${exact}" exists but could not be selected.`);
-    }
-
-    if (manager.getSelectedPresetName?.() !== exact) {
-        manager.selectPreset(value);
-    }
-}
-
 function getSecretKeyForConnectionProfile(profile) {
     const context = getContext();
     const apiMap = context?.CONNECT_API_MAP?.[profile?.api];
@@ -637,65 +585,25 @@ async function withSemanticGenerationSettings(callback) {
     const settings = getSettings();
     const useSeparateSettings = Boolean(settings.useSeparateSemanticSettings);
     const semanticProfile = String(settings.semanticConnectionProfile || '').trim();
-    const semanticPreset = String(settings.semanticPreset || '').trim();
     const semanticOptions = {
         disableSemanticThinking: settings.disableSemanticThinking !== false,
     };
 
-    if (!useSeparateSettings || (!semanticProfile && !semanticPreset)) {
+    if (!useSeparateSettings || !semanticProfile) {
         return await callback(semanticOptions);
     }
 
-    if (semanticProfile) {
-        const profile = getConnectionProfileByName(semanticProfile);
-        if (!profile) {
-            throw new Error(`Semantic connection profile "${semanticProfile}" was not found.`);
-        }
-
-        console.info(`[${EXTENSION_NAME}] using direct semantic connection profile request: ${profile.name}`);
-        if (semanticPreset) {
-            console.info(`[${EXTENSION_NAME}] using semantic preset override for direct request: ${semanticPreset}`);
-        }
-
-        return await withConnectionProfileSecret(profile, () => callback({
-            ...semanticOptions,
-            semanticProfileId: profile.id,
-            semanticProfileName: profile.name,
-            semanticPreset,
-        }));
+    const profile = getConnectionProfileByName(semanticProfile);
+    if (!profile) {
+        throw new Error(`Semantic connection profile "${semanticProfile}" was not found.`);
     }
 
-    const originalPreset = getActivePresetName();
-    let switched = false;
-
-    try {
-        if (semanticPreset) {
-            console.info(`[${EXTENSION_NAME}] applying semantic preset: ${semanticPreset}`);
-            applyPresetName(semanticPreset);
-            switched = true;
-        }
-        return await callback(semanticOptions);
-    } finally {
-        if (switched) {
-            try {
-                if (originalPreset) {
-                    applyPresetName(originalPreset);
-                }
-                console.info(`[${EXTENSION_NAME}] restored roleplay preset after semantic pass.`);
-            } catch (error) {
-                console.error(`[${EXTENSION_NAME}] failed to restore roleplay preset after semantic pass.`, error);
-                try {
-                    globalThis.toastr?.error?.(
-                        'Semantic pass finished, but restoring the original preset failed. Check ST connection settings before continuing.',
-                        EXTENSION_NAME,
-                        { timeOut: 15000, extendedTimeOut: 15000 },
-                    );
-                } catch {
-                    // Toasts are best-effort only.
-                }
-            }
-        }
-    }
+    console.info(`[${EXTENSION_NAME}] using direct semantic connection profile request: ${profile.name}`);
+    return await withConnectionProfileSecret(profile, () => callback({
+        ...semanticOptions,
+        semanticProfileId: profile.id,
+        semanticProfileName: profile.name,
+    }));
 }
 
 function setSelectOptions(select, values, placeholder, selectedValue, missingLabel = 'Missing') {
@@ -727,7 +635,6 @@ function refreshSettingsControls() {
     const settings = getSettings();
     const enabled = Boolean(settings.useSeparateSemanticSettings);
     const profileSelect = document.getElementById('structured_preflight_semantic_profile');
-    const presetSelect = document.getElementById('structured_preflight_semantic_preset');
     const enabledCheckbox = document.getElementById('structured_preflight_use_separate_semantic_settings');
     const disableThinkingCheckbox = document.getElementById('structured_preflight_disable_semantic_thinking');
     const writingStyleEnabled = document.getElementById('structured_preflight_writing_style_enabled');
@@ -759,16 +666,8 @@ function refreshSettingsControls() {
         settings.semanticConnectionProfile,
         'Profile not found',
     );
-    setSelectOptions(
-        presetSelect,
-        getPresetNames(),
-        'Use profile/current preset',
-        settings.semanticPreset,
-        'Preset not found for current API',
-    );
 
     if (profileSelect) profileSelect.disabled = !enabled;
-    if (presetSelect) presetSelect.disabled = !enabled;
     if (writingStylePrompt) writingStylePrompt.disabled = settings.writingStyleEnabled === false;
     if (writingStyleDrawer) {
         writingStyleDrawer.hidden = settings.writingStyleEnabled === false;
@@ -831,18 +730,14 @@ function renderSettingsPanel() {
             <div class="inline-drawer-content">
                 <label class="checkbox_label flexNoGap">
                     <input id="structured_preflight_use_separate_semantic_settings" type="checkbox">
-                    <span>Use separate semantic connection profile / preset</span>
+                    <span>Use separate semantic connection profile</span>
                 </label>
                 <div class="flex-container alignItemsBaseline">
                     <label for="structured_preflight_semantic_profile">Semantic connection profile</label>
                     <select id="structured_preflight_semantic_profile" class="text_pole flex1"></select>
                 </div>
-                <div class="flex-container alignItemsBaseline">
-                    <label for="structured_preflight_semantic_preset">Semantic preset override</label>
-                    <select id="structured_preflight_semantic_preset" class="text_pole flex1"></select>
-                </div>
                 <div class="flex-container alignitemscenter">
-                    <small class="flex1">Leave preset blank to use the selected profile's preset. Settings are restored after the semantic pass.</small>
+                    <small class="flex1">The semantic pass uses the fully assembled SillyTavern prompt stack and internally forces deterministic request settings.</small>
                     <button id="structured_preflight_refresh_semantic_settings" class="menu_button">Refresh</button>
                 </div>
                 <label class="checkbox_label flexNoGap">
@@ -916,10 +811,6 @@ function renderSettingsPanel() {
     });
     document.getElementById('structured_preflight_semantic_profile')?.addEventListener('change', event => {
         settings.semanticConnectionProfile = String(event.target?.value || '');
-        saveExtensionSettings();
-    });
-    document.getElementById('structured_preflight_semantic_preset')?.addEventListener('change', event => {
-        settings.semanticPreset = String(event.target?.value || '');
         saveExtensionSettings();
     });
     document.getElementById('structured_preflight_disable_semantic_thinking')?.addEventListener('change', event => {
@@ -1199,6 +1090,7 @@ function getTrackerRoot(context = getContext()) {
     const root = context.chatMetadata.structuredPreflightTracker;
     root.npcs = root.npcs || {};
     root.user = normalizeTrackerUserState(root.user || {});
+    root.rapportClock = normalizeRapportClockState(root.rapportClock);
     root.snapshots = root.snapshots || {};
     return root;
 }
@@ -1765,6 +1657,8 @@ function applyTrackerDeltaToUserState(before, delta) {
 function applyTrackerDeltaToNpcState(before, delta) {
     const source = normalizeTrackerEntry(before || {});
     const result = {
+        userHistory: source.userHistory,
+        raceProfile: source.raceProfile,
         personalitySummary: source.personalitySummary || '',
         condition: source.condition,
         wounds: [...source.wounds],
@@ -2037,8 +1931,10 @@ function restoreTrackerFromLatestDisplaySnapshot(context = getContext()) {
     const root = getTrackerRoot(context);
     const snapshot = getLatestTrackerDisplaySnapshot(context);
     if (!root || !snapshot?.npcs) return false;
+    const rapportClock = normalizeRapportClockState(root.rapportClock);
     root.npcs = normalizeDisplayTrackerNpcs(snapshot.npcs);
     root.user = normalizeTrackerUserState(snapshot.user || root.user || {});
+    root.rapportClock = rapportClock;
     return true;
 }
 
@@ -2047,8 +1943,10 @@ function restoreTrackerFromMessageDisplaySnapshot(messageId, context = getContex
     const message = context?.chat?.[messageId];
     const snapshot = getMessageTrackerDisplaySnapshot(message);
     if (!root || !snapshot?.npcs) return false;
+    const rapportClock = normalizeRapportClockState(root.rapportClock);
     root.npcs = normalizeDisplayTrackerNpcs(snapshot.npcs);
     root.user = normalizeTrackerUserState(snapshot.user || root.user || {});
+    root.rapportClock = rapportClock;
     return true;
 }
 
@@ -3159,8 +3057,10 @@ function restoreTrackerForRegeneration(type) {
     const targetMessageId = Array.isArray(context?.chat) ? context.chat.length - 1 : null;
     const snapshot = targetMessageId == null ? null : root.snapshots?.[getMessageKey(targetMessageId, context)]?.before;
     if (snapshot) {
+        const rapportClock = normalizeRapportClockState(root.rapportClock);
         root.npcs = normalizeDisplayTrackerNpcs(snapshot);
         root.user = normalizeTrackerUserState(root.snapshots?.[getMessageKey(targetMessageId, context)]?.beforeUser || root.user || {});
+        root.rapportClock = rapportClock;
         root.snapshots[getMessageKey(targetMessageId, context)].restoredForRegeneration = Date.now();
         console.info(`[${EXTENSION_NAME}] restored tracker snapshot before ${type} of message ${targetMessageId}`);
     }
@@ -3229,7 +3129,6 @@ async function prependComputedDebug(messageId, type) {
                                 disableSemanticThinking: settings?.disableSemanticThinking !== false,
                                 semanticProfileId: settings?.semanticProfileId,
                                 semanticProfileName: settings?.semanticProfileName,
-                                semanticPreset: settings?.semanticPreset,
                                 latestUserText: pendingRun.latestUserText,
                             },
                         );
@@ -3513,7 +3412,6 @@ async function runSemanticPassWithPromptReadyBypass(context, assembledChat, type
             disableSemanticThinking: settings?.disableSemanticThinking !== false,
             semanticProfileId: settings?.semanticProfileId,
             semanticProfileName: settings?.semanticProfileName,
-            semanticPreset: settings?.semanticPreset,
         }));
     } finally {
         flushEphemeralStoppingStrings();

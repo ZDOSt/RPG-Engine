@@ -5,8 +5,9 @@ import {
     counterBonusFromPotential,
     aggressionReactionOutcome,
     classifyUserNonHuman,
+    classifyRaceCategory,
+    explicitRaceEvidence,
     isDefaultGeneratedCore,
-    initPreset,
     routeDispositionTarget,
     resolveStakeChangeByOutcome,
     applyMeaningfulBenefitReferee,
@@ -38,6 +39,8 @@ import {
     buildPersistencePolicy,
     trackerSummary,
     normalizeTrackerEntry,
+    normalizeUserHistory,
+    normalizeNpcRaceProfile,
     normalizeProactivityMemory,
     normalizeTrackerUserState,
     normalizeTrackerCondition,
@@ -74,6 +77,9 @@ import {
 const NONE = '(none)';
 const NAME_REGISTRY_KEY = 'structuredPreflightNameRegistry';
 const USER_PROACTIVITY_TARGET = '{{user}}';
+const RAPPORT_ACTIVE_IDLE_LIMIT_MS = 10 * 60 * 1000;
+const RAPPORT_COOLDOWN_MS = 90 * 60 * 1000;
+const NPC_PROACTIVITY_CAP = 3;
 
 const PHONOTACTIC_ONSETS = ['', 'b', 'd', 'g', 'h', 'k', 'l', 'm', 'n', 'r', 's', 't', 'v', 'y', 'z', 'kh', 'sh'];
 const PHONOTACTIC_VOWELS = ['a', 'e', 'i', 'o', 'u', 'ai', 'ei', 'ao'];
@@ -146,9 +152,10 @@ export function buildPlayerTrackerSnapshot(context) {
 export async function saveTrackerUpdate(context, trackerUpdate, options = {}) {
     if (!context?.chatMetadata || !trackerUpdate) return;
 
-    const root = context.chatMetadata.structuredPreflightTracker || { npcs: {}, user: {} };
+    const root = context.chatMetadata.structuredPreflightTracker || { npcs: {}, user: {}, rapportClock: normalizeRapportClock() };
     root.npcs = root.npcs || {};
     root.user = normalizeTrackerUserState(root.user || {});
+    root.rapportClock = normalizeRapportClock(root.rapportClock);
 
     for (const [name, value] of Object.entries(trackerUpdate.npcs || {})) {
         root.npcs[name] = normalizeTrackerEntry({
@@ -174,12 +181,17 @@ export async function saveTrackerUpdate(context, trackerUpdate, options = {}) {
     }
 }
 
+export function normalizeRapportClockState(value = {}) {
+    return normalizeRapportClock(value);
+}
+
 export function runDeterministicEngines(ledger, trackerSnapshot, context, type) {
     const audit = [];
     const dice = createDice();
     const refereeContext = buildRefereeContext(context);
+    const rapportClock = advanceRapportClock(context, audit);
     const resolution = runResolution(ledger, trackerSnapshot, dice, audit, context, refereeContext);
-    const relationships = runRelationships(ledger, trackerSnapshot, resolution.packet, audit, refereeContext, context);
+    const relationships = runRelationships(ledger, trackerSnapshot, resolution.packet, audit, refereeContext, context, rapportClock);
     const chaos = runChaos(ledger, relationships.handoffs, resolution.packet, dice, audit);
     const name = runNameGeneration(ledger, audit, context, type);
     const injuryTrackerUpdate = applyInflictedNpcInjuriesToTrackerUpdate(resolution.packet, relationships.trackerUpdate, trackerSnapshot, audit);
@@ -215,6 +227,39 @@ export function runDeterministicEngines(ledger, trackerSnapshot, context, type) 
         finalNarrativeHandoff,
         trackerUpdate,
     };
+}
+
+function normalizeRapportClock(value = {}) {
+    return {
+        activeMs: Math.max(0, Math.floor(Number(value?.activeMs || 0))),
+        lastActivityAt: Math.max(0, Math.floor(Number(value?.lastActivityAt || 0))),
+    };
+}
+
+function advanceRapportClock(context, audit) {
+    if (!context?.chatMetadata) {
+        const clock = normalizeRapportClock();
+        audit.push(`RAPPORT_CLOCK=${compact({ ...clock, activeDeltaMs: 0, idleGapIgnored: 'N' })}`);
+        return clock;
+    }
+
+    const root = context.chatMetadata.structuredPreflightTracker || { npcs: {}, user: {}, rapportClock: normalizeRapportClock() };
+    const previous = normalizeRapportClock(root.rapportClock);
+    const now = Date.now();
+    const elapsedMs = previous.lastActivityAt > 0 ? Math.max(0, now - previous.lastActivityAt) : 0;
+    const activeDeltaMs = elapsedMs > 0 && elapsedMs <= RAPPORT_ACTIVE_IDLE_LIMIT_MS ? elapsedMs : 0;
+    const idleGapIgnored = elapsedMs > RAPPORT_ACTIVE_IDLE_LIMIT_MS ? 'Y' : 'N';
+    const clock = {
+        activeMs: previous.activeMs + activeDeltaMs,
+        lastActivityAt: now,
+    };
+
+    root.npcs = root.npcs || {};
+    root.user = root.user || {};
+    root.rapportClock = clock;
+    context.chatMetadata.structuredPreflightTracker = root;
+    audit.push(`RAPPORT_CLOCK=${compact({ ...clock, elapsedMs, activeDeltaMs, idleGapIgnored })}`);
+    return clock;
 }
 
 function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeContext) {
@@ -272,14 +317,18 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         })}`);
     }
 
-    const npcInScene = unique([
+    const targetNpcInScene = unique([
         ...targets.ActionTargets,
         ...targets.OppTargets.NPC,
         ...targets.BenefitedObservers,
         ...targets.HarmedObservers,
-        ...ledger.relationshipEngine.map(x => x.NPC).filter(name => targetClassifier.isLiving(name)),
     ].filter(name => isReal(name) && targetClassifier.isLiving(name)));
+    const pendingNpcInScene = pendingProactivityResponseNpcNames(trackerSnapshot, context, targetNpcInScene);
+    const npcInScene = unique([...targetNpcInScene, ...pendingNpcInScene]);
     audit.push(`2.5 NPCInScene=[${npcInScene.join(',') || NONE}]`);
+    if (pendingNpcInScene.length) {
+        audit.push(`2.5a pendingProactivityResponseNpc=[${pendingNpcInScene.join(',')}]`);
+    }
 
     let actions = ['a1'];
     let outcome = {
@@ -431,16 +480,10 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     return { packet, resultLine };
 }
 
-function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refereeContext, context) {
+function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refereeContext, context, rapportClock = normalizeRapportClock()) {
     const resolutionSemantic = ledger.resolutionEngine || {};
     const semanticMap = new Map((ledger.relationshipEngine || []).filter(x => x?.NPC).map(x => [x.NPC, x]));
-    const npcList = unique([
-        ...toRealArray(resolutionPacket.NPCInScene),
-        ...(ledger.relationshipEngine || [])
-            .filter(item => item?.NPC && bool(item.relevant))
-            .filter(item => relationshipSemanticHasSlowBondSignal(item))
-            .map(item => item.NPC),
-    ]);
+    const npcList = unique(toRealArray(resolutionPacket.NPCInScene));
     const handoffs = [];
     const trackerUpdate = {};
     const pendingOfferNpcs = npcList.filter(npc => isRomanceMemoryTag(normalizeTrackerEntry(trackerSnapshot[npc] || {}).proactivityMemory.pendingTag));
@@ -449,8 +492,8 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
     audit.push(`3.1 NPC_LIST=[${npcList.join(',') || NONE}]`);
 
     for (const npc of npcList) {
-        const sem = semanticMap.get(npc) || { NPC: npc, relevant: false, initFlags: {}, stakeChangeByOutcome: {}, overrideFlags: {} };
-        const relevant = bool(sem.relevant) ? 'Y' : 'N';
+        const sem = semanticMap.get(npc) || { NPC: npc, stakeChangeByOutcome: {}, overrideFlags: {} };
+        const relevant = toRealArray(resolutionPacket.NPCInScene).some(name => sameName(name, npc)) ? 'Y' : 'N';
         audit.push(`3.2 ${npc}.relevant=${relevant}`);
 
         if (relevant === 'N') {
@@ -478,8 +521,8 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         const rawState = trackerSnapshot[npc] || {};
         const firstTrackedEncounter = !rawState.currentDisposition;
         const state = normalizeTrackerEntry(rawState);
-        const timeLapseExplicit = resolveTimeLapseExplicit(sem) ? 'Y' : 'N';
-        const rapportEligible = firstTrackedEncounter || timeLapseExplicit === 'Y';
+        let rapportCooldownUntilActiveMs = state.rapportCooldownUntilActiveMs;
+        const rapportEligible = firstTrackedEncounter || rapportClock.activeMs >= rapportCooldownUntilActiveMs;
         let currentDisposition = state.currentDisposition;
         let currentRapport = state.currentRapport;
         let hostilePressure = state.hostilePressure;
@@ -488,21 +531,21 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         let pressureMode = state.pressureMode;
         let slowBondEvidence = state.slowBondEvidence;
         let proactivityMemory = beginProactivityMemoryTurn(state.proactivityMemory);
+        let initMetadata = null;
 
         audit.push(`3.3 getCurrentRelationalState=${compact(state)}`);
-        audit.push(`3.3a timeLapseExplicit=${timeLapseExplicit}`);
+        audit.push(`3.3a rapportClock=${compact({ activeMs: rapportClock.activeMs, cooldownUntilActiveMs: rapportCooldownUntilActiveMs })}`);
         audit.push(`3.3b firstTrackedEncounter=${yn(firstTrackedEncounter)}`);
         audit.push(`3.3c rapportEligible=${yn(rapportEligible)}`);
 
         if (!currentDisposition) {
-            const effectiveInitFlags = applyInitFlagReferee(sem.initFlags || {}, refereeContext, audit, `3.3 ${npc}.initPreset`);
-            const init = initPreset(effectiveInitFlags);
+            const init = resolveDeterministicInitPreset(npc, state, resolutionPacket, refereeContext, audit, `3.3 ${npc}.initPreset`);
+            initMetadata = init;
             currentDisposition = init.disposition;
-            audit.push(`3.3d initPreset.activeEnemy=${yn(effectiveInitFlags.activeEnemy)}`);
-            audit.push(`3.3e initPreset.romanticOpen=${yn(effectiveInitFlags.romanticOpen)}`);
-            audit.push(`3.3f initPreset.userBadRep=${yn(effectiveInitFlags.userBadRep)}`);
-            audit.push(`3.3g initPreset.priorUserGoodRep=${yn(effectiveInitFlags.priorUserGoodRep)}`);
-            audit.push(`3.3h initPreset.userNonHuman=${yn(effectiveInitFlags.userNonHuman)} fearImmunity=${yn(effectiveInitFlags.fearImmunity)}`);
+            audit.push(`3.3d initPreset.userHistory=${compact(init.userHistory)}`);
+            audit.push(`3.3e initPreset.raceProfile=${compact(init.raceProfile)}`);
+            audit.push(`3.3f initPreset.userRace=${compact(init.userRace)}`);
+            audit.push(`3.3g initPreset.fearOverlay=${compact(init.fearOverlay)}`);
             audit.push(`3.3i initPreset=${init.label}`);
             audit.push(`3.3j currentDisposition=${formatDisposition(currentDisposition)}`);
         } else {
@@ -535,7 +578,11 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         });
         const target = hostilePressureResult?.target || boundaryPressureResult?.target || routedTarget;
         const rapport = updateRapport(currentRapport, target, rapportEligible, hostilePressureResult ? 'hostilePressure' : 'normal');
+        const rapportConsumedCooldown = rapportEligible && consumesRapportCooldown(target, hostilePressureResult ? 'hostilePressure' : 'normal');
         currentRapport = rapport.currentRapport;
+        if (rapportConsumedCooldown) {
+            rapportCooldownUntilActiveMs = rapportClock.activeMs + RAPPORT_COOLDOWN_MS;
+        }
         hostilePressure = hostilePressureResult?.hostilePressure ?? hostilePressure;
         hostileLandedPressure = hostilePressureResult?.hostileLandedPressure ?? hostileLandedPressure;
         dominantLock = hostilePressureResult?.dominantLock ?? dominantLock;
@@ -567,6 +614,11 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             })}`);
         }
         audit.push(`3.4d updateRapport=${compact(rapport)}`);
+        audit.push(`3.4e rapportCooldown=${compact({
+            consumed: yn(rapportConsumedCooldown),
+            cooldownMinutes: RAPPORT_COOLDOWN_MS / 60000,
+            untilActiveMs: rapportCooldownUntilActiveMs,
+        })}`);
 
         const deltas = hostilePressureResult?.deltas || boundaryPressureResult?.deltas || deriveDirection(target, currentDisposition, currentRapport, auditInteraction, resolutionPacket);
         const updatedDisposition = updateDisposition(currentDisposition, deltas);
@@ -677,7 +729,10 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
             ...state,
             currentDisposition,
             currentRapport,
+            rapportCooldownUntilActiveMs,
             establishedRelationship,
+            userHistory: initMetadata?.userHistory || state.userHistory,
+            raceProfile: initMetadata?.raceProfile || state.raceProfile,
             slowBondEvidence,
             currentCoreStats: coreStats,
             hostilePressure,
@@ -707,21 +762,22 @@ function buildSlowBondSceneKey(resolutionPacket, npc) {
     ].join('::').slice(0, 120);
 }
 
-function relationshipSemanticHasSlowBondSignal(item) {
-    const evidence = item?.slowBondEvidence || {};
-    return [
-        evidence.respectfulContact,
-        evidence.cooperation,
-        evidence.comfortInProximity,
-        evidence.boundaryRespect,
-        evidence.sharedRoutine,
-        evidence.playfulness,
-        evidence.teamwork,
-        evidence.personalAttention,
-    ].some(bool) || toRealArray(evidence.blockers).length > 0 || item?.establishedRelationship === true;
-}
-
 const ROMANCE_MEMORY_TAGS = Object.freeze(['Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess']);
+
+function pendingProactivityResponseNpcNames(trackerSnapshot, context, alreadyInScene = []) {
+    const userText = getLatestUserTextFromContext(context);
+    const pending = Object.entries(trackerSnapshot || {})
+        .map(([npc, value]) => ({
+            npc,
+            memory: normalizeTrackerEntry(value || {}).proactivityMemory,
+        }))
+        .filter(item => isReal(item.npc))
+        .filter(item => !toRealArray(alreadyInScene).some(name => sameName(name, item.npc)))
+        .filter(item => isRomanceMemoryTag(item.memory.pendingTag))
+        .filter(item => ['ACCEPTED', 'REFUSED'].includes(classifyProactivityOfferResponse(item.memory.pendingTag, userText)));
+    if (pending.length !== 1) return [];
+    return [pending[0].npc];
+}
 
 function beginProactivityMemoryTurn(memory) {
     const normalized = normalizeProactivityMemory(memory);
@@ -971,8 +1027,9 @@ function hasRelationshipRefusal(text) {
         || /\b(?:pull\s+away|step\s+back|push\s+(?:you|him|her|them)\s+away|refuse|reject|deny)\b/i.test(text);
 }
 
-function resolveTimeLapseExplicit(sem) {
-    return bool(sem?.timeLapseExplicit);
+function consumesRapportCooldown(target, mode = 'normal') {
+    if (mode === 'hostilePressure' && target === 'No Change') return false;
+    return ['Bond', 'No Change'].includes(target);
 }
 
 function resolveIntimacyBoundary({ npc, currentDisposition, threshold, establishedRelationship, resolutionPacket, context, state }) {
@@ -1081,66 +1138,33 @@ function runChaos(ledger, handoffs, resolutionPacket, dice, audit) {
 }
 
 function runNameGeneration(ledger, audit, context, type) {
-    const sem = ledger.nameSemantic || {};
     const contextText = buildNameContext(ledger, context);
-    const cue = detectNameCue(contextText);
-    const nameRequired = resolveNameRequired(sem, contextText, cue);
-    const explicitNameKnown = bool(sem.explicitNameKnown);
-    const isLocation = bool(sem.isLocation) || cue.mode === 'LOCATION';
-    const normalizedSeed = normalizeNameSeed(firstNameSeedHint(cue.seedHint, sem.seed, sem.normalizeSeed, contextText));
-    const mode = detectNameMode(contextText, isLocation, cue.mode || sem.detectMode);
     const profile = profileFromNameContext(contextText);
-    const gender = detectNameGender(contextText);
     const registry = getNameRegistry(context);
-    const generatedName = nameRequired
-        ? buildDeterministicName({
-            mode,
-            profile,
-            gender,
-            seed: normalizedSeed,
-            registry,
-            contextText,
-        })
-        : NONE;
-
-    if (nameRequired && generatedName !== NONE) {
-        registerGeneratedName(context, generatedName, {
-            mode,
-            profile,
-            gender,
-            seed: normalizedSeed,
-        });
-    }
+    const pool = buildNamePool({ profile, registry, contextText });
 
     const result = {
-        nameRequired: yn(nameRequired),
-        explicitNameKnown: yn(explicitNameKnown),
-        isLocation: yn(isLocation),
-        seed: sem.seed || NONE,
-        normalizeSeed: normalizedSeed,
-        detectMode: nameRequired ? mode : 'none',
+        nameRequired: 'POOL',
+        isLocation: 'N/A',
+        seed: 'pool',
+        normalizeSeed: 'pool',
+        detectMode: 'POOL',
         profile,
-        gender: mode === 'PERSON' ? gender : 'NEUTRAL',
-        modelGeneratedName: sem.generatedName || NONE,
-        deterministicCue: cue.required ? cue.reason : 'none',
-        generatedName,
+        gender: 'POOL',
+        deterministicCue: 'deterministic name pool',
+        generatedName: NONE,
+        namePool: pool,
     };
     audit.push('STEP 5: EXECUTE NameGenerationEngine');
-    audit.push(`5.1 nameRequired=${result.nameRequired}`);
-    audit.push(`5.1a explicitNameKnown=${result.explicitNameKnown}`);
-    audit.push(`5.1b isLocation=${result.isLocation}`);
-    audit.push(`5.1c seed=${result.seed}`);
-    audit.push(`5.1d normalizeSeed=${result.normalizeSeed}`);
-    audit.push(`5.1e detectMode=${result.detectMode}`);
+    audit.push('5.1 nameRequired=POOL');
+    audit.push('5.1a namePoolMode=deterministic');
+    audit.push('5.1b isLocation=N/A');
+    audit.push('5.1c seed=pool');
+    audit.push('5.1d normalizeSeed=pool');
+    audit.push('5.1e detectMode=POOL');
     audit.push(`5.1f profile=${result.profile}`);
-    audit.push(`5.1g gender=${result.gender}`);
-    audit.push(`5.1h generatedName=${result.generatedName}`);
-    if (cue.required) {
-        audit.push(`5.1h.1 deterministicNameCue=${compact(cue)}`);
-    }
-    if (sem.generatedName && sem.generatedName !== NONE) {
-        audit.push(`5.1i ignoredModelGeneratedName=${sem.generatedName}`);
-    }
+    audit.push('5.1g gender=POOL');
+    audit.push(`5.1h namePool=${compact(pool)}`);
     audit.push('---');
     return result;
 }
@@ -1149,10 +1173,6 @@ function buildNameContext(ledger, context) {
     const sem = ledger.nameSemantic || {};
     const resolution = ledger.resolutionEngine || {};
     return [
-        sem.context,
-        sem.seed,
-        sem.normalizeSeed,
-        sem.detectMode,
         getLatestUserTextFromContext(context),
         ledger.chaosSemantic?.sceneSummary,
         resolution.identifyGoal,
@@ -1160,52 +1180,6 @@ function buildNameContext(ledger, context) {
         resolution.explicitMeans,
         ...(ledger.relationshipEngine || []).map(item => item?.NPC).filter(Boolean),
     ].filter(Boolean).join(' ').trim();
-}
-
-function resolveNameRequired(sem, contextText, cue = { required: false }) {
-    if (cue.required) return true;
-    if (bool(sem.explicitNameKnown)) return false;
-    if (bool(sem.nameRequired)) return true;
-    if (bool(sem.isLocation)) return true;
-    return /\b(?:will be mentioned|about to be mentioned|introduced|present|enters|arrives|appears|queen|king|prince|princess|lord|lady|captain|guard|priest|priestess|innkeeper|messenger|hunter|ruler|mage|witch|healer|merchant|bandit|assassin|knight|soldier|scout|stranger|witness|place|town|city|ruin|mountain|river|forest|temple|keep|village|fort|harbor|port|island|lake|swamp|marsh|cavern|valley|peak|district|kingdom|province|outpost|bridge|gate)\b/i.test(contextText);
-}
-
-function detectNameCue(contextText) {
-    const text = String(contextText || '').replace(/\s+/g, ' ').trim();
-    const personCue = /\b(?:his|her|their|the|that|this)?\s*(?:name|proper name)\s+(?:is|was|will be|would be|should be)\s*(?:[.:;,-]*)?\s*$/i
-        .test(text)
-        || /\b(?:named|called|known as|goes by|they call (?:him|her|them)|people call (?:him|her|them))\s*(?:[.:;,-]*)?\s*$/i.test(text);
-    const locationCue = /\b(?:the|this|that)?\s*(?:place|town|city|village|ruin|temple|keep|fort|harbor|port|island|forest|river|mountain|cavern|district|kingdom|outpost|bridge|gate)\s+(?:is|was|will be|would be)?\s*(?:called|named|known as)\s*(?:[.:;,-]*)?\s*$/i
-        .test(text)
-        || /\b(?:called|named|known as)\s*(?:[.:;,-]*)?\s*$/i.test(text)
-            && /\b(?:place|town|city|village|ruin|temple|keep|fort|harbor|port|island|forest|river|mountain|cavern|district|kingdom|outpost|bridge|gate)\b/i.test(text);
-    if (locationCue) {
-        return {
-            required: true,
-            mode: 'LOCATION',
-            seedHint: locationSeedHint(text),
-            reason: 'explicit location naming cue',
-        };
-    }
-    if (personCue) {
-        return {
-            required: true,
-            mode: 'PERSON',
-            seedHint: personSeedHint(text),
-            reason: 'explicit person/entity naming cue',
-        };
-    }
-    return { required: false, mode: null, seedHint: '', reason: 'none' };
-}
-
-function personSeedHint(text) {
-    const roleMatch = /\b(?:butcher|guard|priestess|priest|merchant|hunter|ruler|mage|witch|healer|bandit|assassin|knight|soldier|scout|stranger|witness|captain|lord|lady|queen|king|prince|princess|innkeeper|messenger)\b/i.exec(text);
-    return roleMatch?.[0] || text;
-}
-
-function locationSeedHint(text) {
-    const placeMatch = /\b(?:place|town|city|village|ruin|temple|keep|fort|harbor|port|island|forest|river|mountain|cavern|district|kingdom|outpost|bridge|gate)\b/i.exec(text);
-    return placeMatch?.[0] || text;
 }
 
 function getLatestUserTextFromContext(context) {
@@ -1263,6 +1237,37 @@ function detectNameGender(contextText) {
     if (/\b(?:woman|girl|female|queen|princess|lady|priestess|waitress|mother|sister|daughter|wife|widow|matron|maid|actress)\b/i.test(contextText)) return 'FEMALE';
     if (/\b(?:man|boy|male|king|prince|lord|priest|waiter|father|brother|son|husband|widower|patriarch|actor)\b/i.test(contextText)) return 'MALE';
     return 'NEUTRAL';
+}
+
+function buildNamePool({ profile, registry, contextText }) {
+    const used = new Set([
+        ...Array.from(registry.used || []),
+        ...extractExistingProperNames(contextText),
+    ].map(normalizeNameKey).filter(Boolean));
+    const entries = [
+        ['male', 'PERSON', 'MALE', 'male-one'],
+        ['male', 'PERSON', 'MALE', 'male-two'],
+        ['female', 'PERSON', 'FEMALE', 'female-one'],
+        ['female', 'PERSON', 'FEMALE', 'female-two'],
+        ['location', 'LOCATION', 'NEUTRAL', 'location-one'],
+        ['location', 'LOCATION', 'NEUTRAL', 'location-two'],
+    ];
+    const pool = { male: [], female: [], location: [] };
+    for (const [bucket, mode, gender, seed] of entries) {
+        const name = buildDeterministicName({
+            mode,
+            profile,
+            gender,
+            seed,
+            registry: { used },
+            contextText,
+        });
+        if (name !== NONE) {
+            pool[bucket].push(name);
+            used.add(normalizeNameKey(name));
+        }
+    }
+    return pool;
 }
 
 function buildDeterministicName({ mode, profile, gender, seed, registry, contextText }) {
@@ -2466,7 +2471,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
     const kind = classifyAction(resolutionPacket);
     const chaosBand = chaosHandoff.CHAOS?.triggered ? chaosHandoff.CHAOS.band : 'None';
     const counterPotential = resolutionPacket.CounterPotential || 'none';
-    const cap = clamp(Number(ledger.proactivitySemantic?.cap || 1), 1, 3);
+    const cap = NPC_PROACTIVITY_CAP;
     const candidates = [];
     const results = {};
 
@@ -3142,9 +3147,17 @@ function chooseGeneratedCore(ledger, resolutionEngine, oppTargetsNpcFirst) {
 function buildRefereeContext(context) {
     const fields = getCardFields(context);
     const userText = String(fields.persona ?? '');
+    const userNonHuman = classifyUserNonHuman(userText);
+    const cardText = characterCardInitText(fields);
 
     return {
-        userNonHuman: classifyUserNonHuman(userText),
+        userNonHuman,
+        userRaceCategory: userNonHuman?.value === false
+            ? 'typical'
+            : classifyRaceCategory(userNonHuman?.evidence || userText),
+        activeCharacterName: cleanInitScalar(fields.name || fields.ch_name || context?.name2),
+        cardUserHistory: parseCardUserHistory(cardText),
+        cardRaceProfile: parseCardRaceProfile(cardText),
     };
 }
 
@@ -3156,26 +3169,162 @@ function getCardFields(context) {
     }
 }
 
-function applyInitFlagReferee(flags, refereeContext, audit, label) {
-    const effective = { ...flags };
-    const classification = refereeContext?.userNonHuman;
-    if (bool(effective.activeEnemy)) {
-        audit.push(`${label}.activeEnemy=Y`);
+function resolveDeterministicInitPreset(npc, state, resolutionPacket, refereeContext, audit, label) {
+    const userHistory = resolveStoredOrCardUserHistory(state?.userHistory, npc, refereeContext);
+    const raceProfile = resolveStoredOrCardRaceProfile(state?.raceProfile, npc, refereeContext);
+    const activeEnemy = isDeterministicActiveEnemy(npc, resolutionPacket);
+    const userRace = refereeContext?.userNonHuman || { value: null, source: 'no persona text', evidence: null };
+    const fearOverlay = resolveDeterministicFearOverlay(userRace, refereeContext?.userRaceCategory, raceProfile);
+
+    let base = { label: 'neutralDefault', disposition: { B: 2, F: 2, H: 2 } };
+    if (activeEnemy) {
+        base = { label: 'activeEnemy', disposition: { B: 1, F: 2, H: 4 } };
+    } else if (state?.establishedRelationship === 'Y') {
+        base = { label: 'establishedRelationship', disposition: { B: 4, F: 1, H: 1 } };
+    } else if (userHistory.knowsUser === 'Y' && userHistory.standing === 'positive') {
+        base = { label: 'knownPositive', disposition: { B: 3, F: 2, H: 2 } };
+    } else if (userHistory.knowsUser === 'Y' && userHistory.standing === 'negative') {
+        base = { label: 'knownNegative', disposition: { B: 1, F: 2, H: 3 } };
     }
-    if (!classification || classification.value == null) return effective;
 
-    const current = bool(effective.userNonHuman);
-    if (current === classification.value) return effective;
-
-    effective.userNonHuman = classification.value;
-    audit.push(`${label}.userNonHumanReferee=${compact({
-        hardRule: 'RelationshipEngine.initPreset: explicit user race/species evidence determines monster/non-typical userNonHuman flag',
-        from: current,
-        to: classification.value,
-        source: classification.source,
-        evidence: classification.evidence,
+    const disposition = fearOverlay.applies === 'Y'
+        ? { ...base.disposition, F: Math.max(base.disposition.F, 3) }
+        : base.disposition;
+    audit.push(`${label}.deterministic=${compact({
+        activeEnemy: yn(activeEnemy),
+        userHistory,
+        raceProfile,
+        userRace,
+        fearOverlay,
+        base: base.label,
     })}`);
-    return effective;
+    return {
+        ...base,
+        label: fearOverlay.applies === 'Y' && base.label === 'neutralDefault' ? 'userNonHuman' : base.label,
+        disposition,
+        userHistory,
+        raceProfile,
+        userRace,
+        fearOverlay,
+    };
+}
+
+function resolveStoredOrCardUserHistory(stored, npc, refereeContext) {
+    const normalized = normalizeUserHistory(stored);
+    if (normalized.knowsUser === 'Y' || normalized.standing !== 'neutral') return normalized;
+    if (!refereeCardMatchesNpc(npc, refereeContext)) return normalized;
+    return normalizeUserHistory(refereeContext?.cardUserHistory);
+}
+
+function resolveStoredOrCardRaceProfile(stored, npc, refereeContext) {
+    const normalized = normalizeNpcRaceProfile(stored);
+    if (normalized.race || normalized.category !== 'unknown' || normalized.fearProfile !== 'normal') return normalized;
+    if (!refereeCardMatchesNpc(npc, refereeContext)) return normalized;
+    return normalizeNpcRaceProfile(refereeContext?.cardRaceProfile);
+}
+
+function refereeCardMatchesNpc(npc, refereeContext) {
+    const activeName = refereeContext?.activeCharacterName;
+    return isReal(activeName) && sameName(activeName, npc);
+}
+
+function characterCardInitText(fields = {}) {
+    return [
+        fields.name,
+        fields.description,
+        fields.personality,
+        fields.scenario,
+        fields.first_mes,
+        fields.mes_example,
+        fields.creator_notes,
+    ].map(value => String(value || '').trim()).filter(Boolean).join('\n').slice(0, 12000);
+}
+
+function parseCardUserHistory(text) {
+    const source = String(text || '');
+    const knows = parseStructuredKnowsUser(source);
+    const standing = parseStructuredUserStanding(source) || parseExplicitUserStanding(source);
+    if (knows === 'N') return { knowsUser: 'N', standing: 'neutral' };
+    if (standing === 'positive' || standing === 'negative') return { knowsUser: 'Y', standing };
+    if (knows === 'Y') return { knowsUser: 'Y', standing: 'neutral' };
+    return { knowsUser: 'N', standing: 'neutral' };
+}
+
+function parseStructuredKnowsUser(source) {
+    const match = source.match(/^\s*(?:[-*]\s*)?(?:Knows\s*(?:User|\{\{user\}\})|Known\s*To\s*(?:User|\{\{user\}\}))\s*[:=]\s*(yes|y|true|no|n|false)\b/im);
+    if (!match) return null;
+    return /^(yes|y|true)$/i.test(match[1]) ? 'Y' : 'N';
+}
+
+function parseStructuredUserStanding(source) {
+    const match = source.match(/^\s*(?:[-*]\s*)?(?:User\s*Standing|Standing\s*With\s*(?:User|\{\{user\}\})|Relationship\s*To\s*(?:User|\{\{user\}\})|User\s*Relationship|Prior\s*Relationship)\s*[:=]\s*([^\n\r]+)/im);
+    if (!match) return null;
+    return normalizeStandingWord(match[1]);
+}
+
+function parseExplicitUserStanding(source) {
+    const userRef = '(?:\\{\\{user\\}\\}|the user|user|you)';
+    const negativeBefore = new RegExp(`\\b(?:hates|despises|detests|loathes|distrusts|resents|is hostile to|is an enemy of|sworn enemy of|wants revenge on)\\b.{0,80}\\b${userRef}\\b`, 'i');
+    const negativeAfter = new RegExp(`\\b${userRef}\\b.{0,80}\\b(?:is hated|is despised|is distrusted|is resented|is an enemy|is a sworn enemy)\\b`, 'i');
+    if (negativeBefore.test(source) || negativeAfter.test(source)) return 'negative';
+
+    const positiveBefore = new RegExp(`\\b(?:trusts|likes|respects|is friends with|is an ally of|is loyal to|cares for)\\b.{0,80}\\b${userRef}\\b`, 'i');
+    const positiveAfter = new RegExp(`\\b${userRef}\\b.{0,80}\\b(?:is trusted|is liked|is respected|is a friend|is an ally)\\b`, 'i');
+    if (positiveBefore.test(source) || positiveAfter.test(source)) return 'positive';
+
+    if (new RegExp(`\\b(?:does not know|doesn't know|never met|has never met|is a stranger to)\\b.{0,80}\\b${userRef}\\b`, 'i').test(source)) return 'neutral';
+    return null;
+}
+
+function normalizeStandingWord(value) {
+    const text = String(value || '').toLowerCase();
+    if (/\b(positive|friend|friendly|ally|trusted|trusts|good|favorable|favourable|likes|respects|loyal)\b/.test(text)) return 'positive';
+    if (/\b(negative|enemy|hostile|hated|hates|despises|distrusts|resentful|bad|unfavorable|unfavourable|revenge)\b/.test(text)) return 'negative';
+    if (/\b(neutral|unknown|stranger|none|new|unmet)\b/.test(text)) return 'neutral';
+    return null;
+}
+
+function parseCardRaceProfile(text) {
+    const source = String(text || '');
+    const race = explicitRaceEvidence(source) || '';
+    const category = classifyRaceCategory(race || source);
+    return normalizeNpcRaceProfile({
+        race,
+        category,
+        fearProfile: parseStructuredFearProfile(source),
+    });
+}
+
+function parseStructuredFearProfile(source) {
+    const match = source.match(/^\s*(?:[-*]\s*)?(?:Fear\s*Profile|Fear\s*Response)\s*[:=]\s*(immune|peer|superior|normal)\b/im);
+    if (match) return match[1].toLowerCase();
+    if (/\b(?:immune to fear|fear immune|cannot be frightened|cannot feel fear)\b/i.test(source)) return 'immune';
+    return 'normal';
+}
+
+function cleanInitScalar(value) {
+    const text = String(value || '').trim().replace(/\s+/g, ' ');
+    return text.slice(0, 80);
+}
+
+function isDeterministicActiveEnemy(npc, resolutionPacket) {
+    return resolutionPacket?.activeHostileThreat === 'Y'
+        && toRealArray(resolutionPacket?.OppTargets?.NPC).some(name => sameName(name, npc));
+}
+
+function resolveDeterministicFearOverlay(userRace, userRaceCategory, npcRaceProfile) {
+    if (userRace?.value !== true) {
+        return { applies: 'N', reason: userRace?.value === false ? 'typical user race' : 'no deterministic user race evidence' };
+    }
+    const npcCategory = npcRaceProfile?.category || 'unknown';
+    const fearProfile = npcRaceProfile?.fearProfile || 'normal';
+    if (['immune', 'superior'].includes(fearProfile)) return { applies: 'N', reason: `npc ${fearProfile}` };
+    if (fearProfile === 'peer') return { applies: 'N', reason: 'npc monstrous peer' };
+    if (userRaceCategory !== 'unknown' && npcCategory === userRaceCategory) return { applies: 'N', reason: 'same race category' };
+    if (['demonic', 'undead', 'eldritch', 'construct', 'monstrous'].includes(npcCategory) && npcCategory !== 'typical') {
+        return { applies: 'N', reason: 'npc non-ordinary peer category' };
+    }
+    return { applies: 'Y', reason: 'fear-relevant user race and no peer/immunity' };
 }
 
 function applyHostilePhysicalIntentHardRules(semantic, audit) {

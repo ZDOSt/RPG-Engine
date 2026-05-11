@@ -195,7 +195,7 @@ function ResolutionEngine(input) {
         targetCore = getCurrentCoreStats(first OppTargets.NPC)
         if missing -> targetCore = genStats(first OppTargets.NPC, context)
       outcome = resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore)
-    NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, and relationshipEngine entries
+    NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, plus a single pending-offer NPC only when the user gives a clear generic accept/refuse response to that pending offer
     return {GOAL:finalGoal, actions:actions, intimacyAdvanceExplicit:intimacyAdvanceExplicit, boundaryViolationExplicit:boundaryViolationExplicit, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
 }
 ---------------------------
@@ -227,18 +227,15 @@ function RelationshipEngine(npc, resolutionPacket) {
     return {currentDisposition, currentRapport, establishedRelationship, slowBondEvidence, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
 
   initPreset():
-    policy: EO, FYW
+    policy: deterministic
     rule: use only if currentDisposition is missing
-    rule: NPC has explicit fear immunity only if same or superior kind/nature, superior being, explicit natural fear/mental immunity, or the card/lore/scenario explicitly shows the NPC is an ancient, powerful, non-ordinary being who has faced horrors, monsters, curses, eldritch forces, or other supernatural threats and is portrayed as not meaningfully fearing them
-    rule: title, rank, bravado, posturing, composure, masking fear, saving face, acting brave, or pretending to be fearless do NOT count as fear immunity
-    if NPC is explicitly an active enemy of {{user}}, actively hostile, attacking, ambushing, robbing, hunting, threatening, capturing, fighting, or intentionally obstructing {{user}} with hostile intent -> {Label:activeEnemy,B:1,F:2,H:4}
-    rule: archetype or label alone is not activeEnemy. "bandit", "enemy soldier", "criminal", "orc", "monster", or similar only counts if the scene/card/lore explicitly shows active hostile intent toward {{user}} now.
-    if NPC is already romantically/intimately involved with {{user}}, willing/open toward {{user}}, or in love -> {Label:romanticOpen,B:4,F:1,H:1}
-    if {{user}} is hated, distrusted, wanted, or bad-reputation -> {Label:userBadRep,B:1,F:2,H:3}
-    rule: first encounter kindness, opening-scene rescue, courtesy, friendliness, praise, or a warm first impression do NOT count as prior favorable reputation
-    if {{user}} is explicitly shown by prior lore, card, scenario, or tracked history to have an established favorable reputation with this NPC that predates the current scene -> {Label:priorUserGoodRep,B:3,F:1,H:2}
-    if {{user}} is explicitly visibly inhuman, demonic, monstrous, undead, bestial, eldritch, or construct-like AND NPC lacks explicit fear immunity -> {Label:userNonHuman,B:1,F:3,H:2}
+    rule: semantic pass does not output initPreset flags
+    if resolutionPacket.activeHostileThreat=Y AND npc in resolutionPacket.OppTargets.NPC -> {Label:activeEnemy,B:1,F:2,H:4}
+    if tracker.establishedRelationship=Y -> {Label:establishedRelationship,B:4,F:1,H:1}
+    if tracker/card userHistory.knowsUser=Y AND userHistory.standing=positive -> {Label:knownPositive,B:3,F:2,H:2}
+    if tracker/card userHistory.knowsUser=Y AND userHistory.standing=negative -> {Label:knownNegative,B:1,F:2,H:3}
     else -> {Label:neutralDefault,B:2,F:2,H:2}
+    fear overlay: if persona race is deterministically fear-relevant and NPC raceProfile is not same category, peer, superior, or immune -> F=max(F,3)
 
   auditInteraction(npc, resolutionPacket):
     policy: EO, FYW
@@ -366,20 +363,12 @@ function RelationshipEngine(npc, resolutionPacket) {
     if deltas.h>0 -> Hostility
     else -> No Change
 
-  timeLapseExplicit():
-    policy: EO, FYW
-    rule: return Y only if the user's input clearly establishes that the scene has advanced across at least one night or into a new calendar day
-    rule: includes explicit or strongly implied new-day/overnight framing such as "next day", "next morning", "the following morning/day", "the next evening", "overnight", "after sleeping", "when I woke up", "morning came", "the sun rose again"
-    rule: includes any clear overnight sleep plus wake-up or major time-skip that crosses days such as "two days later" or "a week later"
-    rule: return N for all intra-day / same-day time progression, even if hours have passed: "a few hours later", "later that day/afternoon/evening", "that evening", "after dinner/lunch", "once it got dark", "several hours passed", "some time later" while still the same day
-    rule: return N for any "later" framing that does not cross overnight or into a new day
-    rule: return N for future-tense plans, intentions, promises, brief pauses, momentary silence, or same-scene continuation
-    else -> N
-
   updateRapport(currentRapport, target, rapportEligible):
     rule: positive encounter = target in [Bond,No Change]
     rule: negative encounter = target in [Hostility,Fear,FearHostility]
-    rule: rapportEligible = Y only for first tracked encounter or strict timeLapseExplicit=Y
+    rule: rapportEligible = Y only for first tracked encounter or if this NPC's hidden active-time rapport cooldown has expired
+    rule: cooldown expiry does not change rapport by itself; rapport changes only on the next qualifying interaction with this NPC
+    rule: when rapport is consumed by Bond or No Change, set this NPC's hidden cooldown to current active play time + 90 minutes
     if target in [Bond,No Change] and rapportEligible!=Y -> return {currentRapport:currentRapport}
     if target in [Bond,No Change] -> return {currentRapport:min(5,currentRapport+1)}
     if target in [Hostility,Fear,FearHostility] -> return {currentRapport:max(0,currentRapport-1)}
@@ -467,15 +456,15 @@ function RelationshipEngine(npc, resolutionPacket) {
 
   execution:
     if npc not in resolutionPacket.NPCInScene -> return uninitialized handoff
-    read state, initialize disposition if missing, and update encounter lock
+    read state, initialize disposition if missing, and check hidden active-time rapport cooldown
     read stakeChangeByOutcome for actual resolution outcome, set NPC_STAKES from benefit/harm vs none, audit benefit interaction, route disposition target
     hostilePressureResult = applyHostilePhysicalPressure(npc, resolutionPacket, state)
     if hostilePressureResult exists -> target = hostilePressureResult.target else target = routeDispositionTarget
-    update rapport from final target
+    update rapport from final target; if a positive/neutral eligible interaction consumed rapport, reset hidden cooldown for this NPC
     if hostilePressureResult exists -> deltas = hostilePressureResult.deltas else deltas = deriveDirection(target, audit, currentDisposition, rapport.currentRapport, resolutionPacket)
     update disposition and apply rapport reset if present
     if hostilePressureResult.dominatedFearBreak=Y and currentDisposition.F>=4 and currentDisposition.H>=3 -> lower currentDisposition.H by 1
-    save currentRapport, hostilePressure, hostileLandedPressure, dominantLock, and pressureMode to sceneTracker
+    save currentRapport, rapportCooldownUntilActiveMs, hostilePressure, hostileLandedPressure, dominantLock, and pressureMode to sceneTracker
     classify disposition, update slowBondEvidence, check slowBondEligible, resolve threshold/override, and check establishedRelationship
     RelationToUserAction = {isDirect, isOpp, isBenefited, isHarmed}
     return NPC handoff including HostilePressure, HostileLandedPressure, DominantLock, PressureMode, and RelationToUserAction
@@ -539,42 +528,23 @@ function CHAOS_INTERRUPT(resolutionPacket, npcHandoffList, sceneSummary, diceLis
     return {CHAOS:{triggered:true, band:band, magnitude:magnitude, anchor:anchor, vector:vector, personVector:personVector, fullText:null}}
 }
 ----------------
-function NameGenerationEngine(context, seed, explicitNameKnown, isLocation=false) {
+function NameGenerationEngine(context) {
   const DEF = Object.freeze({
     EO:
-'EXPLICIT-ONLY. Use context, seed, explicitNameKnown, and isLocation as truth. Uncertain=N.',
+'DETERMINISTIC. Use context and the current chat name registry as truth.',
     FYW:
 'FIRST-YES-WINS. In ordered rule ladders, the first matching rule becomes final.',
     UNIVERSAL:
-'SINGLE-PASS. OUTPUT EXACTLY ONE CLEAN NAME STRING ONLY OR (none). NO COMMENTARY. NO SOURCES. NO EXPLANATIONS. INVISIBLE SYSTEM.',
+'SINGLE-PASS. Generate a hidden deterministic pool of proper names. The narrator may use them only if it introduces a new unnamed person/entity/location.',
     PURPOSE:
-'Use for any distinct NPC/entity or location that is newly introduced, present, mentioned, or about to be mentioned in the response. If no explicit proper name already exists, generate one immediately before output. Distinct unnamed entities must not remain generic if they are introduced as specific individuals or places.',
+'Prevent improvised model names from drifting by supplying a deterministic name pool. Do not force a new person or location into the scene.',
     SEED:
-'Seed is hidden deterministic entropy, not visible name text. Use it only to stabilize deterministic variation. It does NOT have to appear at the start of the final name.',
+'Seed is hidden deterministic entropy derived from fixed pool slots and context. It does NOT have to appear at the start of the final name.',
     STYLE:
 'Invent creative, pronounceable, real-but-unplaceable names. Use deterministic curated syllable pools plus seed-driven phonotactic variation. Mix phonetic influence freely from East Asian, Polynesian, Caucasian, African, Mesoamerican, Turkic, Dravidian, and Uralic sound habits. Ban pure Western-European fantasy drift, Tolkien-esque elvish, stock fantasy/JRPG naming, and overly ordinary modern-Western names.',
     SHAPE:
 'Append only pronounceable syllables. NO 3+ consecutive vowels. NO 3+ consecutive consonants. PERSON total length 5-10. LOCATION total length 7-14. LOCATION must feel geographic / compound / place-like and must not read like a person name.'
   });
-
-  nameRequired(context, explicitNameKnown, isLocation):
-    policy: EO, FYW
-    if context contains an unfinished explicit naming cue such as [his name is..., her name is..., their name is..., named..., called..., known as..., they call him/her/them..., the place is called...] -> Y
-    if explicitNameKnown=Y -> N
-    if isLocation=true -> Y
-    if context shows a distinct unnamed NPC/entity or location is present, introduced, mentioned, or about to be mentioned in the upcoming response -> Y
-    else -> N
-
-  normalizeSeed(seed):
-    if seed provides 3+ letters -> keep first stable 3-letter hint as hidden entropy
-    else -> repair to nearest valid 3-letter hint when possible
-    if still invalid -> Aka
-
-  detectMode(context, isLocation):
-    policy: FYW
-    if isLocation=true -> LOCATION
-    if context contains any [place,town,city,ruin,mountain,river,forest,temple,keep,village,fort,harbor,port,island,lake,swamp,marsh,cavern,valley,peak,district,kingdom,province,outpost,bridge,gate] -> LOCATION
-    else -> PERSON
 
   profileFromContext(context):
     policy: FYW
@@ -582,21 +552,15 @@ function NameGenerationEngine(context, seed, explicitNameKnown, isLocation=false
     if context contains any [soft,coast,island,harbor,reef,jungle,garden,ritual,temple,court,silk,trade,festival,rain] -> SOFT
     else -> BALANCED
 
-  genderFromContext(context):
-    policy: FYW
-    if context explicitly indicates female/woman/girl/queen/princess/lady/priestess/mother/sister/daughter -> FEMALE
-    if context explicitly indicates male/man/boy/king/prince/lord/priest/father/brother/son -> MALE
-    else -> NEUTRAL
-
-  buildName(mode, profile, gender, context, seed):
+  buildName(mode, profile, gender, context, slotSeed):
     if mode=PERSON:
-      generate exactly one person/entity name from deterministic syllable pools using seed as hidden entropy
+      generate one person/entity name from deterministic syllable pools using slotSeed as hidden entropy
       use compact call-name shape; gender affects weighting only, never hard stereotype
     else:
-      generate exactly one location name from deterministic syllable pools using seed as hidden entropy
+      generate one location name from deterministic syllable pools using slotSeed as hidden entropy
       use geographic / compound / place-like syllable shape
 
-  reject(name, mode, seed):
+  reject(name, mode):
     policy: FYW
     if mode=PERSON and (length(name)<5 || length(name)>10) -> Y
     if mode=LOCATION and (length(name)<7 || length(name)>14) -> Y
@@ -610,16 +574,12 @@ function NameGenerationEngine(context, seed, explicitNameKnown, isLocation=false
     else -> N
 
   execution:
-    needName = nameRequired(context, explicitNameKnown, isLocation)
-    if needName=N -> return (none)
-    S = normalizeSeed(seed)
-    M = detectMode(context, isLocation)
     P = profileFromContext(context)
-    G = genderFromContext(context)
-    candidate = buildName(M, P, G, context, S)
-    if reject(candidate, M, S)=Y -> regenerate immediately until first valid candidate
-    save candidate to current chat name registry
-    return candidate
+    male = [buildName(PERSON, P, MALE, context, male-one), buildName(PERSON, P, MALE, context, male-two)]
+    female = [buildName(PERSON, P, FEMALE, context, female-one), buildName(PERSON, P, FEMALE, context, female-two)]
+    location = [buildName(LOCATION, P, NEUTRAL, context, location-one), buildName(LOCATION, P, NEUTRAL, context, location-two)]
+    reject/regenerate each candidate until valid and unused within the current chat registry, tracker names, and this pool
+    return {male, female, location}
 }
 ----------------
 function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, diceBudget) {
@@ -810,7 +770,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     kind = classifyAction(resolutionPacket)
     chaosBand = chaosHandoff.CHAOS.band
     counterPotential = resolutionPacket.CounterPotential
-    cap = determine cap
+    cap = 3
     FOR EACH NPC handoff:
       fin = parseFinalState(handoff.FinalState)
       lock = derive or load lock
@@ -830,7 +790,7 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
         store candidate
       if passes=N -> keep Proactive:N, Intent:NONE, Impulse:NONE, ProactivityTarget:(none), TargetsUser:N
     sort candidates by die descending
-    promote up to cap candidates to proactive results
+    promote up to 3 candidates to proactive results
     return {NPC:{Proactive:[Y/N],Intent:[ESCALATE_VIOLENCE|BOUNDARY_PHYSICAL|THREAT_OR_POSTURE|CALL_HELP_OR_AUTHORITY|WITHDRAW_OR_BOUNDARY|INTIMACY_OR_FLIRT|SUPPORT_ACT|PLAN_OR_BANTER|Romantic_Nervous|Romantic_Flirt|Romantic_Attention|Thoughtful_Gift|Ask_Date|Date_And_Confess|Partner_Check_In|Partner_Affection|Partner_Support|Partner_Tease|Partner_Private_Time|Partner_Gift|Partner_Intimacy|Partner_Conflict|Companion_Warn|Companion_Assist|Companion_Cover|Companion_Attack|Companion_Retreat|NONE],Impulse:[ANGER|FEAR|BOND],ProactivityTarget:[{{user}}|NPC name|(none)],TargetsUser:[Y/N],ProactivityTier:[DORMANT|LOW|MEDIUM|HIGH|FORCED]?,ProactivityDie:[1-20]?,Threshold:[AUTO|8|10|13|16]?,RomanceInitiative:[Y/N]?,RomanceInitiativeTag:[tag|(none)]?,RomanceInitiativeDie:[1-100]?,RomanceInitiativeContext:[calm|active|crisis]?,PartnerInitiative:[Y/N]?,PartnerInitiativeTag:[tag|(none)]?,PartnerInitiativeDie:[1-150]?,PartnerInitiativeContext:[calm|active|crisis]?,CompanionInitiative:[Y/N]?,CompanionInitiativeTag:[tag|(none)]?,CompanionInitiativeDie:[1-100]?,CompanionInitiativeContext:[crisis]?,CompanionCrisisDire:[Y/N]?}...}
 }
 ----------------
@@ -997,6 +957,17 @@ export function classifyRaceText(text) {
     return { value: null };
 }
 
+export function classifyRaceCategory(text) {
+    const source = String(text ?? '').toLowerCase();
+    if (/\b(half[-\s]?demon|demon|demonic|devil|fiend|cambion|oni)\b/.test(source)) return 'demonic';
+    if (/\b(undead|vampire|dhampir|lich|wraith|ghoul|zombie|skeleton)\b/.test(source)) return 'undead';
+    if (/\b(eldritch|aberration)\b/.test(source)) return 'eldritch';
+    if (/\b(construct|golem)\b/.test(source)) return 'construct';
+    if (/\b(orc|ogre|goblin|hobgoblin|bugbear|troll|minotaur|monster|monstrous|beastfolk|lizardfolk|kobold|werewolf|lycanthrope|bestial)\b/.test(source)) return 'monstrous';
+    if (/\b(human|mortal|elf|elven|half[-\s]?elf|dwarf|dwarven|halfling|hobbit|gnome|fairy|fae|pixie|aasimar)\b/.test(source)) return 'typical';
+    return 'unknown';
+}
+
 export function isDefaultGeneratedCore(core) {
     if (!core) return true;
     const rank = String(core.Rank || 'none');
@@ -1006,15 +977,6 @@ export function isDefaultGeneratedCore(core) {
         && Number(core.PHY ?? 1) === 1
         && Number(core.MND ?? 1) === 1
         && Number(core.CHA ?? 1) === 1;
-}
-
-export function initPreset(flags) {
-    if (bool(flags.activeEnemy)) return { label: 'activeEnemy', disposition: { B: 1, F: 2, H: 4 } };
-    if (bool(flags.romanticOpen)) return { label: 'romanticOpen', disposition: { B: 4, F: 1, H: 1 } };
-    if (bool(flags.userBadRep)) return { label: 'userBadRep', disposition: { B: 1, F: 2, H: 3 } };
-    if (bool(flags.priorUserGoodRep)) return { label: 'priorUserGoodRep', disposition: { B: 3, F: 1, H: 2 } };
-    if (bool(flags.userNonHuman) && !bool(flags.fearImmunity)) return { label: 'userNonHuman', disposition: { B: 1, F: 3, H: 2 } };
-    return { label: 'neutralDefault', disposition: { B: 2, F: 2, H: 2 } };
 }
 
 export function routeDispositionTarget(npc, packet, auditInteraction, sem) {
@@ -1495,7 +1457,7 @@ export function buildNarrationGuidance(resolution, handoffs, chaos, proactivity,
 export function buildPersistencePolicy() {
     return {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
-        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'personalitySummary', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
+        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportCooldownUntilActiveMs', 'userHistory', 'raceProfile', 'personalitySummary', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
         playerPersistentRuleMutated: ['condition', 'wounds', 'statusEffects', 'gear', 'inventory', 'tasks', 'commitments'],
         perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
@@ -1518,6 +1480,9 @@ export function trackerSummary(trackerUpdate) {
             `tier:${value?.persistenceTier ?? 'Recurring'}`,
             `life:${value?.lifecycle ?? 'Active'}`,
             `rapport:${value?.currentRapport ?? 0}`,
+            `rapportCooldown:${value?.rapportCooldownUntilActiveMs ?? 0}`,
+            `history:${value?.userHistory?.knowsUser ?? 'N'}/${value?.userHistory?.standing ?? 'neutral'}`,
+            `race:${value?.raceProfile?.category ?? 'unknown'}/${value?.raceProfile?.fearProfile ?? 'normal'}`,
             `personality:${value?.personalitySummary ? 'Y' : 'N'}`,
             stats,
             `cond:${value?.condition ?? 'healthy'}`,
@@ -1605,7 +1570,10 @@ export function normalizeTrackerEntry(value) {
     return {
         currentDisposition: normalizeDisposition(value?.currentDisposition),
         currentRapport: clamp(Number(value?.currentRapport ?? 0), 0, 5),
+        rapportCooldownUntilActiveMs: Math.max(0, Math.floor(Number(value?.rapportCooldownUntilActiveMs || 0))),
         establishedRelationship: value?.establishedRelationship === 'Y' ? 'Y' : 'N',
+        userHistory: normalizeUserHistory(value?.userHistory),
+        raceProfile: normalizeNpcRaceProfile(value?.raceProfile),
         personalitySummary: normalizePersonalitySummary(value?.personalitySummary),
         slowBondEvidence: normalizeSlowBondEvidence(value?.slowBondEvidence),
         proactivityMemory: normalizeProactivityMemory(value?.proactivityMemory),
@@ -1625,6 +1593,29 @@ export function normalizeTrackerEntry(value) {
         statusEffects: normalizeTrackerStringList(value?.statusEffects),
         gear: normalizeTrackerStringList(value?.gear),
     };
+}
+
+export function normalizeUserHistory(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const knowsUser = source.knowsUser === 'Y' ? 'Y' : 'N';
+    const standing = ['positive', 'neutral', 'negative'].includes(source.standing) ? source.standing : 'neutral';
+    return { knowsUser, standing };
+}
+
+export function normalizeNpcRaceProfile(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const race = cleanTrackerScalar(source.race || source.species || source.ancestry);
+    const category = ['typical', 'monstrous', 'demonic', 'undead', 'eldritch', 'construct', 'unknown'].includes(source.category)
+        ? source.category
+        : classifyRaceCategory(race);
+    const fearProfile = ['normal', 'immune', 'peer', 'superior'].includes(source.fearProfile) ? source.fearProfile : 'normal';
+    return { race, category, fearProfile };
+}
+
+function cleanTrackerScalar(value) {
+    const text = String(value ?? '').trim().replace(/\s+/g, ' ').replace(/^["']|["']$/g, '').trim();
+    if (!text || ['(none)', 'none', 'null', 'n/a', 'unknown', 'unchanged'].includes(text.toLowerCase())) return '';
+    return text.slice(0, 80);
 }
 
 const ROMANCE_MEMORY_TAGS = Object.freeze(['Thoughtful_Gift', 'Ask_Date', 'Date_And_Confess']);

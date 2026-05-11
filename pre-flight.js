@@ -59,8 +59,6 @@ function buildReadableSemanticDebug(ledger) {
     const oppTargets = targets.OppTargets ?? {};
     const relationships = Array.isArray(ledger?.relationshipEngine) ? ledger.relationshipEngine : [];
     const chaos = ledger?.chaosSemantic ?? {};
-    const name = ledger?.nameSemantic ?? {};
-    const proactivity = ledger?.proactivitySemantic ?? {};
     const tracker = ledger?.trackerUpdateEngine ?? {};
     const userCore = ledger?.engineContext?.userCoreStats ?? {};
     const trackerNpcs = Array.isArray(ledger?.engineContext?.trackerRelevantNPCs)
@@ -104,9 +102,6 @@ function buildReadableSemanticDebug(ledger) {
         relationships.length ? '' : 'none',
         ...relationships.flatMap((item, index) => [
             `NPC[${index}]=${valueOrNone(item.NPC)}`,
-            `relevant=${Boolean(item.relevant)}`,
-            `initFlags=${inline(item.initFlags ?? {})}`,
-            `timeLapseExplicit=${Boolean(item.timeLapseExplicit)}`,
             `explicitIntimidationOrCoercion=${Boolean(item.explicitIntimidationOrCoercion)}`,
             `stakeChangeByOutcome=${inline(item.stakeChangeByOutcome ?? {})}`,
             `overrideFlags=${inline(item.overrideFlags ?? {})}`,
@@ -116,8 +111,8 @@ function buildReadableSemanticDebug(ledger) {
         '',
         'chaosSemantic.sceneSummary=' + valueOrNone(chaos.sceneSummary),
         'trackerUpdateEngine=' + inline(tracker),
-        'nameSemantic=' + inline(name),
-        'proactivitySemantic=' + inline(proactivity),
+        'nameSemantic=deterministic name pool',
+        'proactivitySemantic=deterministic cap 3',
     ];
 
     return lines;
@@ -616,11 +611,10 @@ function inflictedAggressionNpcInjurySummary(aggressionResults) {
 }
 
 function nameGenerationSummary(nameGeneration) {
-    if (!nameGeneration || nameGeneration.nameRequired !== 'Y' || isNoneText(nameGeneration.generatedName)) {
+    if (!nameGeneration?.namePool) {
         return 'none';
     }
-    const mode = nameGeneration.detectMode || 'PERSON';
-    return `${nameGeneration.generatedName} (${mode}; exact required name if introducing the unnamed ${mode === 'LOCATION' ? 'location' : 'person/entity'})`;
+    return namePoolText(nameGeneration.namePool);
 }
 
 function readableActionDescription(semanticResolution, resolution) {
@@ -779,9 +773,12 @@ function intimacyRefusalGuide(npc) {
 }
 
 function nameGenerationGuide(nameGeneration) {
-    if (!nameGeneration || nameGeneration.nameRequired !== 'Y' || isNoneText(nameGeneration.generatedName)) return '';
-    const noun = nameGeneration.detectMode === 'LOCATION' ? 'location' : 'person/entity';
-    return ` If the narration introduces the unnamed ${noun}, use exactly "${nameGeneration.generatedName}" as its proper name. Do not invent, alter, translate, or replace this name.`;
+    if (!nameGeneration?.namePool) return '';
+    return ` If the narration introduces a new unnamed person/entity or location, choose an appropriate unused proper name from this deterministic pool: ${namePoolText(nameGeneration.namePool)}. Do not rename existing named characters or places, and do not force a new introduction.`;
+}
+
+function namePoolText(pool = {}) {
+    return `male: ${list(pool.male)}; female: ${list(pool.female)}; location: ${list(pool.location)}`;
 }
 
 function userImpairmentGuide(impairment, summaryText) {
