@@ -274,9 +274,10 @@ function RelationshipEngine(npc, resolutionPacket) {
       if explicit goal/challenge is coercion, threat, force, or fear pressure -> FearHostility
       else -> Hostility
     if explicit goal/challenge is intimidation, coercion, menacing threat, forced submission, or terrorizing display -> Fear
-    if landed && (isDirect || isOpp || isHarmed):
+    if landed && (isDirect || isOpp || isHarmed) and actual outcome materially harms this NPC:
       if out in [dominant_impact, solid_impact] -> FearHostility
       else -> Hostility
+    if landed && (isDirect || isOpp) but action is non-coercive social opposition with stakeChangeByOutcome=none -> No Change
     if benefit -> Bond
     else -> No Change
 
@@ -999,9 +1000,20 @@ export function routeDispositionTarget(npc, packet, auditInteraction, sem) {
     if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
     if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (bool(sem.explicitIntimidationOrCoercion)) return 'Fear';
-    if (landed && (isDirect || isOpp || isHarmed)) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
+    if (landed && (isDirect || isOpp || isHarmed) && landedActionHarmsRelationship(packet, sem, out, isHarmed)) {
+        return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
+    }
     if (auditInteraction === 'Y') return 'Bond';
     return 'No Change';
+}
+
+function landedActionHarmsRelationship(packet, sem, outcome, isHarmed) {
+    if (isHarmed) return true;
+    if (packet.classifyHostilePhysicalIntent === 'Y') return true;
+    if (packet.classifyPhysicalBoundaryPressure === 'Y') return true;
+    if (packet.boundaryViolationExplicit === 'Y') return true;
+    if (bool(sem.explicitIntimidationOrCoercion)) return true;
+    return normalizeStakeChange(sem.stakeChangeByOutcome?.[String(outcome || 'no_roll')]) === 'harm';
 }
 
 export function resolveStakeChangeByOutcome(npc, sem, packet) {

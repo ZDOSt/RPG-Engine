@@ -774,7 +774,7 @@ function intimacyRefusalGuide(npc) {
 
 function nameGenerationGuide(nameGeneration) {
     if (!nameGeneration?.namePool) return '';
-    return ` If the narration introduces a new unnamed person/entity or location, choose an appropriate unused proper name from this deterministic pool: ${namePoolText(nameGeneration.namePool)}. Do not rename existing named characters or places, and do not force a new introduction.`;
+    return ` If the narration introduces new unnamed people, entities, travelers, guards, villagers, enemies, merchants, witnesses, or bystanders, assign unused names from this deterministic person pool: male: ${list(nameGeneration.namePool.male)}; female: ${list(nameGeneration.namePool.female)}. If the narration introduces a new unnamed location, use an unused name from this deterministic location pool: ${list(nameGeneration.namePool.location)}. Do not rename existing named characters or places, and do not force a new introduction.`;
 }
 
 function namePoolText(pool = {}) {
@@ -915,7 +915,7 @@ function formatProactivityForNarration(proactivity) {
 
 function proactivityAggressionAudit(value, aggressionResult) {
     if (!isAggressionRollApplicableProactivity(value)) return '';
-    return `triggersAggressionRoll:${aggressionResult ? 'Y' : 'N'}`;
+    return aggressionResult ? 'triggersAggressionRoll:Y' : '';
 }
 
 function isAggressionRollApplicableProactivity(value) {
