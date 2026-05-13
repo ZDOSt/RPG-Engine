@@ -1,14 +1,14 @@
 import { ENGINE_PROMPT_TEXT } from './engines.js';
+import { TRACKER_DELTA_CONTRACT, TRACKER_DELTA_END, TRACKER_DELTA_START, TRACKER_DELTA_TEMPLATE, TRACKER_DELTA_WRAPPER_END, TRACKER_DELTA_WRAPPER_START } from './tracker-delta-contract.js';
 import { getRequestHeaders } from '../../../../script.js';
 import { createGenerationParameters, getChatCompletionModel, oai_settings, proxies } from '../../../../scripts/openai.js';
 
 export const SEMANTIC_PREFLIGHT_STOP_SENTINEL = 'SEMANTIC_PREFLIGHT_COMPLETE';
-export const POST_REPLY_TRACKER_STOP_SENTINEL = 'POST_REPLY_TRACKER_COMPLETE';
+export { TRACKER_DELTA_CONTRACT, TRACKER_DELTA_END, TRACKER_DELTA_START, TRACKER_DELTA_TEMPLATE, TRACKER_DELTA_WRAPPER_END, TRACKER_DELTA_WRAPPER_START };
 
 const SEMANTIC_RESPONSE_LENGTH_MIN = 2048;
 const SEMANTIC_RESPONSE_LENGTH_MAX = 8192;
 const SEMANTIC_RESPONSE_LENGTH_PER_TRACKED_NPC = 320;
-const POST_REPLY_TRACKER_RESPONSE_LENGTH = 1400;
 const SEMANTIC_TOOL_NAME = 'submit_semantic_preflight';
 const SEMANTIC_BACKEND_ENDPOINT = '/api/backends/chat-completions/generate';
 const TRACKER_CONDITIONS = Object.freeze(['unchanged', 'healthy', 'bruised', 'wounded', 'badly_wounded', 'critical', 'dead']);
@@ -132,32 +132,8 @@ export async function extractSemanticLedger(context, promptContext, type, tracke
     return normalized;
 }
 
-export async function extractPostReplyTrackerDelta(context, assistantText, trackerDisplaySnapshot = {}, options = {}) {
-    const narration = String(assistantText || '').trim();
-    if (!narration) return emptyPostReplyTrackerDelta();
-
-    const prompt = buildPostReplyTrackerPrompt(context, narration, trackerDisplaySnapshot, options);
-    const responseLength = Number.isFinite(options?.responseLength) && options.responseLength > 0
-        ? options.responseLength
-        : POST_REPLY_TRACKER_RESPONSE_LENGTH;
-    const overridePayload = {
-        temperature: 0,
-        stop: [POST_REPLY_TRACKER_STOP_SENTINEL],
-        stopping_strings: [POST_REPLY_TRACKER_STOP_SENTINEL],
-        stop_sequence: [POST_REPLY_TRACKER_STOP_SENTINEL],
-        enable_web_search: false,
-    };
-
-    const raw = options?.semanticProfileId
-        ? await sendSemanticProfileTextRequest(prompt, responseLength, options, overridePayload)
-        : await generateSemanticRaw(context, prompt, responseLength);
-
-    try {
-        return sanitizePostReplyTrackerDelta(parsePostReplyTrackerDelta(raw), narration);
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Post-reply tracker pass returned no valid tracker delta. ${message}`);
-    }
+export function parseNarratorTrackerDelta(text, narration = '') {
+    return sanitizeNarratorTrackerDelta(parseNarratorTrackerDeltaText(text), narration);
 }
 
 function estimateSemanticResponseLength(trackerSnapshot) {
@@ -934,82 +910,6 @@ NameGenerationEngine.locationCandidates=(none)
 END_SEMANTIC_PREFLIGHT
 ${SEMANTIC_PREFLIGHT_STOP_SENTINEL}`;
 
-const POST_REPLY_TRACKER_CONTRACT = [
-    'STRICT POST-REPLY TRACKER DELTA CONTRACT:',
-    '- Read only the final assistant narration below.',
-    '- Extract only explicit state changes that actually appear in that narration.',
-    '- This pass is tracker-only. Do not resolve mechanics, relationship, rolls, names, proactivity, or outcomes.',
-    '- Use semantic reading, not keyword matching. Identify who is affected, what changed, and whether the change persists beyond the instant of narration.',
-    '- Do not infer hidden consequences. Do not add momentary pain, effort, hesitation, fear, impact, or flavor as wounds/status.',
-    '- NPC personalitySummary is stable personality memory only: a concise 8-20 word phrase for enduring temperament, values, manner, or interaction style revealed by the narration.',
-    '- Do not use personalitySummary for current mood, attraction, relationship state, fear/hostility, wounds, status, gear, temporary reactions, or this-turn events. Use unchanged unless a stable trait is clear.',
-    '- Add wounds/status only when the prose establishes an actual ongoing injury, ailment, restraint, impairment, or continuing condition. This includes any body part, organ, sense, mental function, magic/poison/disease effect, or status that would continue to affect later action.',
-    '- A hit, blow, impact, fall, shove, knockdown, stagger, flinch, gasp, pain spike, breath loss, being winded, or "the wind is knocked out" is not a tracked wound/status by itself.',
-    '- Track rib/chest/torso effects only if the narration explicitly establishes a lasting injury or continuing status such as bruised ribs, cracked rib, broken rib, bleeding, ongoing breathing trouble, or unconsciousness.',
-    '- Impact/result strength is a severity ceiling, not tracker evidence. A strong hit may allow a worse injury only if the final prose actually states that continuing injury.',
-    '- For severity, map the prose semantically: minor surface harm/status -> bruised; clear injury, bleeding, poisoning, sickness, sprain, concussion, exhaustion, or moderate status -> wounded; fracture, broken/dislocated limb, deep wound, heavy bleeding, severe impairment, paralysis, unconsciousness, or life-threatening status -> badly_wounded or critical as appropriate; death only when explicit.',
-    '- For NPCs, anchor injury/recovery to the named or tracked NPC the narration says was affected. If the resolved user action visibly injured its target, track that target. If an NPC action visibly injured another NPC, track that named/tracked NPC. Do not move an injury to the user unless the narration says the user/persona was affected.',
-    '- Treat injuries/status/gear/inventory/tasks affecting the user/player/persona/active protagonist as TrackerUpdateEngine.User, even when the narration uses the persona name, "they", or body-part possessives instead of the literal word user.',
-    '- Use the latest user input only to identify who the acting user/player/persona is and which described body/item/task belongs to them. Do not extract changes from the latest user input unless the same change also appears in the final assistant narration.',
-    '- Remove wounds/status only when the prose explicitly says the injury/status is healed, cured, recovered, restored, regenerated, magically healed, knitted closed, gone, or no longer impairing. Bandaging, splinting, dressing, cleaning, stitching, stabilizing, normal care, or starting treatment does NOT remove injuries unless the prose also says the injury/status is gone, healed, cured, fully recovered, or no longer impairing.',
-    '- Never rewrite full tracker lists. Return deltas only.',
-    '- Use condition=unchanged unless the narration explicitly changes overall condition.',
-    '- NPC entries are only for named or currently tracked NPCs with explicit condition, wound, status, visible gear, or stable personalitySummary changes. NPC inventory is not tracked.',
-    '- If TrackerUpdateEngine.NPC.count > 0, every NPC[index] entry must include NPC, personalitySummary, condition, woundsAdd, woundsRemove, statusAdd, statusRemove, gearAdd, and gearRemove.',
-    '- If uncertain, output (none).',
-    '- Output exactly the compact block. No markdown. No prose. No JSON.',
-].join('\n');
-
-const POST_REPLY_TRACKER_TEMPLATE = `BEGIN_POST_REPLY_TRACKER
-TrackerUpdateEngine.User.condition=unchanged
-TrackerUpdateEngine.User.woundsAdd=(none)
-TrackerUpdateEngine.User.woundsRemove=(none)
-TrackerUpdateEngine.User.statusAdd=(none)
-TrackerUpdateEngine.User.statusRemove=(none)
-TrackerUpdateEngine.User.gearAdd=(none)
-TrackerUpdateEngine.User.gearRemove=(none)
-TrackerUpdateEngine.User.inventoryAdd=(none)
-TrackerUpdateEngine.User.inventoryRemove=(none)
-TrackerUpdateEngine.User.tasksAdd=(none)
-TrackerUpdateEngine.User.tasksRemove=(none)
-TrackerUpdateEngine.User.commitmentsAdd=(none)
-TrackerUpdateEngine.User.commitmentsRemove=(none)
-TrackerUpdateEngine.NPC.count=0
-END_POST_REPLY_TRACKER
-${POST_REPLY_TRACKER_STOP_SENTINEL}`;
-
-function buildPostReplyTrackerPrompt(context, assistantText, trackerDisplaySnapshot = {}, options = {}) {
-    const userName = context?.name1 || 'User';
-    const charName = context?.name2 || 'Assistant';
-    const personaHints = getPersonaIdentityHints(context);
-    return [
-        {
-            role: 'system',
-            content: [
-                POST_REPLY_TRACKER_CONTRACT,
-                '',
-                `User name: ${userName}`,
-                `Assistant/character name: ${charName}`,
-                `User/persona identity hints: ${personaHints.length ? personaHints.join(', ') : '(none)'}`,
-                `Latest user input anchor: ${clip(String(options?.latestUserText || ''), 900) || '(none)'}`,
-                '',
-                'Current tracker snapshot before post-reply delta:',
-                JSON.stringify(compactTrackerForPostReply(trackerDisplaySnapshot)),
-            ].join('\n'),
-        },
-        {
-            role: 'user',
-            content: [
-                'FINAL ASSISTANT NARRATION:',
-                assistantText,
-                '',
-                `MANDATORY OUTPUT CONTRACT: Return exactly one tracker delta block and then ${POST_REPLY_TRACKER_STOP_SENTINEL}.`,
-                POST_REPLY_TRACKER_TEMPLATE,
-            ].join('\n'),
-        },
-    ];
-}
-
 function getPersonaIdentityHints(context) {
     const fields = getCharacterCardFields(context);
     const persona = String(fields.persona ?? '').trim();
@@ -1034,33 +934,6 @@ function getPersonaIdentityHints(context) {
         if (match?.[1]) add(match[1].replace(/\s+[-–—].*$/, ''));
     }
     return hints.slice(0, 5);
-}
-
-function compactTrackerForPostReply(snapshot = {}) {
-    const user = snapshot?.user || {};
-    const npcs = {};
-    for (const [name, entry] of Object.entries(snapshot?.npcs || {})) {
-        npcs[name] = {
-            presence: entry?.presence || 'Present',
-            lifecycle: entry?.lifecycle || 'Active',
-            condition: entry?.condition || 'healthy',
-            wounds: readPlainArray(entry?.wounds),
-            statusEffects: readPlainArray(entry?.statusEffects),
-            gear: readPlainArray(entry?.gear),
-        };
-    }
-    return {
-        user: {
-            condition: user?.condition || 'healthy',
-            wounds: readPlainArray(user?.wounds),
-            statusEffects: readPlainArray(user?.statusEffects),
-            gear: readPlainArray(user?.gear),
-            inventory: readPlainArray(user?.inventory),
-            tasks: readPlainArray(user?.tasks),
-            commitments: readPlainArray(user?.commitments),
-        },
-        npcs,
-    };
 }
 
 function buildSemanticPrompt(context, coreChat, type, trackerSnapshot, playerTrackerSnapshot = {}, options = {}) {
@@ -1740,22 +1613,9 @@ function parseCompactLedger(text, trackerSnapshot) {
     };
 }
 
-function parsePostReplyTrackerDelta(raw) {
-    const candidates = extractTextCandidates(raw);
-    const errors = [];
-    for (const text of candidates) {
-        try {
-            return parsePostReplyTrackerText(text);
-        } catch (error) {
-            errors.push(error instanceof Error ? error.message : String(error));
-        }
-    }
-    throw new Error(`Post-reply tracker pass did not return a valid block. Candidates=${candidates.length}. Errors=${errors.slice(0, 3).join(' | ')}. RawPreview=${previewRaw(raw)}`);
-}
-
-function parsePostReplyTrackerText(text) {
+function parseNarratorTrackerDeltaText(text) {
     const source = String(text || '');
-    const match = source.match(/BEGIN_POST_REPLY_TRACKER([\s\S]*?)END_POST_REPLY_TRACKER/i);
+    const match = source.match(/BEGIN_TRACKER_DELTA([\s\S]*?)END_TRACKER_DELTA/i);
     const body = match ? match[1] : source;
 
     const fields = new Map();
@@ -1786,7 +1646,7 @@ function parsePostReplyTrackerText(text) {
         'TrackerUpdateEngine.NPC.count',
     ];
     const missing = required.filter(key => !fields.has(key));
-    if (missing.length) throw new Error(`post-reply tracker block missing required lines: ${missing.join(', ')}`);
+    if (missing.length) throw new Error(`tracker delta block missing required lines: ${missing.join(', ')}`);
 
     const user = {
         condition: normalizeTrackerDeltaCondition(fields.get('TrackerUpdateEngine.User.condition')),
@@ -1826,13 +1686,13 @@ function parsePostReplyTrackerText(text) {
     return { user, npcs };
 }
 
-function sanitizePostReplyTrackerDelta(delta, narration) {
+function sanitizeNarratorTrackerDelta(delta, narration) {
     const text = String(narration || '');
     const cleanDelta = {
-        user: sanitizePostReplyActorDelta(delta?.user || {}, text, 'user'),
+        user: sanitizeNarratorTrackerActorDelta(delta?.user || {}, text, 'user'),
         npcs: Array.isArray(delta?.npcs)
             ? delta.npcs.map(item => ({
-                ...sanitizePostReplyActorDelta(item || {}, text, item?.NPC),
+                ...sanitizeNarratorTrackerActorDelta(item || {}, text, item?.NPC),
                 NPC: item?.NPC,
             }))
             : [],
@@ -1847,7 +1707,7 @@ function sanitizePostReplyTrackerDelta(delta, narration) {
     return cleanDelta;
 }
 
-function sanitizePostReplyActorDelta(delta, narration, actorName = '') {
+function sanitizeNarratorTrackerActorDelta(delta, narration, actorName = '') {
     const source = delta && typeof delta === 'object' ? delta : {};
     const condition = normalizeTrackerDeltaCondition(source.condition);
     const sanitizedWoundsAdd = filterPersistentTrackerEffects(source.woundsAdd, narration, true);
@@ -1856,7 +1716,7 @@ function sanitizePostReplyActorDelta(delta, narration, actorName = '') {
     const sanitizedStatusRemove = filterResolvedTrackerEffects(source.statusRemove, narration, actorName);
     const actorHasPersistentDelta = sanitizedWoundsAdd.length || sanitizedStatusAdd.length;
     const actorHasConditionEvidence = hasActorScopedConditionEvidence(condition, narration, actorName);
-    const sanitizedCondition = sanitizePostReplyCondition(condition, narration, actorName, actorHasPersistentDelta, actorHasConditionEvidence);
+    const sanitizedCondition = sanitizeNarratorTrackerCondition(condition, narration, actorName, actorHasPersistentDelta, actorHasConditionEvidence);
     return {
         ...source,
         personalitySummary: normalizePersonalitySummary(source.personalitySummary),
@@ -1872,7 +1732,7 @@ function isInjuryCondition(condition) {
     return ['bruised', 'wounded', 'badly_wounded', 'critical', 'dead'].includes(condition);
 }
 
-function sanitizePostReplyCondition(condition, narration, actorName, actorHasPersistentDelta, actorHasConditionEvidence) {
+function sanitizeNarratorTrackerCondition(condition, narration, actorName, actorHasPersistentDelta, actorHasConditionEvidence) {
     if (condition === 'healthy') {
         return hasActorScopedResolvedEvidence(narration, actorName) ? 'healthy' : 'unchanged';
     }
@@ -2027,27 +1887,6 @@ function nearPattern(text, actorPattern, evidencePattern, distance) {
 
 function escapeRegExp(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function emptyPostReplyTrackerDelta() {
-    return {
-        user: {
-            condition: 'unchanged',
-            woundsAdd: [],
-            woundsRemove: [],
-            statusAdd: [],
-            statusRemove: [],
-            gearAdd: [],
-            gearRemove: [],
-            inventoryAdd: [],
-            inventoryRemove: [],
-            tasksAdd: [],
-            tasksRemove: [],
-            commitmentsAdd: [],
-            commitmentsRemove: [],
-        },
-        npcs: [],
-    };
 }
 
 function trackerSnapshotToLedgerEntries(trackerSnapshot) {
@@ -2336,10 +2175,10 @@ function normalizeLedger(ledger) {
         ? ledger.trackerUpdateEngine.npcs.map(item => {
             const npc = cleanScalar(item?.NPC);
             if (!npc || isNoneValue(npc)) return null;
-            return {
-                NPC: npc,
-                ...normalizeTrackerDelta(item, TRACKER_NPC_DELTA_FIELDS),
-            };
+        return {
+            NPC: npc,
+            ...normalizeTrackerDelta(item, TRACKER_NPC_DELTA_FIELDS),
+        };
         }).filter(Boolean)
         : [];
     ledger.chaosSemantic = ledger.chaosSemantic || { sceneSummary: '' };

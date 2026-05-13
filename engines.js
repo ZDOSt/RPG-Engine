@@ -866,8 +866,10 @@ function NPCAggressionResolution(proactivityResults, resolutionPacket, trackerSn
       targetCore = getUserCoreStats() if target={{user}} else target NPC currentCoreStats
       npcDie = 1d20
       targetDie = 1d20
-      npcTotal = npcDie + npcCore.PHY + counterBonus
-      targetTotal = targetDie + targetCore.PHY
+      attackStat = highest of npcCore.PHY/MND only; ignore CHA for aggression
+      defenseStat = attackStat
+      npcTotal = npcDie + npcCore[attackStat] + counterBonus
+      targetTotal = targetDie + targetCore[defenseStat]
       margin = npcTotal - targetTotal
       ReactionOutcome = aggressionReactionOutcome(margin)
       return AGGRESSION_RESULT {AttackType, AttackIntent, ProactivityTarget, CounterPotential, CounterBonus, ReactionOutcome, Margin}
@@ -1487,7 +1489,7 @@ export function buildNarrationGuidance(resolution, handoffs, chaos, proactivity,
 export function buildPersistencePolicy() {
     return {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
-        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportCooldownUntilActiveMs', 'userHistory', 'raceProfile', 'personalitySummary', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'presence', 'lifecycle', 'persistenceTier', 'lastSeenMessageKey', 'absentSinceMessageKey', 'condition', 'wounds', 'statusEffects', 'gear'],
+        npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportCooldownUntilActiveMs', 'userHistory', 'raceProfile', 'personalitySummary', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'lifecycle', 'condition', 'wounds', 'statusEffects', 'gear'],
         playerPersistentRuleMutated: ['condition', 'wounds', 'statusEffects', 'gear', 'inventory', 'tasks', 'commitments'],
         perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
@@ -1506,8 +1508,6 @@ export function trackerSummary(trackerUpdate) {
         return [
             name,
             disposition,
-            `presence:${value?.presence ?? 'Present'}`,
-            `tier:${value?.persistenceTier ?? 'Recurring'}`,
             `life:${value?.lifecycle ?? 'Active'}`,
             `rapport:${value?.currentRapport ?? 0}`,
             `rapportCooldown:${value?.rapportCooldownUntilActiveMs ?? 0}`,
@@ -1612,12 +1612,7 @@ export function normalizeTrackerEntry(value) {
         hostileLandedPressure: clamp(Number(value?.hostileLandedPressure ?? 0), 0, 20),
         dominantLock: ['FEAR', 'HOSTILITY'].includes(value?.dominantLock) ? value.dominantLock : 'None',
         pressureMode: ['none', 'cornered', 'dominated'].includes(value?.pressureMode) ? value.pressureMode : 'none',
-        presence: normalizePresence(value?.presence),
         lifecycle: normalizeLifecycle(value?.lifecycle),
-        persistenceTier: normalizePersistenceTier(value?.persistenceTier),
-        lastSeenMessageKey: typeof value?.lastSeenMessageKey === 'string' ? value.lastSeenMessageKey : '',
-        absentSinceMessageKey: typeof value?.absentSinceMessageKey === 'string' ? value.absentSinceMessageKey : '',
-        retiredSinceMessageKey: typeof value?.retiredSinceMessageKey === 'string' ? value.retiredSinceMessageKey : '',
         condition: normalizeTrackerCondition(value?.condition),
         wounds: normalizeTrackerStringList(value?.wounds),
         statusEffects: normalizeTrackerStringList(value?.statusEffects),
@@ -1742,17 +1737,9 @@ export function normalizePersonalitySummary(value) {
     return text.slice(0, 160);
 }
 
-export function normalizePresence(value) {
-    return value === 'Absent' ? 'Absent' : 'Present';
-}
-
 export function normalizeLifecycle(value) {
     if (value === 'Dead' || value === 'Retired') return value;
     return 'Active';
-}
-
-export function normalizePersistenceTier(value) {
-    return value === 'Temporary' ? 'Temporary' : 'Recurring';
 }
 
 export function normalizeDisposition(value) {

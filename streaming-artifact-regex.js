@@ -1,0 +1,40 @@
+export const STREAMING_ARTIFACT_REGEX_SCRIPT_NAME = 'Story Engine - Hide Narrator Artifacts (Streaming Display)';
+export const STREAMING_ARTIFACT_REGEX_SCRIPT_ID = 'story-engine-hide-narrator-artifacts-v1';
+
+export const STREAMING_ARTIFACT_REGEX_SOURCE = [
+    'BEGIN_FINAL_NARRATION\\s*',
+    '\\s*END_FINAL_NARRATION[\\s\\S]*$',
+    '\\s*(?:<!--\\s*)?STORY_ENGINE_TRACKER_DELTA[\\s\\S]*$',
+    '\\s*&lt;!--\\s*STORY_ENGINE_TRACKER_DELTA[\\s\\S]*$',
+    '\\s*BEGIN_TRACKER_DELTA[\\s\\S]*$',
+    '\\s*<trackers>[\\s\\S]*$',
+    '\\s*&lt;trackers&gt;[\\s\\S]*$',
+].join('|');
+
+export const STREAMING_ARTIFACT_REGEX_PATTERN = `/${STREAMING_ARTIFACT_REGEX_SOURCE}/gi`;
+
+export function streamingArtifactRegex() {
+    return new RegExp(STREAMING_ARTIFACT_REGEX_SOURCE, 'gi');
+}
+
+export function applyStreamingArtifactDisplayRegex(text) {
+    return String(text ?? '').replace(streamingArtifactRegex(), '');
+}
+
+export function buildStreamingArtifactRegexScript() {
+    return {
+        id: STREAMING_ARTIFACT_REGEX_SCRIPT_ID,
+        scriptName: STREAMING_ARTIFACT_REGEX_SCRIPT_NAME,
+        findRegex: STREAMING_ARTIFACT_REGEX_PATTERN,
+        replaceString: '',
+        trimStrings: [],
+        placement: [2],
+        disabled: false,
+        markdownOnly: true,
+        promptOnly: true,
+        runOnEdit: true,
+        substituteRegex: 0,
+        minDepth: null,
+        maxDepth: null,
+    };
+}

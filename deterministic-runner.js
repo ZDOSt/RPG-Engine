@@ -1955,29 +1955,6 @@ function statusFromSemanticEffect(effect, bodyPart, severity) {
     return `${severity} ${map[effect?.effectType] || 'physical impairment'}`;
 }
 
-function statusFromInflictedInjury(source, bodyPart, severity) {
-    const effect = {
-        effectType: normalizeEffectType(aggressionEffectTypeFromSource(source)),
-    };
-    return statusFromSemanticEffect(effect, String(bodyPart || 'body').toLowerCase(), severity);
-}
-
-function aggressionEffectTypeFromSource(source) {
-    const text = String(source || '').toLowerCase();
-    if (/\b(poison|venom|toxin|numb(?:ing)?|sick(?:en|ness)|disease|plague)\b/.test(text)) return 'poison';
-    if (/\b(paraly[sz]e|paraly[sz]ed|paralysis|freeze|frozen|lock(?:s|ed)?\s+(?:up|limbs?|body))\b/.test(text)) return 'paralysis';
-    if (/\b(bind(?:ing)?|restrain|grapple|pin|immobili[sz]e|snare|net|chain|hold)\b/.test(text)) return 'restraint';
-    if (/\b(burn|fire|flame|scorch|sear)\b/.test(text)) return 'burn';
-    if (/\b(lightning|shock|electrocut|electric|thunderbolt)\b/.test(text)) return 'electrical';
-    if (/\b(blind|darken(?:s)?\s+vision|sight)\b/.test(text)) return 'blindness';
-    if (/\b(stun|daze|concuss|ring(?:ing)?\s+ears?)\b/.test(text)) return 'stun';
-    if (/\b(fear|panic|terror|horror|terrify)\b/.test(text)) return 'fear';
-    if (/\b(curse|hex|afflict)\b/.test(text)) return 'curse';
-    if (/\b(exhaust|drain|fatigue|weaken)\b/.test(text)) return 'exhaustion';
-    if (/\b(mind|mental|confus|disorient)\b/.test(text)) return 'mental_status';
-    return 'physical_injury';
-}
-
 function normalizeEffectType(value) {
     const text = cleanText(value).toLowerCase().replace(/[\s-]+/g, '_');
     const aliases = {
@@ -2226,21 +2203,14 @@ function applyUserResultInjuryDeltaToState(before, delta) {
 
 function deriveInflictedTargetInjuryFromAggression({ npc, target, proactivityResult, attackType, reactionOutcome, margin, resolutionPacket, refereeContext }) {
     if (!['npc_overpowers', 'npc_succeeds'].includes(reactionOutcome)) return null;
-    const source = [
-        attackType,
-        proactivityResult?.Intent,
-        proactivityResult?.Impulse,
-        resolutionPacket?.CounterPotential && resolutionPacket.CounterPotential !== 'none'
-            ? `counter potential ${resolutionPacket.CounterPotential}`
-            : '',
-    ].filter(Boolean).join(' ');
     const severity = severityFromAggressionResult(reactionOutcome, margin, resolutionPacket?.CounterPotential);
-    const bodyPart = inferAggressionBodyPart(source);
-    const injuryKind = aggressionInjuryKind(source);
-    const wound = `${severity} ${bodyPart} ${injuryKind}`.replace(/\s+/g, ' ').trim();
-    const status = statusFromInflictedInjury(source, bodyPart, severity);
     const targetName = normalizeProactivityTarget(target, refereeContext);
     const targetIsUser = isUserProactivityTarget({ ProactivityTarget: targetName }, refereeContext);
+    const contextHint = [
+        `${npc}'s ${attackType}`,
+        proactivityResult?.Intent,
+        proactivityResult?.Impulse,
+    ].filter(Boolean).join(', ');
 
     return {
         sourceNpc: npc,
@@ -2250,11 +2220,14 @@ function deriveInflictedTargetInjuryFromAggression({ npc, target, proactivityRes
         reactionOutcome,
         severity,
         condition: conditionFromInflictedSeverity(severity),
-        woundsAdd: [wound],
-        statusAdd: status ? [status] : [],
+        woundsAdd: [],
+        statusAdd: [],
+        InjuryDetailMode: 'narrator_contextual',
+        InjurySeverityLimit: severity,
+        InjuryContextHint: contextHint,
         NarrationRule: targetIsUser
-            ? `${npc}'s ${attackType} causes ${wound}; narrate it as a lasting user injury when describing the NPC attack result, and apply later impairment by severity and affected body function.`
-            : `${npc}'s ${attackType} causes ${wound} to ${targetName}; narrate it as a lasting NPC injury when describing the NPC attack result, and apply later impairment by severity and affected body function.`,
+            ? `${npc}'s ${attackType} causes a ${severity} persistent injury; choose the concrete wound and affected body area from the attack context, but do not exceed ${severity} severity.`
+            : `${npc}'s ${attackType} causes a ${severity} persistent injury to ${targetName}; choose the concrete wound and affected body area from the attack context, but do not exceed ${severity} severity.`,
     };
 }
 
@@ -2265,20 +2238,6 @@ function severityFromAggressionResult(reactionOutcome, margin, counterPotential)
     }
     if (counterPotential === 'severe' && margin >= 3) return 'moderate';
     return 'minor';
-}
-
-function inferAggressionBodyPart(source) {
-    const text = String(source || '').toLowerCase();
-    if (/\b(grab|grapple|restrain|boundary_physical)\b/.test(text)) return 'upper body';
-    if (/\b(kick|trip|sweep)\b/.test(text)) return 'lower body';
-    return 'body';
-}
-
-function aggressionInjuryKind(source) {
-    const text = String(source || '').toLowerCase();
-    if (/\b(grab|grapple|restrain|boundary_physical)\b/.test(text)) return 'strain';
-    if (/\b(counter|retaliation|violence|attack)\b/.test(text)) return 'injury';
-    return 'bruise';
 }
 
 function mergeUserResultInjuryDelta(current, injury) {
@@ -2438,18 +2397,21 @@ function evaluateNpcImpairment(npcName, ledger, trackerSnapshot, semantic, goal,
     };
 }
 
-function evaluateNpcAggressionImpairment(npcName, trackerUpdate, trackerSnapshot, proactivityResult) {
+function evaluateNpcAggressionImpairment(npcName, trackerUpdate, trackerSnapshot, proactivityResult, aggressionStat = 'PHY') {
     if (!isReal(npcName)) return noNpcImpairment('no NPC named');
     const state = normalizeTrackerEntry(trackerUpdate?.[npcName] || trackerSnapshot?.[npcName] || {});
     const sources = collectImpairmentSources(state, false);
     if (!sources.length) return noNpcImpairment();
+    const stat = normalizeAggressionStat(aggressionStat);
 
     const actionText = [
         proactivityResult?.Intent,
         proactivityResult?.Impulse,
-        'attack strike shove grab grapple weapon physical combat',
+        stat === 'MND'
+            ? 'attack focus magic spell supernatural mental psychic willpower concentration'
+            : 'attack strike shove grab grapple weapon physical combat',
     ].filter(Boolean).join(' ');
-    const actionFunctions = classifyUserActionFunctions(actionText, 'PHY');
+    const actionFunctions = classifyUserActionFunctions(actionText, stat);
 
     const matches = sources
         .map(source => ({
@@ -2480,11 +2442,14 @@ function evaluateNpcAggressionImpairment(npcName, trackerUpdate, trackerSnapshot
     };
 }
 
-function evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult) {
+function evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult, defenseStat = 'PHY') {
+    const stat = normalizeAggressionStat(defenseStat);
     const semantic = {
         identifyGoal: resolutionPacket?.GOAL,
         identifyChallenge: [
-            'defend evade dodge block brace resist survive avoid counterattack retaliation proactive attack',
+            stat === 'MND'
+                ? 'defend resist withstand focus willpower mental discipline magic supernatural pressure'
+                : 'defend evade dodge block brace resist survive avoid counterattack retaliation proactive attack',
             proactivityResult?.Intent,
             proactivityResult?.Impulse,
         ].filter(Boolean).join(' '),
@@ -2495,21 +2460,24 @@ function evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proact
                 : '',
         ].filter(Boolean).join(' '),
     };
-    return evaluateUserImpairment(ledger, context, semantic, 'DefendAgainstNpcAggression', 'PHY', 'Y');
+    return evaluateUserImpairment(ledger, context, semantic, 'DefendAgainstNpcAggression', stat, 'Y');
 }
 
-function evaluateNpcDefenseImpairment(npcName, trackerUpdate, trackerSnapshot, proactivityResult) {
+function evaluateNpcDefenseImpairment(npcName, trackerUpdate, trackerSnapshot, proactivityResult, defenseStat = 'PHY') {
     if (!isReal(npcName)) return noNpcImpairment('no NPC defender named');
     const state = normalizeTrackerEntry(trackerUpdate?.[npcName] || trackerSnapshot?.[npcName] || {});
     const sources = collectImpairmentSources(state, false);
     if (!sources.length) return noNpcImpairment();
+    const stat = normalizeAggressionStat(defenseStat);
 
     const actionText = [
-        'defend evade dodge block brace resist survive avoid NPC aggression',
+        stat === 'MND'
+            ? 'defend resist withstand focus willpower mental discipline magic supernatural pressure'
+            : 'defend evade dodge block brace resist survive avoid NPC aggression',
         proactivityResult?.Intent,
         proactivityResult?.Impulse,
     ].filter(Boolean).join(' ');
-    const actionFunctions = classifyUserActionFunctions(actionText, 'PHY');
+    const actionFunctions = classifyUserActionFunctions(actionText, stat);
 
     const matches = sources
         .map(source => ({
@@ -2538,6 +2506,21 @@ function evaluateNpcDefenseImpairment(npcName, trackerUpdate, trackerSnapshot, p
         Reason: `${npcName}'s ${best.source.label} affects ${matchedText || 'their defense'}`,
         NarrationRule: `${npcName} may still defend, but ${best.source.label} limits clean defense; narrate pain, compensation, instability, reduced speed, partial resistance, or cost according to the computed aggression result.`,
     };
+}
+
+function deriveNpcAggressionStat(core) {
+    const normalized = normalizeCore(core, { PHY: 1, MND: 1, CHA: 1 });
+    return Number(normalized.MND || 0) > Number(normalized.PHY || 0) ? 'MND' : 'PHY';
+}
+
+function normalizeAggressionStat(value) {
+    return value === 'MND' ? 'MND' : 'PHY';
+}
+
+function aggressionStatStyle(stat) {
+    return normalizeAggressionStat(stat) === 'MND'
+        ? 'magical/mental/supernatural'
+        : 'physical';
 }
 
 function getEffectiveUserImpairmentState(ledger, context) {
@@ -3472,19 +3455,23 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
             ? 'CompanionAttack'
             : baseAttackType;
         const npcCore = normalizeCore(trackerUpdate[npc]?.currentCoreStats || trackerSnapshot[npc]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
-        const npcImpairment = evaluateNpcAggressionImpairment(npc, trackerUpdate, trackerSnapshot, proactivityResult);
+        const attackStat = deriveNpcAggressionStat(npcCore);
+        const defenseStat = attackStat;
+        const npcImpairment = evaluateNpcAggressionImpairment(npc, trackerUpdate, trackerSnapshot, proactivityResult, attackStat);
         const npcImpairmentPenalty = Number(npcImpairment?.AppliedToRoll === 'Y' ? npcImpairment.RollPenalty : 0);
         const targetImpairment = targetIsUser
-            ? evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult)
-            : evaluateNpcDefenseImpairment(target, trackerUpdate, trackerSnapshot, proactivityResult);
+            ? evaluateUserDefenseImpairment(ledger, context, resolutionPacket, proactivityResult, defenseStat)
+            : evaluateNpcDefenseImpairment(target, trackerUpdate, trackerSnapshot, proactivityResult, defenseStat);
         const targetImpairmentPenalty = Number(targetImpairment?.AppliedToRoll === 'Y' ? targetImpairment.RollPenalty : 0);
         const defenderCore = targetIsUser
             ? userCore
             : normalizeCore(trackerUpdate[target]?.currentCoreStats || trackerSnapshot[target]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
         const npcDie = dice.d20();
         const defenderDie = dice.d20();
-        const npcTotal = npcDie + npcCore.PHY + counterBonus + npcImpairmentPenalty;
-        const defenderTotal = defenderDie + statValue(defenderCore, 'PHY') + targetImpairmentPenalty;
+        const npcStatValue = statValue(npcCore, attackStat);
+        const defenderStatValue = statValue(defenderCore, defenseStat);
+        const npcTotal = npcDie + npcStatValue + counterBonus + npcImpairmentPenalty;
+        const defenderTotal = defenderDie + defenderStatValue + targetImpairmentPenalty;
         const margin = npcTotal - defenderTotal;
         const ReactionOutcome = aggressionReactionOutcome(margin);
         const inflictedTargetInjury = deriveInflictedTargetInjuryFromAggression({
@@ -3507,12 +3494,13 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
         if (inflictedNpcInjury) {
             npcTrackerDeltas.push({ NPC: target, injury: inflictedNpcInjury });
         }
-        results[npc] = { AttackType: resultAttackType, AttackIntent: proactivityResult.Intent, ProactivityTarget: target, CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin, NPCImpairment: npcImpairment, UserImpairment: targetIsUser ? targetImpairment : null, TargetImpairment: targetImpairment, InflictedUserInjury: inflictedUserInjury || null, InflictedTargetInjury: inflictedTargetInjury || null };
+        results[npc] = { AttackType: resultAttackType, AttackIntent: proactivityResult.Intent, ProactivityTarget: target, AttackStat: attackStat, DefenseStat: defenseStat, AttackStyle: aggressionStatStyle(attackStat), CounterPotential: counterPotential, CounterBonus: counterBonus, ReactionOutcome, Margin: margin, NPCImpairment: npcImpairment, UserImpairment: targetIsUser ? targetImpairment : null, TargetImpairment: targetImpairment, InflictedUserInjury: inflictedUserInjury || null, InflictedTargetInjury: inflictedTargetInjury || null };
         audit.push(`7.5 ${npc}.npcCore=${compact(npcCore)}`);
+        audit.push(`7.5c ${npc}.AggressionStats=${compact({ AttackStat: attackStat, DefenseStat: defenseStat, AttackStyle: aggressionStatStyle(attackStat) })}`);
         audit.push(`7.5d ${npc}.NPCImpairmentEngine=${compact(npcImpairment)}`);
-        audit.push(`7.5e npcTotal=${npcDie}+${npcCore.PHY}+${counterBonus}${npcImpairmentPenalty ? `+impairment(${npcImpairmentPenalty})` : ''}=${npcTotal}`);
+        audit.push(`7.5e npcTotal=${npcDie}+${attackStat}(${npcStatValue})+${counterBonus}${npcImpairmentPenalty ? `+impairment(${npcImpairmentPenalty})` : ''}=${npcTotal}`);
         audit.push(`7.5f ${npc}.TargetDefenseImpairmentEngine=${compact(targetImpairment)}`);
-        audit.push(`7.5g targetTotal=${defenderDie}+${statValue(defenderCore, 'PHY')}${targetImpairmentPenalty ? `+impairment(${targetImpairmentPenalty})` : ''}=${defenderTotal}`);
+        audit.push(`7.5g targetTotal=${defenderDie}+${defenseStat}(${defenderStatValue})${targetImpairmentPenalty ? `+impairment(${targetImpairmentPenalty})` : ''}=${defenderTotal}`);
         audit.push(`7.5h ${npc}.InflictedUserInjury=${compact(inflictedUserInjury || {})}`);
         audit.push(`7.5i ${npc}.InflictedTargetInjury=${compact(inflictedTargetInjury || {})}`);
         audit.push(`7.5j ${npc}.ProactivityTarget=${target}`);
@@ -3534,15 +3522,19 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
             };
             const counterBonus = counterBonusFromPotential(companionCounterPotential);
             const counterNpcCore = normalizeCore(trackerUpdate[target]?.currentCoreStats || trackerSnapshot[target]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
-            const counterNpcImpairment = evaluateNpcAggressionImpairment(target, trackerUpdate, trackerSnapshot, counterProactivity);
+            const counterAttackStat = deriveNpcAggressionStat(counterNpcCore);
+            const counterDefenseStat = counterAttackStat;
+            const counterNpcImpairment = evaluateNpcAggressionImpairment(target, trackerUpdate, trackerSnapshot, counterProactivity, counterAttackStat);
             const counterNpcImpairmentPenalty = Number(counterNpcImpairment?.AppliedToRoll === 'Y' ? counterNpcImpairment.RollPenalty : 0);
-            const counterTargetImpairment = evaluateNpcDefenseImpairment(npc, trackerUpdate, trackerSnapshot, counterProactivity);
+            const counterTargetImpairment = evaluateNpcDefenseImpairment(npc, trackerUpdate, trackerSnapshot, counterProactivity, counterDefenseStat);
             const counterTargetImpairmentPenalty = Number(counterTargetImpairment?.AppliedToRoll === 'Y' ? counterTargetImpairment.RollPenalty : 0);
             const counterDefenderCore = normalizeCore(trackerUpdate[npc]?.currentCoreStats || trackerSnapshot[npc]?.currentCoreStats, { PHY: 1, MND: 1, CHA: 1 });
             const counterNpcDie = dice.d20();
             const counterDefenderDie = dice.d20();
-            const counterNpcTotal = counterNpcDie + counterNpcCore.PHY + counterBonus + counterNpcImpairmentPenalty;
-            const counterDefenderTotal = counterDefenderDie + statValue(counterDefenderCore, 'PHY') + counterTargetImpairmentPenalty;
+            const counterNpcStatValue = statValue(counterNpcCore, counterAttackStat);
+            const counterDefenderStatValue = statValue(counterDefenderCore, counterDefenseStat);
+            const counterNpcTotal = counterNpcDie + counterNpcStatValue + counterBonus + counterNpcImpairmentPenalty;
+            const counterDefenderTotal = counterDefenderDie + counterDefenderStatValue + counterTargetImpairmentPenalty;
             const counterMargin = counterNpcTotal - counterDefenderTotal;
             const counterReactionOutcome = aggressionReactionOutcome(counterMargin);
             const counterPacket = { ...resolutionPacket, CounterPotential: companionCounterPotential };
@@ -3563,6 +3555,9 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
                 AttackType: 'CounterAttack',
                 AttackIntent: counterProactivity.Intent,
                 ProactivityTarget: npc,
+                AttackStat: counterAttackStat,
+                DefenseStat: counterDefenseStat,
+                AttackStyle: aggressionStatStyle(counterAttackStat),
                 CounterPotential: companionCounterPotential,
                 CounterBonus: counterBonus,
                 ReactionOutcome: counterReactionOutcome,
@@ -3575,9 +3570,10 @@ function runAggression(ledger, trackerSnapshot, trackerUpdate, proactivityResult
             };
             audit.push(`7.6a companionCounterPotential=${companionCounterPotential}`);
             audit.push(`7.6b ${target}.counterNpcCore=${compact(counterNpcCore)}`);
+            audit.push(`7.6b.1 ${target}.CounterAggressionStats=${compact({ AttackStat: counterAttackStat, DefenseStat: counterDefenseStat, AttackStyle: aggressionStatStyle(counterAttackStat) })}`);
             audit.push(`7.6c ${target}.CounterTargetDefenseImpairmentEngine=${compact(counterTargetImpairment)}`);
-            audit.push(`7.6d ${target}.counterTotal=${counterNpcDie}+${counterNpcCore.PHY}+${counterBonus}${counterNpcImpairmentPenalty ? `+impairment(${counterNpcImpairmentPenalty})` : ''}=${counterNpcTotal}`);
-            audit.push(`7.6e ${npc}.counterDefenseTotal=${counterDefenderDie}+${statValue(counterDefenderCore, 'PHY')}${counterTargetImpairmentPenalty ? `+impairment(${counterTargetImpairmentPenalty})` : ''}=${counterDefenderTotal}`);
+            audit.push(`7.6d ${target}.counterTotal=${counterNpcDie}+${counterAttackStat}(${counterNpcStatValue})+${counterBonus}${counterNpcImpairmentPenalty ? `+impairment(${counterNpcImpairmentPenalty})` : ''}=${counterNpcTotal}`);
+            audit.push(`7.6e ${npc}.counterDefenseTotal=${counterDefenderDie}+${counterDefenseStat}(${counterDefenderStatValue})${counterTargetImpairmentPenalty ? `+impairment(${counterTargetImpairmentPenalty})` : ''}=${counterDefenderTotal}`);
             audit.push(`7.6f COMPANION_COUNTER_RESULT=${compact(results[target])}`);
         }
     }

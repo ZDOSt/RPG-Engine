@@ -1,5 +1,5 @@
 import { ENGINE_PROMPT_TEXT, classifyDisposition, normalizeTrackerEntry, normalizeTrackerUserState } from './engines.js';
-import { saveSettingsDebounced } from '../../../../script.js';
+import { name1, saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings } from '../../../../scripts/extensions.js';
 import { addEphemeralStoppingString, flushEphemeralStoppingStrings } from '../../../../scripts/power-user.js';
 import { persona_description_positions, power_user } from '../../../../scripts/power-user.js';
@@ -7,8 +7,15 @@ import { setPersonaDescription, user_avatar } from '../../../../scripts/personas
 import { rotateSecret, SECRET_KEYS, secret_state } from '../../../../scripts/secrets.js';
 import { SlashCommandParser } from '../../../../scripts/slash-commands/SlashCommandParser.js';
 import { formatNarratorModelPromptContext, formatNarratorPromptContext } from './pre-flight.js';
-import { extractPostReplyTrackerDelta, extractSemanticLedger, POST_REPLY_TRACKER_STOP_SENTINEL, SEMANTIC_PREFLIGHT_STOP_SENTINEL, sendSemanticProfileTextRequest } from './semantic-extractor.js';
+import { extractSemanticLedger, parseNarratorTrackerDelta, SEMANTIC_PREFLIGHT_STOP_SENTINEL, sendSemanticProfileTextRequest } from './semantic-extractor.js';
 import { buildPlayerTrackerSnapshot, buildTrackerSnapshot, normalizeRapportClockState, runDeterministicEngines, saveTrackerUpdate } from './deterministic-runner.js';
+import { applyContextualInjuryCapsToTrackerDelta, collectContextualInjuryCaps } from './tracker-injury-caps.js';
+import {
+    STREAMING_ARTIFACT_REGEX_SCRIPT_ID,
+    STREAMING_ARTIFACT_REGEX_SCRIPT_NAME,
+    STREAMING_ARTIFACT_REGEX_PATTERN,
+    buildStreamingArtifactRegexScript,
+} from './streaming-artifact-regex.js';
 
 const EXTENSION_NAME = 'Story Engine';
 const SETTINGS_KEY = 'structuredPreflightEngines';
@@ -17,12 +24,16 @@ const ENGINE_PROMPT_KEY = 'structured_preflight_engines';
 const NARRATOR_PROMPT_KEY = 'structured_preflight_narrator_context';
 const WRITING_STYLE_PROMPT_KEY = 'structured_preflight_10_writing_style';
 const PROSE_RULES_PROMPT_KEY = 'structured_preflight_20_prose_rules';
+const FINAL_REMINDER_PROMPT_KEY = 'structured_preflight_30_final_reminder';
 const LEGACY_WRITING_STYLE_PROMPT_KEY = 'structured_preflight_writing_style';
 const LEGACY_PROSE_RULES_PROMPT_KEY = 'structured_preflight_prose_rules';
 const PROFILE_NONE = '<None>';
 const TRACKER_DISPLAY_EXTRA_KEY = 'structured_preflight_tracker_display';
 const TRACKER_DISPLAY_BLOCK_CLASS = 'structured-preflight-tracker-block';
 const TRACKER_DISPLAY_VERSION = 1;
+const TRACKER_WIDGET_ID = 'structured_preflight_tracker_widget';
+const TRACKER_WIDGET_BUTTON_ID = 'structured_preflight_tracker_toggle';
+const TRACKER_WIDGET_PANEL_ID = 'structured_preflight_tracker_panel';
 const NARRATOR_HANDOFF_EXTRA_KEY = 'structured_preflight_narrator_handoff';
 const NARRATOR_HANDOFF_BLOCK_CLASS = 'structured-preflight-narrator-handoff-block';
 const NARRATOR_HANDOFF_VERSION = 1;
@@ -420,10 +431,22 @@ const DEFAULT_SETTINGS = Object.freeze({
     disableSemanticThinking: true,
     writingStyleEnabled: true,
     writingStylePrompt: DEFAULT_WRITING_STYLE_PROMPT,
+    writingStylePlacement: 'before_prompt',
+    writingStyleDepth: 0,
+    writingStyleRole: 0,
     proseRulesEnabled: true,
     proseRulesPrompt: DEFAULT_PROSE_RULES_PROMPT,
+    proseRulesPlacement: 'in_prompt',
+    proseRulesDepth: 0,
+    proseRulesRole: 0,
     finalReminderPrompt: DEFAULT_FINAL_REMINDER_PROMPT,
+    finalReminderPlacement: 'in_chat',
+    finalReminderDepth: 0,
+    finalReminderRole: 0,
     nameStyle: 'Balanced Fantasy',
+    trackerWidgetCollapsed: true,
+    trackerWidgetX: 24,
+    trackerWidgetY: 120,
 });
 const CHAT_COMPLETION_SECRET_KEYS = Object.freeze({
     ai21: SECRET_KEYS.AI21,
@@ -457,12 +480,16 @@ const ENGINE_RUNTIME_SENTINEL = [
 ].join('\n');
 
 const EXTENSION_PROMPT_TYPES = Object.freeze({
+    NONE: -1,
     IN_PROMPT: 0,
     IN_CHAT: 1,
+    BEFORE_PROMPT: 2,
 });
 
 const EXTENSION_PROMPT_ROLES = Object.freeze({
     SYSTEM: 0,
+    USER: 1,
+    ASSISTANT: 2,
 });
 
 console.info(`[${EXTENSION_NAME}] module import started`);
@@ -480,7 +507,6 @@ const state = {
     progressToast: null,
     progressToasts: new Set(),
     pendingRunCleanupTimer: null,
-    processingPostReplyTracker: false,
     playerSetupBusy: false,
 };
 
@@ -500,6 +526,60 @@ function getSettings() {
 
 function saveExtensionSettings() {
     saveSettingsDebounced();
+}
+
+function ensureStreamingArtifactRegex() {
+    if (!extension_settings || typeof extension_settings !== 'object') return false;
+    if (!Array.isArray(extension_settings.regex)) {
+        extension_settings.regex = [];
+    }
+
+    const existing = extension_settings.regex.find(script =>
+        script?.id === STREAMING_ARTIFACT_REGEX_SCRIPT_ID
+        || script?.scriptName === STREAMING_ARTIFACT_REGEX_SCRIPT_NAME
+    );
+    const wanted = buildStreamingArtifactRegexScript();
+
+    if (!existing) {
+        extension_settings.regex.push(wanted);
+        saveExtensionSettings();
+        console.info(`[${EXTENSION_NAME}] installed streaming display artifact regex.`);
+        return true;
+    }
+
+    let changed = false;
+    for (const [key, value] of Object.entries(wanted)) {
+        const current = existing[key];
+        const same = Array.isArray(value)
+            ? JSON.stringify(current) === JSON.stringify(value)
+            : current === value;
+        if (!same) {
+            existing[key] = value;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        saveExtensionSettings();
+        console.info(`[${EXTENSION_NAME}] updated streaming display artifact regex.`);
+    }
+    return changed;
+}
+
+function removeStreamingArtifactRegex() {
+    if (!Array.isArray(extension_settings?.regex)) return false;
+    const before = extension_settings.regex.length;
+    extension_settings.regex = extension_settings.regex.filter(script =>
+        script?.id !== STREAMING_ARTIFACT_REGEX_SCRIPT_ID
+        && script?.scriptName !== STREAMING_ARTIFACT_REGEX_SCRIPT_NAME
+        && script?.findRegex !== STREAMING_ARTIFACT_REGEX_PATTERN
+    );
+    if (extension_settings.regex.length !== before) {
+        saveExtensionSettings();
+        console.info(`[${EXTENSION_NAME}] removed streaming display artifact regex.`);
+        return true;
+    }
+    return false;
 }
 
 function getConnectionProfileNames() {
@@ -645,6 +725,79 @@ function setSelectOptions(select, values, placeholder, selectedValue, missingLab
     select.value = selectedValue || (includePlaceholder ? '' : placeholder);
 }
 
+function getPromptPlacementPosition(value) {
+    const placement = String(value || '').trim();
+    if (placement === 'in_chat') return EXTENSION_PROMPT_TYPES.IN_CHAT;
+    if (placement === 'before_prompt') return EXTENSION_PROMPT_TYPES.BEFORE_PROMPT;
+    if (placement === 'none') return EXTENSION_PROMPT_TYPES.NONE;
+    return EXTENSION_PROMPT_TYPES.IN_PROMPT;
+}
+
+function normalizePromptDepth(value) {
+    const depth = Number(value);
+    if (!Number.isFinite(depth)) return 0;
+    return Math.max(0, Math.min(10000, Math.floor(depth)));
+}
+
+function normalizePromptRole(value) {
+    const role = Number(value);
+    if (Object.values(EXTENSION_PROMPT_ROLES).includes(role)) return role;
+    return EXTENSION_PROMPT_ROLES.SYSTEM;
+}
+
+function setPromptPlacementControls(prefix, settings, enabled) {
+    const placementSelect = document.getElementById(`structured_preflight_${prefix}_placement`);
+    const depthInput = document.getElementById(`structured_preflight_${prefix}_depth`);
+    const roleSelect = document.getElementById(`structured_preflight_${prefix}_role`);
+    const depthRow = document.getElementById(`structured_preflight_${prefix}_depth_row`);
+    const placementKey = `${prefix}Placement`;
+    const depthKey = `${prefix}Depth`;
+    const roleKey = `${prefix}Role`;
+    const placement = String(settings[placementKey] || 'in_prompt');
+    const showDepth = placement === 'in_chat';
+
+    if (placementSelect) {
+        placementSelect.value = ['before_prompt', 'in_prompt', 'in_chat', 'none'].includes(placement) ? placement : 'in_prompt';
+        placementSelect.disabled = !enabled;
+    }
+    if (depthInput) {
+        depthInput.value = String(normalizePromptDepth(settings[depthKey]));
+        depthInput.disabled = !enabled || !showDepth;
+    }
+    if (roleSelect) {
+        roleSelect.value = String(normalizePromptRole(settings[roleKey]));
+        roleSelect.disabled = !enabled || !showDepth;
+    }
+    if (depthRow) depthRow.hidden = !showDepth;
+}
+
+function injectMovablePrompt(key, promptText, placement, depth, role) {
+    const context = getContext();
+    if (!context?.setExtensionPrompt) return;
+
+    const position = getPromptPlacementPosition(placement);
+    const text = String(promptText || '').trim();
+    if (!text || position === EXTENSION_PROMPT_TYPES.NONE) {
+        if (context.extensionPrompts) delete context.extensionPrompts[key];
+        return;
+    }
+
+    context.setExtensionPrompt(
+        key,
+        text,
+        position,
+        normalizePromptDepth(depth),
+        false,
+        normalizePromptRole(role),
+    );
+}
+
+function injectPromptOptionPrompts() {
+    injectWritingStylePrompt();
+    injectProseRulesPrompt();
+    injectFinalReminderPrompt();
+}
+
 function refreshSettingsControls() {
     const settings = getSettings();
     const enabled = Boolean(settings.useSeparateSemanticSettings);
@@ -674,6 +827,9 @@ function refreshSettingsControls() {
     if (finalReminderPrompt && finalReminderPrompt.value !== settings.finalReminderPrompt) {
         finalReminderPrompt.value = String(settings.finalReminderPrompt ?? DEFAULT_FINAL_REMINDER_PROMPT);
     }
+    setPromptPlacementControls('writingStyle', settings, settings.writingStyleEnabled !== false);
+    setPromptPlacementControls('proseRules', settings, settings.proseRulesEnabled !== false);
+    setPromptPlacementControls('finalReminder', settings, settings.proseRulesEnabled !== false);
     setSelectOptions(
         nameStyleSelect,
         NAME_STYLE_OPTIONS,
@@ -783,7 +939,26 @@ function renderSettingsPanel() {
                         <button class="menu_button flex1" type="button" data-structured-preflight-edit-toggle>Edit Writing Style</button>
                         <button id="structured_preflight_reset_writing_style" class="menu_button" type="button">Reset</button>
                     </summary>
-                    <small>Injected into the regular SillyTavern prompt stack after Main Prompt. Edit freely; whatever text is here will be sent as writing style context.</small>
+                    <div class="flex-container alignItemsBaseline">
+                        <label for="structured_preflight_writingStyle_placement">Placement</label>
+                        <select id="structured_preflight_writingStyle_placement" class="text_pole flex1">
+                            <option value="before_prompt">↑Char</option>
+                            <option value="in_prompt">↓Char</option>
+                            <option value="in_chat">In-Chat @Depth</option>
+                            <option value="none">Disabled</option>
+                        </select>
+                    </div>
+                    <div id="structured_preflight_writingStyle_depth_row" class="flex-container alignItemsBaseline">
+                        <label for="structured_preflight_writingStyle_depth">Depth</label>
+                        <input id="structured_preflight_writingStyle_depth" class="text_pole widthNatural" type="number" min="0" max="10000" step="1">
+                        <label for="structured_preflight_writingStyle_role">Role</label>
+                        <select id="structured_preflight_writingStyle_role" class="text_pole flex1">
+                            <option value="0">System</option>
+                            <option value="1">User</option>
+                            <option value="2">Assistant</option>
+                        </select>
+                    </div>
+                    <small>Injected into the regular SillyTavern prompt stack. Edit freely; whatever text is here will be sent as writing style context.</small>
                     <textarea id="structured_preflight_writing_style_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
                 </details>
                 <hr>
@@ -797,7 +972,26 @@ function renderSettingsPanel() {
                         <button class="menu_button flex1" type="button" data-structured-preflight-edit-toggle>Edit Prose Rules</button>
                         <button id="structured_preflight_reset_prose_rules" class="menu_button" type="button">Reset</button>
                     </summary>
-                    <small>Injected as SYSTEM context immediately after Writing Style in the regular SillyTavern prompt stack.</small>
+                    <div class="flex-container alignItemsBaseline">
+                        <label for="structured_preflight_proseRules_placement">Placement</label>
+                        <select id="structured_preflight_proseRules_placement" class="text_pole flex1">
+                            <option value="before_prompt">↑Char</option>
+                            <option value="in_prompt">↓Char</option>
+                            <option value="in_chat">In-Chat @Depth</option>
+                            <option value="none">Disabled</option>
+                        </select>
+                    </div>
+                    <div id="structured_preflight_proseRules_depth_row" class="flex-container alignItemsBaseline">
+                        <label for="structured_preflight_proseRules_depth">Depth</label>
+                        <input id="structured_preflight_proseRules_depth" class="text_pole widthNatural" type="number" min="0" max="10000" step="1">
+                        <label for="structured_preflight_proseRules_role">Role</label>
+                        <select id="structured_preflight_proseRules_role" class="text_pole flex1">
+                            <option value="0">System</option>
+                            <option value="1">User</option>
+                            <option value="2">Assistant</option>
+                        </select>
+                    </div>
+                    <small>Injected into the regular SillyTavern prompt stack.</small>
                     <textarea id="structured_preflight_prose_rules_prompt" class="text_pole textarea_compact" rows="14" spellcheck="false"></textarea>
                 </details>
                 <details id="structured_preflight_final_reminder_drawer" data-structured-preflight-prompt-drawer>
@@ -805,7 +999,26 @@ function renderSettingsPanel() {
                         <button class="menu_button flex1" type="button" data-structured-preflight-edit-toggle>Edit Final Reminder</button>
                         <button id="structured_preflight_reset_final_reminder" class="menu_button" type="button">Reset</button>
                     </summary>
-                    <small>Inserted immediately before the Story Engine narrator prompt for the final narration pass only.</small>
+                    <div class="flex-container alignItemsBaseline">
+                        <label for="structured_preflight_finalReminder_placement">Placement</label>
+                        <select id="structured_preflight_finalReminder_placement" class="text_pole flex1">
+                            <option value="before_prompt">↑Char</option>
+                            <option value="in_prompt">↓Char</option>
+                            <option value="in_chat">In-Chat @Depth</option>
+                            <option value="none">Disabled</option>
+                        </select>
+                    </div>
+                    <div id="structured_preflight_finalReminder_depth_row" class="flex-container alignItemsBaseline">
+                        <label for="structured_preflight_finalReminder_depth">Depth</label>
+                        <input id="structured_preflight_finalReminder_depth" class="text_pole widthNatural" type="number" min="0" max="10000" step="1">
+                        <label for="structured_preflight_finalReminder_role">Role</label>
+                        <select id="structured_preflight_finalReminder_role" class="text_pole flex1">
+                            <option value="0">System</option>
+                            <option value="1">User</option>
+                            <option value="2">Assistant</option>
+                        </select>
+                    </div>
+                    <small>Default is In-Chat @Depth 0, which still lands before the Story Engine narrator prompt.</small>
                     <textarea id="structured_preflight_final_reminder_prompt" class="text_pole textarea_compact" rows="12" spellcheck="false"></textarea>
                 </details>
                 <hr>
@@ -854,7 +1067,7 @@ function renderSettingsPanel() {
     document.getElementById('structured_preflight_writing_style_enabled')?.addEventListener('change', event => {
         settings.writingStyleEnabled = Boolean(event.target?.checked);
         refreshSettingsControls();
-        injectWritingStylePrompt();
+        injectPromptOptionPrompts();
         saveExtensionSettings();
     });
     document.getElementById('structured_preflight_writing_style_prompt')?.addEventListener('input', event => {
@@ -873,7 +1086,7 @@ function renderSettingsPanel() {
     document.getElementById('structured_preflight_prose_rules_enabled')?.addEventListener('change', event => {
         settings.proseRulesEnabled = Boolean(event.target?.checked);
         refreshSettingsControls();
-        injectProseRulesPrompt();
+        injectPromptOptionPrompts();
         saveExtensionSettings();
     });
     document.getElementById('structured_preflight_prose_rules_prompt')?.addEventListener('input', event => {
@@ -883,6 +1096,7 @@ function renderSettingsPanel() {
     });
     document.getElementById('structured_preflight_final_reminder_prompt')?.addEventListener('input', event => {
         settings.finalReminderPrompt = String(event.target?.value ?? '');
+        injectFinalReminderPrompt();
         saveExtensionSettings();
     });
     document.getElementById('structured_preflight_reset_prose_rules')?.addEventListener('click', event => {
@@ -898,8 +1112,33 @@ function renderSettingsPanel() {
         event.stopPropagation();
         settings.finalReminderPrompt = DEFAULT_FINAL_REMINDER_PROMPT;
         refreshSettingsControls();
+        injectFinalReminderPrompt();
         saveExtensionSettings();
     });
+    for (const prefix of ['writingStyle', 'proseRules', 'finalReminder']) {
+        const inject = prefix === 'writingStyle'
+            ? injectWritingStylePrompt
+            : prefix === 'proseRules'
+                ? injectProseRulesPrompt
+                : injectFinalReminderPrompt;
+        document.getElementById(`structured_preflight_${prefix}_placement`)?.addEventListener('change', event => {
+            const value = String(event.target?.value || 'in_prompt');
+            settings[`${prefix}Placement`] = ['before_prompt', 'in_prompt', 'in_chat', 'none'].includes(value) ? value : 'in_prompt';
+            refreshSettingsControls();
+            inject();
+            saveExtensionSettings();
+        });
+        document.getElementById(`structured_preflight_${prefix}_depth`)?.addEventListener('input', event => {
+            settings[`${prefix}Depth`] = normalizePromptDepth(event.target?.value);
+            inject();
+            saveExtensionSettings();
+        });
+        document.getElementById(`structured_preflight_${prefix}_role`)?.addEventListener('change', event => {
+            settings[`${prefix}Role`] = normalizePromptRole(event.target?.value);
+            inject();
+            saveExtensionSettings();
+        });
+    }
     document.getElementById('structured_preflight_refresh_semantic_settings')?.addEventListener('click', refreshSettingsControls);
     document.getElementById('structured_preflight_show_player_setup')?.addEventListener('click', () => {
         const context = getContext();
@@ -945,8 +1184,7 @@ function renderSettingsPanel() {
     });
 
     refreshSettingsControls();
-    injectWritingStylePrompt();
-    injectProseRulesPrompt();
+    injectPromptOptionPrompts();
 }
 
 function closeExtensionsDrawer() {
@@ -996,13 +1234,12 @@ function injectWritingStylePrompt() {
     }
 
     const promptText = String(settings.writingStylePrompt ?? DEFAULT_WRITING_STYLE_PROMPT);
-    context.setExtensionPrompt(
+    injectMovablePrompt(
         WRITING_STYLE_PROMPT_KEY,
         promptText,
-        EXTENSION_PROMPT_TYPES.IN_PROMPT,
-        0,
-        false,
-        EXTENSION_PROMPT_ROLES.SYSTEM,
+        settings.writingStylePlacement,
+        settings.writingStyleDepth,
+        settings.writingStyleRole,
     );
 }
 
@@ -1016,28 +1253,44 @@ function injectProseRulesPrompt() {
     const settings = getSettings();
     if (settings.proseRulesEnabled === false) {
         if (context.extensionPrompts) delete context.extensionPrompts[PROSE_RULES_PROMPT_KEY];
+        if (context.extensionPrompts) delete context.extensionPrompts[FINAL_REMINDER_PROMPT_KEY];
         return;
     }
 
     const promptText = String(settings.proseRulesPrompt ?? DEFAULT_PROSE_RULES_PROMPT);
-    context.setExtensionPrompt(
+    injectMovablePrompt(
         PROSE_RULES_PROMPT_KEY,
         promptText,
-        EXTENSION_PROMPT_TYPES.IN_PROMPT,
-        0,
-        false,
-        EXTENSION_PROMPT_ROLES.SYSTEM,
+        settings.proseRulesPlacement,
+        settings.proseRulesDepth,
+        settings.proseRulesRole,
+    );
+}
+
+function injectFinalReminderPrompt() {
+    const context = getContext();
+    if (!context?.setExtensionPrompt) {
+        return;
+    }
+
+    const settings = getSettings();
+    if (settings.proseRulesEnabled === false) {
+        if (context.extensionPrompts) delete context.extensionPrompts[FINAL_REMINDER_PROMPT_KEY];
+        return;
+    }
+
+    const reminder = String(settings.finalReminderPrompt ?? DEFAULT_FINAL_REMINDER_PROMPT).trim();
+    injectMovablePrompt(
+        FINAL_REMINDER_PROMPT_KEY,
+        reminder,
+        settings.finalReminderPlacement,
+        settings.finalReminderDepth,
+        settings.finalReminderRole,
     );
 }
 
 function buildFinalNarrationPrompt(narratorContext) {
-    const settings = getSettings();
-    if (settings.proseRulesEnabled === false) return narratorContext;
-
-    const reminder = String(settings.finalReminderPrompt ?? DEFAULT_FINAL_REMINDER_PROMPT).trim();
-    if (!reminder) return narratorContext;
-
-    return `${reminder}\n\n${narratorContext}`;
+    return narratorContext;
 }
 
 function clearRuntimePrompts() {
@@ -1472,10 +1725,7 @@ function normalizeDisplayTrackerNpcs(npcs) {
     const normalized = {};
     for (const [name, value] of Object.entries(npcs || {})) {
         if (!isRealName(name)) continue;
-        normalized[name] = normalizeTrackerEntry({
-            ...value,
-            persistenceTier: value?.persistenceTier || inferPersistenceTier(name),
-        });
+        normalized[name] = normalizeTrackerEntry(value);
     }
     return normalized;
 }
@@ -1486,22 +1736,8 @@ function buildDisplayTrackerSnapshot({ messageKey, pendingRun, report }) {
         ...(pendingRun?.trackerBefore || {}),
         ...(pendingRun?.trackerAfter || {}),
     });
-    const runtimeUser = report?.trackerUpdate?.user || {};
-    const user = normalizeTrackerUserState({
-        ...(pendingRun?.userBefore || {}),
-        ...(pendingRun?.userAfter || {}),
-        ...runtimeUser,
-    });
-    const rawPresentNpcNames = uniqueNames([
-        ...(pendingRun?.presentNpcNames || []),
-        ...currentResolutionNpcNames(pendingRun?.resolutionPacket || resolutionPacket),
-    ]);
-    const promotionResult = applyExplicitNamePromotions(trackerAfter, rawPresentNpcNames, {
-        messageKey,
-        latestUserText: pendingRun?.latestUserText,
-    });
-    const presentNpcNames = applyDisplayPresenceCorrections(promotionResult.presentNames, Object.keys(promotionResult.npcs), pendingRun?.latestUserText);
-    const displayNpcs = applyTrackerPresenceMetadata(promotionResult.npcs, presentNpcNames, {
+    const user = normalizeTrackerUserState(pendingRun?.userBefore || {});
+    const promotionResult = applyExplicitNamePromotions(trackerAfter, {
         messageKey,
         latestUserText: pendingRun?.latestUserText,
     });
@@ -1510,44 +1746,14 @@ function buildDisplayTrackerSnapshot({ messageKey, pendingRun, report }) {
         messageKey,
         type: pendingRun?.type || 'normal',
         savedAt: Date.now(),
-        presentNpcNames,
         userCoreStats: pendingRun?.userCoreStats || report?.semanticLedger?.engineContext?.userCoreStats || null,
         user,
-        npcs: displayNpcs,
+        npcs: promotionResult.npcs,
     };
 }
 
-function applyTrackerPresenceMetadata(npcs, presentNames, { messageKey, latestUserText } = {}) {
+function applyExplicitNamePromotions(npcs, { latestUserText } = {}) {
     const normalized = normalizeDisplayTrackerNpcs(npcs);
-    const presentSet = new Set(toRealNameArray(presentNames).map(name => name.toLowerCase()));
-    const explicitAbsentSet = getExplicitlyAbsentTrackerNames(latestUserText, Object.keys(normalized));
-    const stamped = {};
-
-    for (const [name, entry] of Object.entries(normalized)) {
-        const key = name.toLowerCase();
-        const previousPresence = entry.presence || 'Present';
-        const isPresent = presentSet.has(key) && !explicitAbsentSet.has(key);
-        const isExplicitlyAbsent = explicitAbsentSet.has(key);
-        const presence = isPresent && !isExplicitlyAbsent ? 'Present' : 'Absent';
-
-        stamped[name] = {
-            ...entry,
-            persistenceTier: entry.persistenceTier || inferPersistenceTier(name),
-            lifecycle: entry.lifecycle || 'Active',
-            presence,
-            lastSeenMessageKey: presence === 'Present' ? messageKey || entry.lastSeenMessageKey || '' : entry.lastSeenMessageKey || '',
-            absentSinceMessageKey: presence === 'Absent' && previousPresence !== 'Absent'
-                ? messageKey || entry.absentSinceMessageKey || ''
-                : entry.absentSinceMessageKey || '',
-        };
-    }
-
-    return stamped;
-}
-
-function applyExplicitNamePromotions(npcs, presentNames, { messageKey, latestUserText } = {}) {
-    const normalized = normalizeDisplayTrackerNpcs(npcs);
-    let updatedPresentNames = toRealNameArray(presentNames);
     const promotions = getExplicitNamePromotions(latestUserText, Object.keys(normalized));
 
     for (const { oldName, newName } of promotions) {
@@ -1558,28 +1764,16 @@ function applyExplicitNamePromotions(npcs, presentNames, { messageKey, latestUse
         normalized[newName] = normalizeTrackerEntry({
             ...oldEntry,
             ...(newEntry || {}),
-            persistenceTier: 'Recurring',
-            presence: 'Present',
             lifecycle: 'Active',
-            lastSeenMessageKey: messageKey || newEntry?.lastSeenMessageKey || oldEntry.lastSeenMessageKey || '',
-            absentSinceMessageKey: '',
-            retiredSinceMessageKey: '',
         });
         normalized[oldName] = normalizeTrackerEntry({
             ...oldEntry,
-            presence: 'Absent',
             lifecycle: 'Retired',
-            absentSinceMessageKey: oldEntry.absentSinceMessageKey || messageKey || '',
-            retiredSinceMessageKey: messageKey || oldEntry.retiredSinceMessageKey || '',
         });
-        updatedPresentNames = updatedPresentNames
-            .filter(name => normalizeSearchText(name) !== normalizeSearchText(oldName))
-            .concat(newName);
     }
 
     return {
         npcs: normalized,
-        presentNames: [...new Set(updatedPresentNames)],
     };
 }
 
@@ -1589,7 +1783,6 @@ function getExplicitNamePromotions(text, trackedNames) {
     if (!source || !Array.isArray(trackedNames)) return promotions;
 
     for (const oldName of trackedNames) {
-        if (inferPersistenceTier(oldName) !== 'Temporary') continue;
         const normalizedOldName = normalizeSearchText(oldName);
         if (!normalizedOldName || !source.includes(normalizedOldName)) continue;
         const escapedOldName = escapeRegExp(normalizedOldName);
@@ -1626,7 +1819,7 @@ function buildTrackerUpdateForPersistence(displaySnapshot) {
     };
 }
 
-function mergePostReplyTrackerDelta(snapshot, delta) {
+function mergeNarratorTrackerDelta(snapshot, delta, options = {}) {
     if (!snapshot || !delta) return snapshot;
     const merged = clone(snapshot);
     merged.user = applyTrackerDeltaToUserState(merged.user || {}, delta.user || {});
@@ -1641,8 +1834,8 @@ function mergePostReplyTrackerDelta(snapshot, delta) {
             ...applyTrackerDeltaToNpcState(before, npcDelta),
         });
     }
-    merged.npcs = npcs;
-    merged.postReplyTracker = {
+    merged.npcs = normalizeDisplayTrackerNpcs(npcs);
+    merged.narratorTrackerDelta = {
         updatedAt: Date.now(),
         userChanged: trackerDeltaHasChanges(delta.user, true),
         npcChanged: (delta.npcs || []).some(item => trackerDeltaHasChanges(item, false)),
@@ -1755,12 +1948,6 @@ function cleanPersonalitySummary(value) {
     return text.slice(0, 160);
 }
 
-function applyDisplayPresenceCorrections(presentNames, trackedNames, latestUserText) {
-    const explicitlyAbsent = getExplicitlyAbsentTrackerNames(latestUserText, trackedNames);
-    if (!explicitlyAbsent.size) return presentNames;
-    return presentNames.filter(name => !explicitlyAbsent.has(name.toLowerCase()));
-}
-
 function currentResolutionNpcNames(packet = {}) {
     return uniqueNames([
         ...toRealNameArray(packet.NPCInScene),
@@ -1781,92 +1968,6 @@ function uniqueNames(names) {
         result.push(name);
     }
     return result;
-}
-
-function inferPersistenceTier(name) {
-    const text = String(name ?? '').trim();
-    if (!text) return 'Temporary';
-    if (/[#\d]/.test(text)) return 'Temporary';
-    if (/\b(?:guard|soldier|bandit|raider|archer|thug|goblin|orc|ogre|cultist|mercenary|villager|patron|civilian|beast|wolf|zombie|skeleton|enemy|attacker|ambusher|scout|sentry|hunter|monster|creature|minion|mob)\b/i.test(text)) {
-        return 'Temporary';
-    }
-    const words = text.split(/\s+/).filter(Boolean);
-    if (words.length >= 2 && words.some(word => /^[A-Z][a-z]+/.test(word))) return 'Recurring';
-    if (/^[A-Z][a-z]+$/.test(text)) return 'Recurring';
-    return 'Temporary';
-}
-
-function getExplicitlyAbsentTrackerNames(text, trackedNames) {
-    const source = normalizeSearchText(text);
-    const absent = new Set();
-    if (!source || !Array.isArray(trackedNames)) return absent;
-
-    for (const name of trackedNames) {
-        const normalizedName = normalizeSearchText(name);
-        if (!normalizedName || !source.includes(normalizedName)) continue;
-        if (hasExplicitAbsenceForName(source, normalizedName)) {
-            absent.add(String(name).toLowerCase());
-        }
-    }
-
-    return absent;
-}
-
-function hasExplicitAbsenceForName(text, name) {
-    const index = text.indexOf(name);
-    if (index < 0) return false;
-
-    const window = text.slice(Math.max(0, index - 180), Math.min(text.length, index + name.length + 240));
-    if (hasPreventedDepartureForName(window, name)) return false;
-    const departureIndex = getExplicitDepartureIndex(window);
-    if (departureIndex < 0) return false;
-    const presenceIndex = getExplicitPresenceIndex(window, name);
-    return presenceIndex < 0 || presenceIndex < departureIndex;
-}
-
-function hasPreventedDepartureForName(window, name) {
-    const escapedName = escapeRegExp(name);
-    const patterns = [
-        new RegExp(`\\b(?:catch|catches|caught|grab|grabs|grabbed|hold|holds|held|stop|stops|stopped|block|blocks|blocked|prevent|prevents|prevented)\\b.{0,100}\\b${escapedName}\\b.{0,140}\\b(?:before|from)\\b.{0,80}\\b(?:walk|leave|go|run|depart|exit|move)\\b.{0,30}\\b(?:away|out|off|leaving)?\\b`),
-        new RegExp(`\\b${escapedName}\\b.{0,140}\\b(?:catch|catches|caught|grab|grabs|grabbed|hold|holds|held|stop|stops|stopped|block|blocks|blocked|prevent|prevents|prevented)\\b.{0,140}\\b(?:before|from)\\b.{0,80}\\b(?:walk|leave|go|run|depart|exit|move)\\b.{0,30}\\b(?:away|out|off|leaving)?\\b`),
-        new RegExp(`\\b(?:before|from)\\b.{0,80}\\b${escapedName}\\b.{0,120}\\b(?:walk|leave|go|run|depart|exit|move)\\b.{0,30}\\b(?:away|out|off|leaving)?\\b`),
-    ];
-    return patterns.some(pattern => pattern.test(window));
-}
-
-function hasExplicitPresenceForName(window, name) {
-    return getExplicitPresenceIndex(window, name) >= 0;
-}
-
-function getExplicitPresenceIndex(window, name) {
-    const escapedName = escapeRegExp(name);
-    const patterns = [
-        new RegExp(`\\b${escapedName}\\b.{0,80}\\b(?:remain|remains|stays|stay|stayed|standing|stands|waits|beside|with me|near me|still here|still present)\\b`),
-        new RegExp(`\\b(?:remain|remains|stays|stay|stayed|standing|stands|waits|beside|with me|near me|still here|still present)\\b.{0,80}\\b${escapedName}\\b`),
-    ];
-    return firstPatternIndex(window, patterns);
-}
-
-function getExplicitDepartureIndex(window) {
-    return firstPatternIndex(window, [
-        /\b(?:no longer|not|not anymore)\s+(?:in\s+)?sight\b/,
-        /\bout of sight\b/,
-        /\bno longer visible\b/,
-        /\b(?:leave|leaves|left|leaving|depart|departs|departed|departing|exit|exits|exited|exiting)\b.{0,120}\b(?:room|office|hall|alley|street|scene|area|place|building|shop|tavern|camp|hideout|chamber|archive|gate|courtyard|square|market|road|clearing|woods|forest|cave|tunnel|vault)\b/,
-        /\b(?:leave|leaves|left|leaving|depart|departs|departed|departing|exit|exits|exited|exiting)\b.{0,160}\b(?:i|we|me)\s+(?:am|are|remain|remains|remained|stay|stays|stayed)\s+alone\b/,
-        /\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b.{0,160}\b(?:behind|away)\b/,
-        /\b(?:behind|away)\b.{0,160}\b(?:leave|left|leaving|walk|walking|walked|go|going|went|move|moving|moved|head|heading|headed|depart|departing|departed|exit|exiting|exited|turn|turning|turned)\b/,
-    ]);
-}
-
-function firstPatternIndex(text, patterns) {
-    let first = -1;
-    for (const pattern of patterns) {
-        const match = pattern.exec(text);
-        if (!match) continue;
-        if (first < 0 || match.index < first) first = match.index;
-    }
-    return first;
 }
 
 function escapeRegExp(value) {
@@ -2005,9 +2106,20 @@ function formatTrackerList(items) {
     return list.length ? list.join('; ') : 'None';
 }
 
-function trackerListLine(label, items) {
+function trackerListLine(label, items, options = {}) {
     const list = Array.isArray(items) ? items.filter(Boolean) : [];
-    return list.length ? `<div>${escapeHtml(label)} <code>${escapeHtml(formatTrackerList(list))}</code></div>` : '';
+    if (!list.length) {
+        return options.showEmpty
+            ? `<div class="structured-preflight-tracker-list"><div class="structured-preflight-tracker-list-label">${escapeHtml(label)}</div><div class="structured-preflight-tracker-empty">None</div></div>`
+            : '';
+    }
+    return `
+        <div class="structured-preflight-tracker-list">
+            <div class="structured-preflight-tracker-list-label">${escapeHtml(label)}</div>
+            <ul>
+                ${list.map(item => `<li>${escapeHtml(item)}</li>`).join('')}
+            </ul>
+        </div>`;
 }
 
 function relationshipTowardUser(disposition, classified) {
@@ -2029,9 +2141,11 @@ function relationshipTowardUser(disposition, classified) {
 function buildTrackerDisplayHtml(snapshot) {
     const npcs = normalizeDisplayTrackerNpcs(snapshot?.npcs);
     const names = Object.keys(npcs).sort((a, b) => a.localeCompare(b));
-    const present = names.filter(name => npcs[name]?.presence !== 'Absent' && npcs[name]?.lifecycle === 'Active');
+    const active = names.filter(name => npcs[name]?.lifecycle === 'Active');
+    const inactive = names.filter(name => npcs[name]?.lifecycle !== 'Active');
     const userCore = snapshot?.userCoreStats;
     const user = normalizeTrackerUserState(snapshot?.user || {});
+    const personaName = cleanTrackerDisplayName(name1) || 'User';
 
     const renderNpc = name => {
         const entry = npcs[name];
@@ -2052,7 +2166,7 @@ function buildTrackerDisplayHtml(snapshot) {
                 <div>Rapport <code>${escapeHtml(entry.currentRapport)}/5</code> | Relationship <code>${escapeHtml(entry.establishedRelationship || 'N')}</code></div>
                 <div>Stats <code>${escapeHtml(formatCoreStats(entry.currentCoreStats))}</code></div>
                 ${trackerListLine('Wounds', entry.wounds)}
-                ${trackerListLine('Status', entry.statusEffects)}
+                ${trackerListLine('Status Effects', entry.statusEffects)}
                 ${trackerListLine('Gear', entry.gear)}
                 ${pressureLine}
             </div>`;
@@ -2065,22 +2179,31 @@ function buildTrackerDisplayHtml(snapshot) {
         </div>`;
 
     return `
-        <details class="${TRACKER_DISPLAY_BLOCK_CLASS}">
-            <summary>Tracker</summary>
-            <div class="structured-preflight-tracker-body">
-                <div class="structured-preflight-tracker-title">NPCs</div>
-                ${renderSection('Present', present)}
-                <div class="structured-preflight-tracker-title">Player</div>
-                <div>Stats <code>${escapeHtml(formatCoreStats(userCore))}</code></div>
-                <div>Condition <code>${escapeHtml(formatTrackerCondition(user.condition))}</code></div>
-                ${trackerListLine('Wounds', user.wounds)}
-                ${trackerListLine('Status', user.statusEffects)}
-                ${trackerListLine('Gear', user.gear)}
-                ${trackerListLine('Inventory', user.inventory)}
-                ${trackerListLine('Tasks', user.tasks)}
-                ${trackerListLine('Commitments', user.commitments)}
+        <div class="structured-preflight-tracker-body">
+            <div class="structured-preflight-tracker-section structured-preflight-tracker-user">
+                <div class="structured-preflight-tracker-title">${escapeHtml(personaName)}</div>
+                <div class="structured-preflight-tracker-rows">
+                    <div>Stats <code>${escapeHtml(formatCoreStats(userCore))}</code></div>
+                    <div>Condition <code>${escapeHtml(formatTrackerCondition(user.condition))}</code></div>
+                    ${trackerListLine('Wounds', user.wounds)}
+                    ${trackerListLine('Status Effects', user.statusEffects)}
+                    ${trackerListLine('Gear', user.gear, { showEmpty: true })}
+                    ${trackerListLine('Inventory', user.inventory, { showEmpty: true })}
+                    ${trackerListLine('Tasks', user.tasks, { showEmpty: true })}
+                    ${trackerListLine('Commitments', user.commitments, { showEmpty: true })}
+                </div>
             </div>
-        </details>`;
+            <div class="structured-preflight-tracker-divider"></div>
+            <div class="structured-preflight-tracker-title">NPCs</div>
+            ${renderSection('Active NPCs', active)}
+            ${inactive.length ? renderSection('Inactive NPCs', inactive) : ''}
+        </div>`;
+}
+
+function cleanTrackerDisplayName(value) {
+    const text = String(value ?? '').trim().replace(/\s+/g, ' ');
+    if (!text || ['user', '{{user}}', 'you'].includes(text.toLowerCase())) return '';
+    return text.slice(0, 80);
 }
 
 function buildNarratorHandoffHtml(payload) {
@@ -2107,6 +2230,71 @@ function ensureTrackerDisplayStyles() {
     const style = document.createElement('style');
     style.id = 'structured_preflight_tracker_display_styles';
     style.textContent = `
+        #${TRACKER_WIDGET_ID} {
+            position: fixed;
+            left: 24px;
+            top: 120px;
+            z-index: 40000;
+            color: var(--SmartThemeBodyColor, #eee);
+            font-size: 0.88rem;
+        }
+        #${TRACKER_WIDGET_ID}.spe-tracker-dragging {
+            user-select: none;
+        }
+        #${TRACKER_WIDGET_BUTTON_ID} {
+            width: 50px;
+            height: 50px;
+            display: grid;
+            place-items: center;
+            border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.24));
+            border-radius: 10px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #000) 72%, transparent);
+            color: inherit;
+            box-shadow: 0 10px 26px rgba(0,0,0,0.28);
+            cursor: grab;
+            backdrop-filter: blur(8px);
+        }
+        #${TRACKER_WIDGET_BUTTON_ID}:active {
+            cursor: grabbing;
+        }
+        #${TRACKER_WIDGET_BUTTON_ID} svg {
+            width: 28px;
+            height: 28px;
+        }
+        #${TRACKER_WIDGET_PANEL_ID} {
+            width: min(420px, calc(100vw - 36px));
+            max-height: min(620px, calc(100vh - 36px));
+            margin-top: 0.45rem;
+            padding: 0.7rem;
+            border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.2));
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #000) 84%, transparent);
+            box-shadow: 0 14px 36px rgba(0,0,0,0.35);
+            overflow: auto;
+            backdrop-filter: blur(10px);
+        }
+        #${TRACKER_WIDGET_PANEL_ID}[hidden] {
+            display: none;
+        }
+        .structured-preflight-tracker-widget-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin-bottom: 0.55rem;
+            font-weight: 700;
+        }
+        .structured-preflight-tracker-widget-close {
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            display: grid;
+            place-items: center;
+            border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.2));
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+        }
         .${TRACKER_DISPLAY_BLOCK_CLASS} {
             margin-top: 0.75rem;
             padding: 0.45rem 0.65rem;
@@ -2123,16 +2311,47 @@ function ensureTrackerDisplayStyles() {
         .structured-preflight-tracker-body {
             margin-top: 0.55rem;
             display: grid;
-            gap: 0.55rem;
+            gap: 0.7rem;
         }
         .structured-preflight-tracker-title,
         .structured-preflight-tracker-heading,
         .structured-preflight-tracker-name {
             font-weight: 600;
         }
+        .structured-preflight-tracker-title {
+            padding-bottom: 0.2rem;
+            border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.18));
+        }
         .structured-preflight-tracker-section {
             display: grid;
-            gap: 0.35rem;
+            gap: 0.45rem;
+        }
+        .structured-preflight-tracker-user {
+            padding-bottom: 0.1rem;
+        }
+        .structured-preflight-tracker-rows {
+            display: grid;
+            gap: 0.4rem;
+            line-height: 1.45;
+        }
+        .structured-preflight-tracker-list {
+            display: grid;
+            gap: 0.18rem;
+        }
+        .structured-preflight-tracker-list-label {
+            font-weight: 600;
+        }
+        .structured-preflight-tracker-list ul {
+            margin: 0;
+            padding-left: 1.15rem;
+        }
+        .structured-preflight-tracker-list li {
+            margin: 0.08rem 0;
+        }
+        .structured-preflight-tracker-divider {
+            height: 1px;
+            background: var(--SmartThemeBorderColor, rgba(255,255,255,0.22));
+            opacity: 0.9;
         }
         .structured-preflight-tracker-npc {
             padding-left: 0.45rem;
@@ -2192,31 +2411,12 @@ function renderNarratorHandoffBlockForMessage(messageId, payload = null, context
 }
 
 function renderTrackerDisplayBlockForMessage(messageId, snapshot = null, context = getContext()) {
-    const message = context?.chat?.[messageId];
-    const trackerSnapshot = snapshot || getMessageTrackerDisplaySnapshot(message);
     if (typeof document === 'undefined') return;
 
     const messageElement = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
     if (!messageElement) return;
 
     messageElement.querySelector(`.${TRACKER_DISPLAY_BLOCK_CLASS}`)?.remove();
-    if (!trackerSnapshot?.npcs) return;
-
-    ensureTrackerDisplayStyles();
-    const textElement = messageElement.querySelector('.mes_text');
-    if (!textElement) return;
-
-    const wrapper = document.createElement('div');
-    wrapper.innerHTML = buildTrackerDisplayHtml(trackerSnapshot).trim();
-    const block = wrapper.firstElementChild;
-    if (!block) return;
-
-    const mediaWrapper = messageElement.querySelector('.mes_media_wrapper');
-    if (mediaWrapper) {
-        mediaWrapper.before(block);
-    } else {
-        textElement.after(block);
-    }
 }
 
 function renderAllTrackerDisplayBlocks(context = getContext()) {
@@ -2227,6 +2427,128 @@ function renderAllTrackerDisplayBlocks(context = getContext()) {
             renderTrackerDisplayBlockForMessage(index, null, context);
         }
     });
+    renderTrackerWidget(context);
+}
+
+function buildCurrentTrackerWidgetSnapshot(context = getContext()) {
+    const latest = getLatestTrackerDisplaySnapshot(context);
+    if (latest?.npcs) return latest;
+    const root = getTrackerRoot(context);
+    if (!root) return null;
+    return {
+        version: TRACKER_DISPLAY_VERSION,
+        savedAt: Date.now(),
+        userCoreStats: getPersonaCoreStats(context),
+        user: normalizeTrackerUserState(root.user || {}),
+        npcs: normalizeDisplayTrackerNpcs(root.npcs || {}),
+    };
+}
+
+function renderTrackerWidget(context = getContext()) {
+    if (typeof document === 'undefined') return;
+    ensureTrackerDisplayStyles();
+
+    const settings = getSettings();
+    let widget = document.getElementById(TRACKER_WIDGET_ID);
+    if (!widget) {
+        widget = document.createElement('div');
+        widget.id = TRACKER_WIDGET_ID;
+        widget.innerHTML = `
+            <button id="${TRACKER_WIDGET_BUTTON_ID}" type="button" title="Tracker" aria-label="Tracker">
+                <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 7v14"></path>
+                    <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path>
+                </svg>
+            </button>
+            <div id="${TRACKER_WIDGET_PANEL_ID}" hidden>
+                <div class="structured-preflight-tracker-widget-title">
+                    <span>Tracker</span>
+                    <button class="structured-preflight-tracker-widget-close" type="button" title="Collapse" aria-label="Collapse">×</button>
+                </div>
+                <div data-structured-preflight-tracker-widget-body></div>
+            </div>`;
+        document.body.append(widget);
+        attachTrackerWidgetHandlers(widget);
+    }
+
+    const pos = clampTrackerWidgetPosition(settings.trackerWidgetX, settings.trackerWidgetY);
+    widget.style.left = `${pos.x}px`;
+    widget.style.top = `${pos.y}px`;
+
+    const panel = widget.querySelector(`#${TRACKER_WIDGET_PANEL_ID}`);
+    if (panel) panel.hidden = settings.trackerWidgetCollapsed !== false;
+
+    const body = widget.querySelector('[data-structured-preflight-tracker-widget-body]');
+    if (!body) return;
+    const snapshot = buildCurrentTrackerWidgetSnapshot(context);
+    body.innerHTML = snapshot?.npcs
+        ? buildTrackerDisplayHtml(snapshot)
+        : '<div class="structured-preflight-tracker-empty">No tracker data yet.</div>';
+}
+
+function attachTrackerWidgetHandlers(widget) {
+    const button = widget.querySelector(`#${TRACKER_WIDGET_BUTTON_ID}`);
+    const close = widget.querySelector('.structured-preflight-tracker-widget-close');
+    let drag = null;
+
+    button?.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        const rect = widget.getBoundingClientRect();
+        drag = {
+            startX: event.clientX,
+            startY: event.clientY,
+            offsetX: event.clientX - rect.left,
+            offsetY: event.clientY - rect.top,
+            moved: false,
+        };
+        widget.classList.add('spe-tracker-dragging');
+        button.setPointerCapture?.(event.pointerId);
+    });
+    button?.addEventListener('pointermove', event => {
+        if (!drag) return;
+        const x = event.clientX - drag.offsetX;
+        const y = event.clientY - drag.offsetY;
+        if (Math.abs(event.clientX - drag.startX) > 3 || Math.abs(event.clientY - drag.startY) > 3) drag.moved = true;
+        const pos = clampTrackerWidgetPosition(x, y);
+        widget.style.left = `${pos.x}px`;
+        widget.style.top = `${pos.y}px`;
+    });
+    button?.addEventListener('pointerup', event => {
+        if (!drag) return;
+        button.releasePointerCapture?.(event.pointerId);
+        widget.classList.remove('spe-tracker-dragging');
+        const settings = getSettings();
+        const rect = widget.getBoundingClientRect();
+        const pos = clampTrackerWidgetPosition(rect.left, rect.top);
+        settings.trackerWidgetX = pos.x;
+        settings.trackerWidgetY = pos.y;
+        if (!drag.moved) settings.trackerWidgetCollapsed = settings.trackerWidgetCollapsed === false;
+        drag = null;
+        saveExtensionSettings();
+        renderTrackerWidget();
+    });
+    button?.addEventListener('pointercancel', () => {
+        drag = null;
+        widget.classList.remove('spe-tracker-dragging');
+    });
+    close?.addEventListener('click', event => {
+        event.preventDefault();
+        const settings = getSettings();
+        settings.trackerWidgetCollapsed = true;
+        saveExtensionSettings();
+        renderTrackerWidget();
+    });
+}
+
+function clampTrackerWidgetPosition(x, y) {
+    const rawX = Number(x);
+    const rawY = Number(y);
+    const maxX = Math.max(0, (globalThis.innerWidth || 1200) - 62);
+    const maxY = Math.max(0, (globalThis.innerHeight || 800) - 62);
+    return {
+        x: Math.max(8, Math.min(Number.isFinite(rawX) ? rawX : 24, maxX)),
+        y: Math.max(8, Math.min(Number.isFinite(rawY) ? rawY : 120, maxY)),
+    };
 }
 
 function ensurePlayerSetupStyles() {
@@ -2872,10 +3194,6 @@ function captureChatSignature(context = getContext()) {
     ].join('|'));
 }
 
-function getLatestReportPresentNpcNames(report) {
-    return currentResolutionNpcNames(report?.finalNarrativeHandoff?.resolutionPacket || {});
-}
-
 function getLatestUserText(chat) {
     if (!Array.isArray(chat)) return '';
     for (let index = chat.length - 1; index >= 0; index -= 1) {
@@ -2916,6 +3234,11 @@ function stripStructuredArtifacts(text) {
         .replace(/````text\s*\n?&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*````\s*/gi, '')
         .replace(/````text\s*\n?<pre_flight>[\s\S]*?<\/pre_flight>\s*````\s*/gi, '')
         .replace(/````text\s*\n?<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*````\s*/gi, '')
+        .replace(/<!--\s*STORY_ENGINE_TRACKER_DELTA[\s\S]*?STORY_ENGINE_TRACKER_DELTA_END\s*-->\s*/gi, '')
+        .replace(/&lt;!--\s*STORY_ENGINE_TRACKER_DELTA[\s\S]*?STORY_ENGINE_TRACKER_DELTA_END\s*--&gt;\s*/gi, '')
+        .replace(/<trackers>[\s\S]*?<\/trackers>\s*/gi, '')
+        .replace(/&lt;trackers&gt;[\s\S]*?&lt;\/trackers&gt;\s*/gi, '')
+        .replace(/BEGIN_TRACKER_DELTA[\s\S]*?END_TRACKER_DELTA\s*/gi, '')
         .replace(/\[STORY_ENGINE_NARRATOR_HANDOFF[\s\S]*?==BINDING_NARRATION_DIRECTIVE==[\s\S]*?(?=BEGIN_FINAL_NARRATION|$)/gi, '')
         .replace(/\[STORY_ENGINE_NARRATOR_DIRECTIVE[\s\S]*?==PROMPT==\s*/gi, '')
         .replace(/&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*/gi, '')
@@ -2966,6 +3289,16 @@ function sanitizeAssistantNarration(text) {
     const source = tagged ? tagged[1].trim() : stripNarratorMetaPrefix(original);
     const cleaned = stripVisibleMechanicsLabels(stripStructuredArtifacts(source)).trim();
     return cleaned || original;
+}
+
+function extractNarratorTrackerDeltaText(text) {
+    const source = String(text ?? '');
+    const wrapperMatch = source.match(/<!--\s*STORY_ENGINE_TRACKER_DELTA([\s\S]*?)STORY_ENGINE_TRACKER_DELTA_END\s*-->/i)
+        || source.match(/&lt;!--\s*STORY_ENGINE_TRACKER_DELTA([\s\S]*?)STORY_ENGINE_TRACKER_DELTA_END\s*--&gt;/i)
+        || source.match(/<trackers>([\s\S]*?)<\/trackers>/i)
+        || source.match(/&lt;trackers&gt;([\s\S]*?)&lt;\/trackers&gt;/i);
+    const match = (wrapperMatch?.[1] || source).match(/BEGIN_TRACKER_DELTA[\s\S]*?END_TRACKER_DELTA/i);
+    return match?.[0] || '';
 }
 
 function stripVisibleMechanicsLabels(text) {
@@ -3127,18 +3460,19 @@ async function prependComputedDebug(messageId, type) {
     }
 
     clearPendingRunCleanupTimer();
-    state.processingPostReplyTracker = true;
 
     try {
         message.extra = message.extra || {};
 
         const currentText = String(message.mes ?? '');
         const displayText = message.extra.display_text == null ? null : String(message.extra.display_text);
-        const visibleText = stripComputedDebugPrefix(displayText ?? currentText);
+        const rawAssistantText = displayText ?? currentText;
+        const trackerDeltaText = extractNarratorTrackerDeltaText(rawAssistantText);
+        const visibleText = stripComputedDebugPrefix(rawAssistantText);
         const narrationText = sanitizeAssistantNarration(visibleText);
         const narratorHandoff = state.lastNarratorHandoff;
         const pendingRun = state.pendingRun;
-        let postReplyTrackerWarning = null;
+        let trackerDeltaWarning = null;
 
         const root = getTrackerRoot(context);
         if (root && pendingRun) {
@@ -3147,36 +3481,22 @@ async function prependComputedDebug(messageId, type) {
                 pendingRun,
                 report: pendingRun.report,
             });
-            try {
-                const postReplyDelta = await withSemanticGenerationSettings(async settings => {
-                    const previousBypassPromptReady = state.bypassPromptReady;
-                    state.bypassPromptReady = true;
-                    if (!settings?.semanticProfileId) {
-                        addEphemeralStoppingString(POST_REPLY_TRACKER_STOP_SENTINEL);
-                    }
-                    try {
-                        return await extractPostReplyTrackerDelta(
-                            context,
-                            narrationText,
-                            trackerDisplaySnapshot,
-                            {
-                                disableSemanticThinking: settings?.disableSemanticThinking !== false,
-                                semanticProfileId: settings?.semanticProfileId,
-                                semanticProfileName: settings?.semanticProfileName,
-                                latestUserText: pendingRun.latestUserText,
-                            },
-                        );
-                    } finally {
-                        if (!settings?.semanticProfileId) {
-                            flushEphemeralStoppingStrings();
-                        }
-                        state.bypassPromptReady = previousBypassPromptReady;
-                    }
-                });
-                trackerDisplaySnapshot = mergePostReplyTrackerDelta(trackerDisplaySnapshot, postReplyDelta);
-            } catch (error) {
-                postReplyTrackerWarning = error instanceof Error ? error.message : String(error);
-                console.warn(`[${EXTENSION_NAME}] post-reply tracker pass failed; keeping pre-reply tracker snapshot.`, error);
+            if (trackerDeltaText) {
+                try {
+                    const sameRunDelta = parseNarratorTrackerDelta(trackerDeltaText, narrationText);
+                    const clampedTrackerDelta = applyContextualInjuryCapsToTrackerDelta(sameRunDelta, pendingRun.contextualInjuryCaps);
+                    trackerDisplaySnapshot = mergeNarratorTrackerDelta(trackerDisplaySnapshot, clampedTrackerDelta, {
+                        messageKey,
+                        latestUserText: pendingRun.latestUserText,
+                        assistantText: narrationText,
+                    });
+                } catch (error) {
+                    trackerDeltaWarning = error instanceof Error ? error.message : String(error);
+                    console.warn(`[${EXTENSION_NAME}] same-run tracker delta parse failed; keeping pre-reply tracker snapshot.`, error);
+                }
+            } else {
+                trackerDeltaWarning = 'Narrator response did not include BEGIN_TRACKER_DELTA block.';
+                console.warn(`[${EXTENSION_NAME}] ${trackerDeltaWarning}`);
             }
             await saveTrackerUpdate(context, buildTrackerUpdateForPersistence(trackerDisplaySnapshot), { save: false });
             root.snapshots[messageKey] = {
@@ -3186,7 +3506,7 @@ async function prependComputedDebug(messageId, type) {
                 afterUser: clone(trackerDisplaySnapshot.user),
                 display: clone(trackerDisplaySnapshot),
                 type: pendingRun.type,
-                postReplyTrackerWarning,
+                trackerDeltaWarning,
                 savedAt: Date.now(),
             };
             setMessageTrackerDisplaySnapshot(message, trackerDisplaySnapshot);
@@ -3204,6 +3524,7 @@ async function prependComputedDebug(messageId, type) {
         }
         renderNarratorHandoffBlockForMessage(messageId, null, context);
         renderTrackerDisplayBlockForMessage(messageId, null, context);
+        renderTrackerWidget(context);
 
         if (typeof context.saveChat === 'function') {
             await context.saveChat();
@@ -3213,9 +3534,7 @@ async function prependComputedDebug(messageId, type) {
 
         clearRuntimePrompts();
         state.chatSignature = captureChatSignature(context);
-    } finally {
-        state.processingPostReplyTracker = false;
-    }
+    } finally {}
 }
 
 async function handleMessageDeleted(newLength) {
@@ -3278,8 +3597,7 @@ function handleChatChanged() {
     clearPendingRunCleanupTimer();
     clearAllProgress();
     const context = getContext();
-    injectWritingStylePrompt();
-    injectProseRulesPrompt();
+    injectPromptOptionPrompts();
     getPlayerRoot(context);
     restoreTrackerFromLatestDisplaySnapshot(context);
     migrateVisibleHandoffDisplays(context);
@@ -3299,10 +3617,9 @@ function handleGenerationLifecycleEnd() {
     state.pendingGeneration = null;
     clearRuntimePrompts();
 
-    if (state.pendingRun && !state.processingPostReplyTracker && !state.pendingRunCleanupTimer) {
+    if (state.pendingRun && !state.pendingRunCleanupTimer) {
         state.pendingRunCleanupTimer = setTimeout(() => {
             state.pendingRunCleanupTimer = null;
-            if (state.processingPostReplyTracker) return;
             if (!state.pendingRun) return;
             state.pendingRun = null;
             state.lastNarratorHandoff = '';
@@ -3347,8 +3664,7 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         if (typeof abort === 'function') abort(true);
         return true;
     }
-    injectWritingStylePrompt();
-    injectProseRulesPrompt();
+    injectPromptOptionPrompts();
 
     if (playerSetupNeeded(context)) {
         const root = getPlayerRoot(context);
@@ -3411,8 +3727,8 @@ async function handleChatCompletionPromptReady(eventData) {
             userBefore: state.pendingGeneration.playerTrackerSnapshot || buildPlayerTrackerSnapshot(context),
             userAfter: report.trackerUpdate?.user || {},
             resolutionPacket: report.finalNarrativeHandoff?.resolutionPacket || {},
-            presentNpcNames: getLatestReportPresentNpcNames(report),
             userCoreStats: report.semanticLedger?.engineContext?.userCoreStats || null,
+            contextualInjuryCaps: collectContextualInjuryCaps(report),
             latestUserText: getLatestUserText(eventData.chat),
             report,
         };
@@ -3495,11 +3811,13 @@ function abortGenerationAfterPromptReady(context) {
 export function onDisable() {
     const context = getContext();
     clearAllProgress();
+    removeStreamingArtifactRegex();
     if (context?.extensionPrompts) {
         delete context.extensionPrompts[ENGINE_PROMPT_KEY];
         delete context.extensionPrompts[NARRATOR_PROMPT_KEY];
         delete context.extensionPrompts[WRITING_STYLE_PROMPT_KEY];
         delete context.extensionPrompts[PROSE_RULES_PROMPT_KEY];
+        delete context.extensionPrompts[FINAL_REMINDER_PROMPT_KEY];
         delete context.extensionPrompts[LEGACY_WRITING_STYLE_PROMPT_KEY];
         delete context.extensionPrompts[LEGACY_PROSE_RULES_PROMPT_KEY];
     }
@@ -3526,11 +3844,12 @@ function removeEventHandler(context, eventName, handler) {
 
 subscribeMessageHandler();
 getSettings();
+ensureStreamingArtifactRegex();
 if (typeof jQuery === 'function') {
     jQuery(() => {
+        ensureStreamingArtifactRegex();
         renderSettingsPanel();
-        injectWritingStylePrompt();
-        injectProseRulesPrompt();
+        injectPromptOptionPrompts();
         setTimeout(() => {
             getPlayerRoot();
             restoreTrackerFromLatestDisplaySnapshot();
@@ -3540,9 +3859,9 @@ if (typeof jQuery === 'function') {
         }, 0);
     });
 } else {
+    ensureStreamingArtifactRegex();
     renderSettingsPanel();
-    injectWritingStylePrompt();
-    injectProseRulesPrompt();
+    injectPromptOptionPrompts();
     setTimeout(() => {
         getPlayerRoot();
         restoreTrackerFromLatestDisplaySnapshot();
