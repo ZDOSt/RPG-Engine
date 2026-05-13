@@ -229,15 +229,21 @@ function RelationshipEngine(npc, resolutionPacket) {
     return {currentDisposition, currentRapport, establishedRelationship, slowBondEvidence, hostilePressure, hostileLandedPressure, dominantLock, pressureMode}
 
   initPreset():
-    policy: deterministic
+    policy: EO, FYW
     rule: use only if currentDisposition is missing
-    rule: semantic pass does not output initPreset flags
-    if resolutionPacket.activeHostileThreat=Y AND npc in resolutionPacket.OppTargets.NPC -> {Label:activeEnemy,B:1,F:2,H:4}
-    if tracker.establishedRelationship=Y -> {Label:establishedRelationship,B:4,F:1,H:1}
-    if tracker/card userHistory.knowsUser=Y AND userHistory.standing=positive -> {Label:knownPositive,B:3,F:2,H:2}
-    if tracker/card userHistory.knowsUser=Y AND userHistory.standing=negative -> {Label:knownNegative,B:1,F:2,H:3}
+    rule: means only how this NPC initially feels toward {{user}} / active persona
+    rule: semantic pass chooses only the initPreset tags; deterministic runner assigns B/F/H exactly
+    rule: check all available context: assembled ST prompt stack, character card, persona text/name, scenario, lore/world info, tracker snapshot, and chat history
+    rule: activeHostileThreat is a crisis/combat signal, not an initPreset label
+    rule: establishedRelationship is a separate relationship-state mechanic, not an initPreset label
+    rule: NPC has explicit fear immunity only if same or superior kind/nature, peer/superior supernatural or monstrous being, explicit natural fear/mental immunity, or the card/lore/scenario explicitly shows the NPC is an ancient, powerful, non-ordinary being who has faced horrors, monsters, curses, eldritch forces, or other supernatural threats and is portrayed as not meaningfully fearing them
+    rule: title, rank, bravado, posturing, composure, courage, or pretending to be fearless do NOT count as fear immunity
+    if NPC is already romantically/intimately involved with {{user}}, willing toward {{user}}, or in love -> {Label:romanticOpen,B:4,F:1,H:1}
+    if {{user}} is hated, distrusted, wanted, enemy-coded, or bad-reputation with this NPC before the current first interaction -> {Label:userBadRep,B:1,F:2,H:3}
+    rule: first encounter kindness, opening-scene rescue, courtesy, friendliness, praise, or a warm first impression do NOT count as prior favorable reputation
+    if {{user}} is explicitly shown by prior lore, card, scenario, tracker, or chat history to have an established favorable reputation with this NPC that predates the current scene -> {Label:priorUserGoodRep,B:3,F:1,H:2}
+    if {{user}} is explicitly visibly inhuman, demonic, monstrous, undead, bestial, eldritch, or construct-like AND NPC lacks explicit fear immunity -> {Label:userNonHuman,B:1,F:3,H:2}
     else -> {Label:neutralDefault,B:2,F:2,H:2}
-    fear overlay: if persona race is deterministically fear-relevant and NPC raceProfile is not same category, peer, superior, or immune -> F=max(F,3)
 
   auditInteraction(npc, resolutionPacket):
     policy: EO, FYW
@@ -291,7 +297,7 @@ function RelationshipEngine(npc, resolutionPacket) {
     isHarmed = resolutionPacket.HarmedObservers.includes(npc.name)
     if !isDirect && !isOpp && !isHarmed -> none
     rule: boundary pressure is a lower-severity negative social/physical boundary response, not combat
-    rule: apply Hostility pressure by at most +1 H and never raise H above 3 unless H was already 4 from a prior activeEnemy/hostilePhysicalIntent state
+    rule: apply Hostility pressure by at most +1 H and never raise H above 3 unless H was already 4 from a prior hostilePhysicalIntent state
     if state.currentDisposition.H>=3 -> deltas={b:0,f:0,h:0}
     else -> deltas={b:-1,f:0,h:1}
     target = Hostility
@@ -929,53 +935,6 @@ export function aggressionReactionOutcome(margin) {
     if (margin === 0) return 'stalemate';
     if (margin >= -3) return 'user_resists';
     return 'user_dominates';
-}
-
-export function classifyUserNonHuman(text) {
-    const source = String(text ?? '');
-    if (!source.trim()) return { value: null, source: 'no persona text', evidence: null };
-
-    const raceEvidence = explicitRaceEvidence(source);
-    if (raceEvidence) {
-        const raceClassification = classifyRaceText(raceEvidence);
-        if (raceClassification.value != null) {
-            return {
-                ...raceClassification,
-                source: 'explicit Race/Species/Ancestry/Lineage field',
-                evidence: snippet(raceEvidence),
-            };
-        }
-    }
-
-    const visibleMonster = source.match(/\b(visibly|obviously|clearly|appears?|looks?)\b.{0,80}\b(demonic|demon|monstrous|monster|undead|eldritch|bestial|construct-like|inhuman)\b/i)
-        || source.match(/\b(demonic|demon|monstrous|monster|undead|eldritch|bestial|construct-like|inhuman)\b.{0,80}\b(visibly|obviously|clearly|appears?|looks?)\b/i);
-    if (visibleMonster) {
-        return {
-            value: true,
-            source: 'explicit visible monstrous/inhuman description',
-            evidence: snippet(visibleMonster[0]),
-        };
-    }
-
-    return { value: null, source: 'no deterministic race/species evidence', evidence: null };
-}
-
-export function explicitRaceEvidence(text) {
-    const matches = [...String(text).matchAll(/^\s*(?:[-*]\s*)?(?:Race|Species|Ancestry|Lineage|Heritage)\s*[:=]\s*(.+)$/gim)]
-        .map(match => match[1])
-        .filter(Boolean);
-    return matches.length ? matches.join('; ') : null;
-}
-
-export function classifyRaceText(text) {
-    const source = String(text ?? '').toLowerCase();
-    const monsterRace = /\b(half[-\s]?demon|demon|demonic|devil|fiend|cambion|monster|monstrous|orc|ogre|goblin|hobgoblin|bugbear|troll|undead|vampire|dhampir|lich|wraith|ghoul|zombie|skeleton|werewolf|lycanthrope|eldritch|aberration|construct|golem|beastfolk|lizardfolk|kobold|minotaur|oni)\b/.test(source);
-    if (monsterRace) return { value: true };
-
-    const typicalRace = /\b(human|mortal|elf|elven|half[-\s]?elf|dwarf|dwarven|halfling|hobbit|gnome|fairy|fae|pixie|aasimar)\b/.test(source);
-    if (typicalRace) return { value: false };
-
-    return { value: null };
 }
 
 export function classifyRaceCategory(text) {

@@ -242,8 +242,6 @@ export function formatNarratorModelPromptContext(report) {
     const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {});
 
     return [
-        '[STORY_ENGINE_NARRATOR_DIRECTIVE v0.8 - PRIVATE AUTHORITATIVE]',
-        '',
         narratorModelInstruction(),
         '',
         '==PROMPT==',

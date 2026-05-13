@@ -20,7 +20,6 @@ import {
 const EXTENSION_NAME = 'Story Engine';
 const SETTINGS_KEY = 'structuredPreflightEngines';
 const SETTINGS_CONTAINER_ID = 'structured_preflight_settings_container';
-const ENGINE_PROMPT_KEY = 'structured_preflight_engines';
 const NARRATOR_PROMPT_KEY = 'structured_preflight_narrator_context';
 const WRITING_STYLE_PROMPT_KEY = 'structured_preflight_10_writing_style';
 const PROSE_RULES_PROMPT_KEY = 'structured_preflight_20_prose_rules';
@@ -473,12 +472,6 @@ const CHAT_COMPLETION_SECRET_KEYS = Object.freeze({
     xai: SECRET_KEYS.XAI,
     zai: SECRET_KEYS.ZAI,
 });
-const ENGINE_RUNTIME_SENTINEL = [
-    '[STRUCTURED_PREFLIGHT_ENGINE_EXTENSION v0.5 - SEMANTIC PASS ACTIVE]',
-    'The full engine source is used by the extension during the silent semantic/deterministic pass.',
-    'For this narration pass, use the structured narrator handoff as authoritative mechanics context.',
-].join('\n');
-
 const EXTENSION_PROMPT_TYPES = Object.freeze({
     NONE: -1,
     IN_PROMPT: 0,
@@ -1203,23 +1196,6 @@ function closeExtensionsDrawer() {
     setTimeout(() => document.getElementById(PLAYER_SETUP_CARD_ID)?.scrollIntoView?.({ block: 'center' }), 50);
 }
 
-function injectRuntimeSentinel() {
-    const context = getContext();
-    if (!context?.setExtensionPrompt) {
-        console.warn(`[${EXTENSION_NAME}] SillyTavern context is not ready; engine prompt was not injected.`);
-        return;
-    }
-
-    context.setExtensionPrompt(
-        ENGINE_PROMPT_KEY,
-        ENGINE_RUNTIME_SENTINEL,
-        EXTENSION_PROMPT_TYPES.IN_PROMPT,
-        0,
-        false,
-        EXTENSION_PROMPT_ROLES.SYSTEM,
-    );
-}
-
 function injectWritingStylePrompt() {
     const context = getContext();
     if (!context?.setExtensionPrompt) {
@@ -1297,7 +1273,6 @@ function clearRuntimePrompts() {
     const context = getContext();
     if (!context?.extensionPrompts) return;
 
-    delete context.extensionPrompts[ENGINE_PROMPT_KEY];
     delete context.extensionPrompts[NARRATOR_PROMPT_KEY];
 }
 
@@ -3735,7 +3710,6 @@ async function handleChatCompletionPromptReady(eventData) {
         state.lastNarratorHandoff = narratorContext;
 
         sanitizeFinalPromptHistory(eventData.chat);
-        appendEngineSentinelToPrompt(eventData.chat);
         appendNarratorContextToPrompt(eventData.chat, narratorModelContext);
         clearAllProgress();
     } catch (error) {
@@ -3778,13 +3752,6 @@ function appendNarratorContextToPrompt(chat, narratorContext) {
     });
 }
 
-function appendEngineSentinelToPrompt(chat) {
-    chat.push({
-        role: 'system',
-        content: ENGINE_RUNTIME_SENTINEL,
-    });
-}
-
 function replacePromptWithAbortNotice(chat, error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     chat.splice(0, chat.length, {
@@ -3813,7 +3780,6 @@ export function onDisable() {
     clearAllProgress();
     removeStreamingArtifactRegex();
     if (context?.extensionPrompts) {
-        delete context.extensionPrompts[ENGINE_PROMPT_KEY];
         delete context.extensionPrompts[NARRATOR_PROMPT_KEY];
         delete context.extensionPrompts[WRITING_STYLE_PROMPT_KEY];
         delete context.extensionPrompts[PROSE_RULES_PROMPT_KEY];

@@ -4,9 +4,6 @@ import {
     nonHostileOutcome,
     counterBonusFromPotential,
     aggressionReactionOutcome,
-    classifyUserNonHuman,
-    classifyRaceCategory,
-    explicitRaceEvidence,
     isDefaultGeneratedCore,
     routeDispositionTarget,
     resolveStakeChangeByOutcome,
@@ -39,7 +36,6 @@ import {
     buildPersistencePolicy,
     trackerSummary,
     normalizeTrackerEntry,
-    normalizeUserHistory,
     normalizeNpcRaceProfile,
     normalizeProactivityMemory,
     normalizeTrackerUserState,
@@ -670,13 +666,12 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         audit.push(`3.3c rapportEligible=${yn(rapportEligible)}`);
 
         if (!currentDisposition) {
-            const init = resolveDeterministicInitPreset(npc, state, resolutionPacket, refereeContext, audit, `3.3 ${npc}.initPreset`);
+            const init = resolveDeterministicInitPreset(npc, state, sem, audit, `3.3 ${npc}.initPreset`);
             initMetadata = init;
             currentDisposition = init.disposition;
             audit.push(`3.3d initPreset.userHistory=${compact(init.userHistory)}`);
-            audit.push(`3.3e initPreset.raceProfile=${compact(init.raceProfile)}`);
-            audit.push(`3.3f initPreset.userRace=${compact(init.userRace)}`);
-            audit.push(`3.3g initPreset.fearOverlay=${compact(init.fearOverlay)}`);
+            audit.push(`3.3e initPreset.flags=${compact(init.flags)}`);
+            audit.push(`3.3f initPreset.fearImmunity=${init.flags.fearImmunity ? 'Y' : 'N'}`);
             audit.push(`3.3i initPreset=${init.label}`);
             audit.push(`3.3j currentDisposition=${formatDisposition(currentDisposition)}`);
         } else {
@@ -3639,22 +3634,12 @@ function chooseGeneratedCore(ledger, resolutionEngine, oppTargetsNpcFirst) {
 
 function buildRefereeContext(context) {
     const fields = getCardFields(context);
-    const userText = String(fields.persona ?? '');
-    const userNonHuman = classifyUserNonHuman(userText);
-    const cardText = characterCardInitText(fields);
     const userNames = buildUserReferenceNames(context, fields);
     const userReferencePattern = buildUserReferencePattern(userNames);
 
     return {
-        userNonHuman,
-        userRaceCategory: userNonHuman?.value === false
-            ? 'typical'
-            : classifyRaceCategory(userNonHuman?.evidence || userText),
-        activeCharacterName: cleanInitScalar(fields.name || fields.ch_name || context?.name2),
         userReferenceNames: userNames,
         userReferencePattern,
-        cardUserHistory: parseCardUserHistory(cardText, userNames),
-        cardRaceProfile: parseCardRaceProfile(cardText),
     };
 }
 
@@ -3666,75 +3651,65 @@ function getCardFields(context) {
     }
 }
 
-function resolveDeterministicInitPreset(npc, state, resolutionPacket, refereeContext, audit, label) {
-    const userHistory = resolveStoredOrCardUserHistory(state?.userHistory, npc, refereeContext);
-    const raceProfile = resolveStoredOrCardRaceProfile(state?.raceProfile, npc, refereeContext);
-    const activeEnemy = isDeterministicActiveEnemy(npc, resolutionPacket);
-    const userRace = refereeContext?.userNonHuman || { value: null, source: 'no persona text', evidence: null };
-    const fearOverlay = resolveDeterministicFearOverlay(userRace, refereeContext?.userRaceCategory, raceProfile);
+function resolveDeterministicInitPreset(npc, state, sem, audit, label) {
+    const flags = normalizeSemanticInitPresetFlags(sem?.initPreset);
+    const userHistory = initUserHistoryFromFlags(flags, state?.userHistory);
+    const raceProfile = normalizeNpcRaceProfile(state?.raceProfile);
 
     let base = { label: 'neutralDefault', disposition: { B: 2, F: 2, H: 2 } };
-    if (activeEnemy) {
-        base = { label: 'activeEnemy', disposition: { B: 1, F: 2, H: 4 } };
-    } else if (state?.establishedRelationship === 'Y') {
-        base = { label: 'establishedRelationship', disposition: { B: 4, F: 1, H: 1 } };
-    } else if (userHistory.knowsUser === 'Y' && userHistory.standing === 'positive') {
-        base = { label: 'knownPositive', disposition: { B: 3, F: 2, H: 2 } };
-    } else if (userHistory.knowsUser === 'Y' && userHistory.standing === 'negative') {
-        base = { label: 'knownNegative', disposition: { B: 1, F: 2, H: 3 } };
+    if (flags.romanticOpen) {
+        base = { label: 'romanticOpen', disposition: { B: 4, F: 1, H: 1 } };
+    } else if (flags.userBadRep) {
+        base = { label: 'userBadRep', disposition: { B: 1, F: 2, H: 3 } };
+    } else if (flags.priorUserGoodRep) {
+        base = { label: 'priorUserGoodRep', disposition: { B: 3, F: 1, H: 2 } };
+    } else if (flags.userNonHuman && !flags.fearImmunity) {
+        base = { label: 'userNonHuman', disposition: { B: 1, F: 3, H: 2 } };
     }
 
-    const disposition = fearOverlay.applies === 'Y'
-        ? { ...base.disposition, F: Math.max(base.disposition.F, 3) }
-        : base.disposition;
-    audit.push(`${label}.deterministic=${compact({
-        activeEnemy: yn(activeEnemy),
-        userHistory,
-        raceProfile,
-        userRace,
-        fearOverlay,
+    audit.push(`${label}.semantic=${compact({
+        npc,
+        flags: {
+            romanticOpen: yn(flags.romanticOpen),
+            userBadRep: yn(flags.userBadRep),
+            priorUserGoodRep: yn(flags.priorUserGoodRep),
+            userNonHuman: yn(flags.userNonHuman),
+            fearImmunity: yn(flags.fearImmunity),
+        },
         base: base.label,
     })}`);
     return {
         ...base,
-        label: fearOverlay.applies === 'Y' && base.label === 'neutralDefault' ? 'userNonHuman' : base.label,
-        disposition,
+        flags,
         userHistory,
         raceProfile,
-        userRace,
-        fearOverlay,
     };
 }
 
-function resolveStoredOrCardUserHistory(stored, npc, refereeContext) {
-    const normalized = normalizeUserHistory(stored);
+function normalizeSemanticInitPresetFlags(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    return {
+        romanticOpen: bool(source.romanticOpen),
+        userBadRep: bool(source.userBadRep),
+        priorUserGoodRep: bool(source.priorUserGoodRep || source.userGoodRep),
+        userNonHuman: bool(source.userNonHuman),
+        fearImmunity: bool(source.fearImmunity || source.fearImmune),
+    };
+}
+
+function initUserHistoryFromFlags(flags, stored) {
+    const normalized = normalizeInitUserHistory(stored);
+    if (flags.userBadRep) return { knowsUser: 'Y', standing: 'negative' };
+    if (flags.romanticOpen || flags.priorUserGoodRep) return { knowsUser: 'Y', standing: 'positive' };
     if (normalized.knowsUser === 'Y' || normalized.standing !== 'neutral') return normalized;
-    if (!refereeCardMatchesNpc(npc, refereeContext)) return normalized;
-    return normalizeUserHistory(refereeContext?.cardUserHistory);
+    return { knowsUser: 'N', standing: 'neutral' };
 }
 
-function resolveStoredOrCardRaceProfile(stored, npc, refereeContext) {
-    const normalized = normalizeNpcRaceProfile(stored);
-    if (normalized.race || normalized.category !== 'unknown' || normalized.fearProfile !== 'normal') return normalized;
-    if (!refereeCardMatchesNpc(npc, refereeContext)) return normalized;
-    return normalizeNpcRaceProfile(refereeContext?.cardRaceProfile);
-}
-
-function refereeCardMatchesNpc(npc, refereeContext) {
-    const activeName = refereeContext?.activeCharacterName;
-    return isReal(activeName) && sameName(activeName, npc);
-}
-
-function characterCardInitText(fields = {}) {
-    return [
-        fields.name,
-        fields.description,
-        fields.personality,
-        fields.scenario,
-        fields.first_mes,
-        fields.mes_example,
-        fields.creator_notes,
-    ].map(value => String(value || '').trim()).filter(Boolean).join('\n').slice(0, 12000);
+function normalizeInitUserHistory(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const knowsUser = source.knowsUser === 'Y' ? 'Y' : 'N';
+    const standing = ['positive', 'neutral', 'negative'].includes(source.standing) ? source.standing : 'neutral';
+    return { knowsUser, standing };
 }
 
 function buildUserReferenceNames(context, fields = {}) {
@@ -3799,97 +3774,13 @@ function parsePersonaName(text) {
     return match[1].replace(/[`*_~]/g, '').trim();
 }
 
-function parseCardUserHistory(text, userNames = []) {
-    const source = String(text || '');
-    const knows = parseStructuredKnowsUser(source, userNames);
-    const standing = parseStructuredUserStanding(source, userNames) || parseExplicitUserStanding(source, userNames);
-    if (knows === 'N') return { knowsUser: 'N', standing: 'neutral' };
-    if (standing === 'positive' || standing === 'negative') return { knowsUser: 'Y', standing };
-    if (knows === 'Y') return { knowsUser: 'Y', standing: 'neutral' };
-    return { knowsUser: 'N', standing: 'neutral' };
-}
-
-function parseStructuredKnowsUser(source, userNames = []) {
-    const userRef = buildUserReferencePattern(userNames);
-    const match = source.match(new RegExp(`^\\s*(?:[-*]\\s*)?(?:Knows\\s*${userRef}|Known\\s*To\\s*${userRef})\\s*[:=]\\s*(yes|y|true|no|n|false)\\b`, 'im'));
-    if (!match) return null;
-    return /^(yes|y|true)$/i.test(match[1]) ? 'Y' : 'N';
-}
-
-function parseStructuredUserStanding(source, userNames = []) {
-    const userRef = buildUserReferencePattern(userNames);
-    const match = source.match(new RegExp(`^\\s*(?:[-*]\\s*)?(?:User\\s*Standing|Standing\\s*With\\s*${userRef}|Relationship\\s*To\\s*${userRef}|User\\s*Relationship|Prior\\s*Relationship)\\s*[:=]\\s*([^\\n\\r]+)`, 'im'));
-    if (!match) return null;
-    return normalizeStandingWord(match[1]);
-}
-
-function parseExplicitUserStanding(source, userNames = []) {
-    const userRef = buildUserReferencePattern(userNames);
-    const negativeBefore = new RegExp(`\\b(?:hates|despises|detests|loathes|distrusts|resents|is hostile to|is an enemy of|sworn enemy of|wants revenge on)\\b.{0,80}${userRef}`, 'i');
-    const negativeAfter = new RegExp(`${userRef}.{0,80}\\b(?:is hated|is despised|is distrusted|is resented|is an enemy|is a sworn enemy)\\b`, 'i');
-    if (negativeBefore.test(source) || negativeAfter.test(source)) return 'negative';
-
-    const positiveBefore = new RegExp(`\\b(?:trusts|likes|respects|is friends with|is an ally of|is loyal to|cares for)\\b.{0,80}${userRef}`, 'i');
-    const positiveAfter = new RegExp(`${userRef}.{0,80}\\b(?:is trusted|is liked|is respected|is a friend|is an ally)\\b`, 'i');
-    if (positiveBefore.test(source) || positiveAfter.test(source)) return 'positive';
-
-    if (new RegExp(`\\b(?:does not know|doesn't know|never met|has never met|is a stranger to)\\b.{0,80}${userRef}`, 'i').test(source)) return 'neutral';
-    return null;
-}
-
 function escapeRegExp(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function normalizeStandingWord(value) {
-    const text = String(value || '').toLowerCase();
-    if (/\b(positive|friend|friendly|ally|trusted|trusts|good|favorable|favourable|likes|respects|loyal)\b/.test(text)) return 'positive';
-    if (/\b(negative|enemy|hostile|hated|hates|despises|distrusts|resentful|bad|unfavorable|unfavourable|revenge)\b/.test(text)) return 'negative';
-    if (/\b(neutral|unknown|stranger|none|new|unmet)\b/.test(text)) return 'neutral';
-    return null;
-}
-
-function parseCardRaceProfile(text) {
-    const source = String(text || '');
-    const race = explicitRaceEvidence(source) || '';
-    const category = classifyRaceCategory(race || source);
-    return normalizeNpcRaceProfile({
-        race,
-        category,
-        fearProfile: parseStructuredFearProfile(source),
-    });
-}
-
-function parseStructuredFearProfile(source) {
-    const match = source.match(/^\s*(?:[-*]\s*)?(?:Fear\s*Profile|Fear\s*Response)\s*[:=]\s*(immune|peer|superior|normal)\b/im);
-    if (match) return match[1].toLowerCase();
-    if (/\b(?:immune to fear|fear immune|cannot be frightened|cannot feel fear)\b/i.test(source)) return 'immune';
-    return 'normal';
 }
 
 function cleanInitScalar(value) {
     const text = String(value || '').trim().replace(/\s+/g, ' ');
     return text.slice(0, 80);
-}
-
-function isDeterministicActiveEnemy(npc, resolutionPacket) {
-    return resolutionPacket?.activeHostileThreat === 'Y'
-        && toRealArray(resolutionPacket?.OppTargets?.NPC).some(name => sameName(name, npc));
-}
-
-function resolveDeterministicFearOverlay(userRace, userRaceCategory, npcRaceProfile) {
-    if (userRace?.value !== true) {
-        return { applies: 'N', reason: userRace?.value === false ? 'typical user race' : 'no deterministic user race evidence' };
-    }
-    const npcCategory = npcRaceProfile?.category || 'unknown';
-    const fearProfile = npcRaceProfile?.fearProfile || 'normal';
-    if (['immune', 'superior'].includes(fearProfile)) return { applies: 'N', reason: `npc ${fearProfile}` };
-    if (fearProfile === 'peer') return { applies: 'N', reason: 'npc monstrous peer' };
-    if (userRaceCategory !== 'unknown' && npcCategory === userRaceCategory) return { applies: 'N', reason: 'same race category' };
-    if (['demonic', 'undead', 'eldritch', 'construct', 'monstrous'].includes(npcCategory) && npcCategory !== 'typical') {
-        return { applies: 'N', reason: 'npc non-ordinary peer category' };
-    }
-    return { applies: 'Y', reason: 'fear-relevant user race and no peer/immunity' };
 }
 
 function applyHostilePhysicalIntentHardRules(semantic, audit) {
