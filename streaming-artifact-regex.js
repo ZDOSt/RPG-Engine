@@ -4,11 +4,12 @@ export const STREAMING_ARTIFACT_REGEX_SCRIPT_ID = 'story-engine-hide-narrator-ar
 export const STREAMING_ARTIFACT_REGEX_SOURCE = [
     'BEGIN_FINAL_NARRATION\\s*',
     '\\s*END_FINAL_NARRATION[\\s\\S]*$',
-    '\\s*(?:<!--\\s*)?STORY_ENGINE_TRACKER_DELTA[\\s\\S]*$',
-    '\\s*&lt;!--\\s*STORY_ENGINE_TRACKER_DELTA[\\s\\S]*$',
-    '\\s*BEGIN_TRACKER_DELTA[\\s\\S]*$',
-    '\\s*<trackers>[\\s\\S]*$',
-    '\\s*&lt;trackers&gt;[\\s\\S]*$',
+    '```story_engine_tracker_delta\\s*[\\s\\S]*?(?:```\\s*|(?=BEGIN_FINAL_NARRATION)|$)',
+    '\\s*(?:<!--\\s*)?STORY_ENGINE_TRACKER_DELTA[\\s\\S]*?(?:STORY_ENGINE_TRACKER_DELTA_END\\s*-->|(?=BEGIN_FINAL_NARRATION)|$)',
+    '\\s*&lt;!--\\s*STORY_ENGINE_TRACKER_DELTA[\\s\\S]*?(?:STORY_ENGINE_TRACKER_DELTA_END\\s*--&gt;|(?=BEGIN_FINAL_NARRATION)|$)',
+    '\\s*BEGIN_TRACKER_DELTA[\\s\\S]*?(?:END_TRACKER_DELTA|(?=BEGIN_FINAL_NARRATION)|$)',
+    '\\s*<trackers>[\\s\\S]*?(?:<\\/trackers>|(?=BEGIN_FINAL_NARRATION)|$)',
+    '\\s*&lt;trackers&gt;[\\s\\S]*?(?:&lt;\\/trackers&gt;|(?=BEGIN_FINAL_NARRATION)|$)',
 ].join('|');
 
 export const STREAMING_ARTIFACT_REGEX_PATTERN = `/${STREAMING_ARTIFACT_REGEX_SOURCE}/gi`;

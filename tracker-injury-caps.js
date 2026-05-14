@@ -116,11 +116,14 @@ function mergeCapsByTarget(caps) {
 
 function clampActorDeltaToCap(actorDelta, cap) {
     const source = actorDelta && typeof actorDelta === 'object' ? actorDelta : {};
+    const cappedWounds = filterEffectsToSeverityCap(source.woundsAdd, cap.severityLimit);
+    const cappedStatus = filterEffectsToSeverityCap(source.statusAdd, cap.severityLimit);
+    const hasConcreteEffect = cappedWounds.length > 0 || cappedStatus.length > 0;
     return {
         ...source,
-        condition: clampConditionToSeverity(source.condition, cap.severityLimit),
-        woundsAdd: filterEffectsToSeverityCap(source.woundsAdd, cap.severityLimit),
-        statusAdd: filterEffectsToSeverityCap(source.statusAdd, cap.severityLimit),
+        condition: hasConcreteEffect ? clampConditionToSeverity(source.condition, cap.severityLimit) : 'unchanged',
+        woundsAdd: cappedWounds,
+        statusAdd: cappedStatus,
     };
 }
 

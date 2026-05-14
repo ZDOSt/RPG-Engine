@@ -2662,7 +2662,7 @@ function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, c
     const semantic = ledger.trackerUpdateEngine || {};
     const userBefore = buildPlayerTrackerSnapshot(context);
     let user = applyTrackerDeltaToState(userBefore, semantic.user, true);
-    if (userResultDelta) {
+    if (shouldApplyDeterministicResultInjury(userResultDelta)) {
         user = applyUserResultInjuryDeltaToState(user, userResultDelta);
     }
     const npcs = {};
@@ -2685,17 +2685,24 @@ function runTrackerUpdates(ledger, trackerSnapshot, relationshipTrackerUpdate, c
     }
     applyInflictedNpcInjuriesToNpcMap(npcs, trackerSnapshot, relationshipTrackerUpdate?.__inflictedInjuries || []);
     for (const item of npcResultDeltas || []) {
+        if (!shouldApplyDeterministicResultInjury(item?.injury)) continue;
         mergeNpcResultInjuryDelta(npcs, trackerSnapshot, item?.NPC, item?.injury);
     }
 
     audit.push('STEP 6.5: EXECUTE TrackerUpdateEngine EXPLICIT DELTAS');
     audit.push(`6.5a user=${compact(user)}`);
     audit.push(`6.5b npcDeltas=${compact((semantic.npcs || []).map(delta => delta.NPC || NONE))}`);
-    if (userResultDelta) audit.push(`6.5c deterministicUserInjuryDelta=${compact(userResultDelta)}`);
+    if (userResultDelta) audit.push(`6.5c deterministicUserInjuryDelta=${compact(userResultDelta)}${shouldApplyDeterministicResultInjury(userResultDelta) ? '' : ' (deferred:narrator_contextual)'}`);
     if (npcResultDeltas?.length) audit.push(`6.5d deterministicNpcAggressionInjuryDeltas=${compact(npcResultDeltas)}`);
     audit.push('---');
 
     return { user, npcs };
+}
+
+function shouldApplyDeterministicResultInjury(injury) {
+    if (!injury || typeof injury !== 'object') return false;
+    if (injury.InjuryDetailMode !== 'narrator_contextual') return true;
+    return toRealArray(injury.woundsAdd).length > 0 || toRealArray(injury.statusAdd).length > 0;
 }
 
 function applyTrackerDeltaToState(before, delta, includePlayerFields) {
@@ -2828,6 +2835,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         }
 
         const directedCompanionAttackTarget = detectDirectedCompanionAttackTarget(handoff, resolutionPacket, latestUserText, handoffs);
+        const defensiveCompanionCommand = detectDirectedCompanionDefensiveCommand(handoff, latestUserText);
         if (directedCompanionAttackTarget && isDirectedCompanionAttackEligible(handoff, fin)) {
             const commandDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
             candidates.push({
@@ -2847,6 +2855,27 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
                 CompanionCrisisDire: isDireCompanionCrisis({ resolutionPacket }) ? 'Y' : 'N',
             });
             audit.push(`6.4h directedCompanionAttack=${compact({ NPC: handoff.NPC, target: directedCompanionAttackTarget, CompanionInitiativeDie: commandDie })}`);
+            continue;
+        }
+        if (defensiveCompanionCommand && isDirectedCompanionAttackEligible(handoff, fin)) {
+            const commandDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
+            candidates.push({
+                NPC: handoff.NPC,
+                die: 900 + commandDie,
+                tier: 'FORCED',
+                intent: 'SUPPORT_ACT',
+                impulse: 'BOND',
+                ProactivityTarget: USER_PROACTIVITY_TARGET,
+                TargetsUser: 'Y',
+                Threshold: 'AUTO',
+                passes: 'Y',
+                CompanionInitiative: 'Y',
+                CompanionInitiativeTag: 'Companion_Cover',
+                CompanionInitiativeDie: commandDie,
+                CompanionInitiativeContext: 'crisis',
+                CompanionCrisisDire: isDireCompanionCrisis({ resolutionPacket }) ? 'Y' : 'N',
+            });
+            audit.push(`6.4h.1 directedCompanionDefense=${compact({ NPC: handoff.NPC, CompanionInitiativeDie: commandDie })}`);
             continue;
         }
 
@@ -2939,11 +2968,59 @@ function isDirectedCompanionAttackEligible(handoff, fin) {
 }
 
 function detectDirectedCompanionAttackTarget(handoff, resolutionPacket, latestUserText, handoffs = []) {
-    const source = relationshipText(latestUserText);
+    const source = directedCompanionCommandText(handoff?.NPC, latestUserText);
     if (!source) return null;
-    if (!assistantMentionsNpc(handoff?.NPC, source)) return null;
     if (!isDirectedCompanionAttackCommandText(source)) return null;
     return resolveFriendlyCrisisAttackTarget(handoff, { resolutionPacket, handoffs });
+}
+
+function detectDirectedCompanionDefensiveCommand(handoff, latestUserText) {
+    const source = directedCompanionCommandText(handoff?.NPC, latestUserText);
+    if (!source) return false;
+    return isDirectedCompanionDefensiveCommandText(source);
+}
+
+function directedCompanionCommandText(npc, text) {
+    const name = String(npc ?? '').trim();
+    const source = String(text ?? '').replace(/<[^>]+>/g, ' ').trim();
+    if (!name || !source) return '';
+    const escapedName = escapeRegExp(name);
+    const firstName = name.split(/\s+/)[0] || '';
+    const escapedFirstName = escapeRegExp(firstName);
+    const namePattern = firstName.length >= 3
+        ? `(?:${escapedName}|${escapedFirstName})`
+        : escapedName;
+    const quotePattern = /["“]([^"”]{0,700})["”]/g;
+    let quoteMatch;
+    while ((quoteMatch = quotePattern.exec(source)) !== null) {
+        const quoted = quoteMatch[1] || '';
+        if (new RegExp(`\\b${namePattern}\\b`, 'i').test(quoted)) {
+            return relationshipText(quoted);
+        }
+    }
+    const segments = source
+        .split(/(?:[.!?]["'”’]?\s+|\n+)/)
+        .map(item => item.trim())
+        .filter(Boolean);
+    const matches = [];
+    for (let index = 0; index < segments.length; index += 1) {
+        const segment = segments[index];
+        if (!new RegExp(`\\b${namePattern}\\b`, 'i').test(segment)) continue;
+        matches.push(segment);
+        const next = segments[index + 1] || '';
+        if (/^\s*(?:if|when|should|stop|keep|cover|protect|guard|block|intercept|hit|attack|strike|shoot|rush|charge)\b/i.test(next)) {
+            matches.push(next);
+        }
+    }
+    if (!matches.length) return '';
+    return relationshipText(matches.join(' '));
+}
+
+function isDirectedCompanionDefensiveCommandText(text) {
+    const source = String(text || '').toLowerCase();
+    if (!source) return false;
+    return /\b(?:stop|block|guard|protect|cover|shield|intercept|hold|keep|watch|help|save)\b/.test(source)
+        && /\b(?:if|when|before|from|away|off|back|move|moves|moving|threaten|threatens|attack|attacks|hurt|hurts|darai|him|her|them|me|us)\b/.test(source);
 }
 
 function isDirectedCompanionAttackCommandText(text) {

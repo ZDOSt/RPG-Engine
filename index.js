@@ -16,6 +16,7 @@ import {
     STREAMING_ARTIFACT_REGEX_PATTERN,
     buildStreamingArtifactRegexScript,
 } from './streaming-artifact-regex.js';
+import { getExplicitNamePromotions, isPromotableTrackerName } from './tracker-name-promotions.js';
 
 const EXTENSION_NAME = 'Story Engine';
 const SETTINGS_KEY = 'structuredPreflightEngines';
@@ -102,328 +103,277 @@ const NAME_STYLE_OPTIONS = Object.freeze([
     'Classical / Romance Fantasy',
     'Dark Low Fantasy',
 ]);
-const DEFAULT_WRITING_STYLE_PROMPT = String.raw`**WRITING STYLE** 
+const DEFAULT_WRITING_STYLE_PROMPT = String.raw`**WRITING STYLE**
 
-**ARCHETYPE:** Cormac McCarthy physical prose x R.A. Salvatore action x Tessa Bailey explicit erotica x serious ecchi framing.
+**STYLE TARGET:**
+Serious, grounded, body-focused narration for fantasy roleplay with clear action, physical tension, intimacy, erotic charge, and ecchi framing when the scene supports it.
 
-**CORE LAW:**
-- Physical reality first. No metaphors. No internal monologue.
-- Emotion through breath, posture, distance, gaze, contact, hesitation, pressure, recoil, and bodily response.
-- Sweat, skin, blood, steel, fabric, breath, heat, friction, and impact all matter equally.
-- Tone is serious, grounded, heavy, and physically charged.
+**BASE TEXTURE:**
+- Keep prose lean, direct, and tactile.
+- Prioritize bodies, objects, distance, pressure, weight, fabric, skin, steel, blood, heat, injury, grip, footing, and consequence.
+- Make space and motion easy to follow.
+- Let scenes feel heavy through contact, restraint, timing, stillness, interruption, and consequence.
 
 **ACTION MODE:**
-- Use clear technical choreography: footwork, leverage, spacing, timing, momentum, impact.
-- Every strike, dodge, grab, fall, and reversal must be spatially legible.
-- If erotic tension is present, weave it through contact, imbalance, exposure, and breath without losing clarity.
+Use for combat, struggle, chase, restraint, spell impact, or physical contest.
+- Track footwork, leverage, spacing, timing, balance, momentum, impact, recovery, and changed position.
+- Make attacks, defenses, dodges, grabs, falls, reversals, and spell effects spatially legible.
+- Show consequences through injury, displacement, broken rhythm, lost footing, blocked access, or damaged surroundings.
 
 **TENSION MODE:**
-- In quiet or aftermath scenes, keep prose lean and heavy.
-- Focus on stillness, breathing, wounds, sweat, stance, silence, clothing, exposed skin, and proximity.
+Use for aftermath, standoffs, refusals, confessions, threats, recovery, or quiet pressure.
+- Focus on distance, hand placement, posture, clothing, wounds, blocked exits, unfinished speech, object handling, and who moves first.
+- Keep the pressure in what characters do, withhold, touch, refuse, or leave unsaid.
 
 **EROTIC MODE:**
-- When the scene is sexually charged or explicit, be direct, anatomical, and physical.
-- Choreograph grip, angle, pressure, rhythm, thrust, spread, drag, recoil, and weight clearly.
-- Treat exposure as a material event: fabric sticks, peels, drags, bunches, slips, tears, or falls away.
-- If exposure is explicit and unobstructed, describe anatomy directly.
-- Use crude terms in explicit scenes: pussy, cunt, cock, shaft.
-- Arousal, fluids, sound, climax, and aftermath must stay bodily, messy, and concrete.
+Use only when intimacy, arousal, exposure, sexual contact, or explicit sex is actually present.
+- Be direct, anatomical, physical, and unembarrassed.
+- Track grip, angle, pressure, rhythm, thrust, spread, drag, recoil, weight, resistance, exposure, fluids, sound, climax, and aftermath.
+- Treat clothing and exposure as material action: fabric sticks, peels, drags, bunches, slips, tears, or falls away.
+- Crude anatomical terms are allowed in explicit scenes when they fit the intensity: pussy, cunt, cock, shaft.
 
 **ECCHI OVERLAY:**
-- Use close physical framing: thighs, hips, chest, mouth, hands, abdomen, damp fabric, exposed skin.
-- Clothing strain, slippage, transparency, damage, bounce, and wardrobe failure are physical consequences, not jokes.
-- Keep ecchi serious, not comedic.
+Use only when physically justified by exposure, combat damage, clothing strain, charged proximity, intimacy, embarrassment, or bodily vulnerability.
+- Frame thighs, hips, chest, mouth, hands, abdomen, damp fabric, exposed skin, pressure, imbalance, and contact.
+- Clothing strain, slippage, transparency, damage, bounce, and wardrobe failure are physical consequences.
+- Keep ecchi serious and integrated into the scene.
 
 **MODE PRIORITY:**
-- Core Law always applies.
-- Action Mode for combat/struggle/pursuit.
-- Tension Mode for stillness/aftermath/restraint.
-- Erotic Mode only when intimacy, arousal, exposure, or sex is actually present.
-- Ecchi Overlay can layer onto any mode without reducing physical clarity.
-
-**MODEL EXAMPLES:**
-- ❌ "Her heart fluttered with desire." → ✓ "Her weight shifted forward. Sweat traced her collarbone."
-- ❌ "He attacked viciously." → ✓ "His lead foot snapped forward, blade arcing toward her throat."
-- ❌ "The moment was electric." → ✓ "Three inches between their mouths. She could smell the wine on him."`;
+- Base Texture always applies.
+- Action Mode applies to physical conflict or movement.
+- Tension Mode applies to quiet pressure and aftermath.
+- Erotic Mode applies only when sexual or intimate content is present.
+- Ecchi Overlay can layer onto any mode only when the scene physically supports it.
+- Spatial clarity overrides intensity.`;
 const DEFAULT_PROSE_RULES_PROMPT = String.raw`function simulationGuidelines() {
-**CORE DIRECTIVE:** The world and its inhabitants are autonomous, reactive, and textured.
-**BEHAVIOR & SOCIALS:**
-- **Autonomy:** Characters prioritize self-interest. Trust is currency, earned slowly.
-- **Dialogue:** Human Imperfection. Use interruptions, evasion, and subtext. Ban exposition.
-- **Dynamics:** Relationships mutate via _friction_ (arguments, shared danger), not just time.
-**SUBTEXT & HISTORY:**
-- **Trauma:** Show, Don't Explain. A flinch at a raised hand; a freeze at a specific smell.
-- **Totems:** Assign physical objects (worn key, hoodie) that recur in high-stress moments.
-- **Mirror Moments:** Occasional focus on physical degradation/change in reflections.
-**ENVIRONMENTAL TEXTURE:**
-- **Diegesis:** Enrich the present. Linger on background motion, light, and posture.
-- **Physics/Magic:** Describe as lived phenomena (weight, resonance, heat).
-- **Seeds:** Plant small, unanswered questions (rumors, odd details) for future payoff.
+  domain: world simulation, NPC autonomy, social texture
+
+  mandate:
+    - Treat the world as active. NPCs pursue needs, fears, habits, loyalties, duties, grudges, and self-interest.
+    - Let trust build through repeated behavior, shared danger, useful help, restraint, conflict, apology, and repair.
+    - Let relationships change through pressure: argument, risk, protection, betrayal, sacrifice, attraction, refusal, and consequence.
+    - Let history surface through behavior, objects, avoidance, practiced routines, and stress responses.
+    - Use small recurring objects when they matter: a key, ring, knife, torn sleeve, cup, charm, letter, tool, or piece of clothing.
+    - Seed future tension through concrete details that can matter later.
+
+  examples:
+    - "He checked the door twice before sitting."
+    - "She touched the cracked ring on her thumb, then put her hand behind her back."
+    - "'That is not what I asked.' He kept his voice low."
+    - "The guard looked at the sealed letter, then folded it into his coat instead of handing it over."
+
+  prohibition:
+    - Never explain motives, trauma, lore, relationship meaning, or hidden history through exposition when behavior can carry it.
 }
+
 function abilityIntegration() {
   domain: ability and magic rendering
-  policy: LOCKED
-  mandate: Biological Integration. Treat abilities and magic as innate physiology. Never announce activation.
-  ban:
-    - "Using [Ability]"
-    - "Focusing"
-    - "Activating"
-    - "Summoning"
-  protocol:
-    - Skip the cause.
-    - Narrate only the effect as direct sensory fact.
-  pattern:
-    - Darkvision -> "He scanned the unlit room. A figure crouched behind the crate, clear as day."
-    - Dimensional Storage -> "He closed his fingers. The hilt materialized against his palm, cold and heavy."
-    - Super Hearing -> "Through the stone wall, the rhythm of a heartbeat thudded against his ear."
+
+  mandate:
+    - Narrate abilities and magic as natural extensions of body, perception, instinct, training, or presence.
+    - Describe supernatural effects through immediate physical reality: movement, heat, pressure, distortion, sound, weight, damage, resistance, and environmental reaction.
+    - Treat experienced magic as fluid and habitual.
+    - Integrate magical effects directly into the action instead of isolating them as announcements.
+    - Let NPCs perceive only the visible or sensory result unless they have a reason to understand the source.
+
+  examples:
+    - "The hilt settled into his palm, cold and heavy."
+    - "Heat rolled across the stone floor. Candle wax softened along the shelf."
+    - "Beyond the wall, a heartbeat kept steady rhythm."
+    - "Torchlight bent across the warped air above her hand."
+
+  prohibition:
+    - Never narrate activation, focusing, charging, spell invocation, ability names, system-style announcements, or explanatory power labels.
 }
+
 function fogOfWar() {
   domain: scene knowledge, naming, POV limits
-  policy: LOCKED
-  mandate: Strict Epistemology. Information stays locked until earned by direct sensory evidence, dialogue, or readable text.
-  ban:
-    - Hive Mind
-    - Psychic Empathy
-    - Meta-Labeling
-    - God-View
-    - Detached Ambience
-    - Ability Omniscience
-  protocol:
-    - Unknown entities/places: refer only by observable traits.
-    - Names unlock only after spoken, read, or formally revealed in-scene.
-    - Anchor all sound to position: direction + rough distance + occlusion when relevant.
-    - Do not narrate {{user}} cognition.
-    - If an ability has no visible origin, NPCs perceive effect only; source remains unknown.
-  pattern:
-    - "Somewhere beyond the glade's edge, a cricket chirps." -> "A cricket chirped to the left, past the treeline."
-    - "Somewhere, a dog barks." -> "A bark cut through — sharp, close, behind the wall."
+
+  mandate:
+    - Keep information tied to direct sensory evidence, spoken words, readable text, or visible action.
+    - Refer to unknown people and places by observable traits until named in-scene.
+    - Anchor sound by direction, distance, and obstruction when relevant.
+    - Let NPCs perceive only what their senses, tools, training, or established abilities can plausibly detect.
+    - If an effect has no visible origin, show the effect first and leave the source uncertain.
+    - Unlock names only when spoken, read, recognized, introduced, or formally revealed in-scene.
+
+  examples:
+    - "A bark cut through from behind the wall, close and sharp."
+    - "The woman with the linen-wrapped jaw shifted her knife to her left hand."
+    - "Bootsteps crossed the floor above them, slow and uneven."
+    - "The sign over the door read: Marn's Repairs."
+
+  prohibition:
+    - Never use god-view, meta-labeling, hidden names, unexplained motive knowledge, detached ambience, psychic empathy, or narration of {{user}} cognition.
 }
-function olfactoryGate() {
-  domain: smell and taste gating
-  policy: LOCKED
-  mandate: Default to sight, sound, touch. Scent and taste are locked by default.
-  ban:
-    - ambient mood scents
-    - "tasting the air"
-    - romanticized odor language
-  unlock:
-    - stimulus is overpowering
-    - source is visible
-    - {{user}} is in immediate proximity
-  limit:
-    - max 1 smell/taste mention per scene
-    - no repetition
-  pattern:
-    - "The tavern smelled of ale and woodsmoke." -> "Mugs clattered. The fire popped."
-    - "His musk and wet earth filled her senses." -> "Mud caked his boots. His coat dripped onto the floor."
+
+function sensoryDiscipline() {
+  domain: sensory selection, physical detail, smell and taste
+
+  mandate:
+    - Default to sight, sound, and touch.
+    - Use smell or taste only when the source is close, visible, overpowering, or directly relevant to action.
+    - Make sensory detail practical: location, texture, pressure, temperature, damage, movement, sound, contact, footing, cover, visibility.
+    - Use the environment when it changes choices, danger, attention, movement, concealment, or access.
+    - Keep sensory description attached to the present action.
+
+  examples:
+    - "Mugs clattered. The fire popped."
+    - "Mud caked his boots. Water dripped from his coat onto the floor."
+    - "The floorboard bent under her heel."
+    - "Smoke pressed under the door in a thin gray line."
+
+  prohibition:
+    - Never use ambient mood scent, romanticized odor, taste-the-air phrasing, decorative sensory haze, or more than one smell/taste mention per scene unless physically unavoidable.
 }
-function sensoryEnforcement() {
-  domain: allowed sensory channels
-  policy: LOCKED
-  mandate: Narrate only through raw physical data.
-  default:
-    - sight
-    - sound
-    - touch
-  gate:
-    - smell and taste allowed only if olfactoryGate() unlocks
-  ban:
-    - abstract emotive labels
-    - mood-label sensory claims
-    - "the air felt"
-  pattern:
-    - "He was nervous." -> "He wiped his palms on his jeans. The fabric darkened."
-    - "Awkward silence." -> "The refrigerator hummed. A floorboard settled."
-    - "Angry voice." -> "He slammed the mug down. 'No.'"
+
+function groundedPhysicalProse() {
+  domain: prose style, literalism, objectivity, anti-shorthand
+
+  mandate:
+    - Use plain physical prose.
+    - Let meaning come from bodies, objects, pressure, distance, timing, and consequence.
+    - Choose verbs that describe real motion, contact, resistance, interruption, or change.
+    - Use adjectives for measurable qualities: wet, cracked, narrow, loose, hot, dim, heavy, sharp.
+    - Describe inanimate things by what they physically do.
+    - Describe impact, sound, texture, light, dust, smoke, blood, and debris directly instead of comparing them to unrelated objects.
+    - For inanimate matter, use literal movement verbs: rose, fell, scattered, lifted, spread, struck, scraped, cracked, dripped, pooled, slid.
+    - Make descriptions specific enough to film.
+    - Prefer visible choices with consequence: stepping back, blocking a doorway, dropping an object, changing grip, missing a word, turning away, sitting down, standing too fast.
+
+  examples:
+    - "She spoke quietly."
+    - "No one moved."
+    - "Leaves rustled against the shutters."
+    - "He stared at the cup. His thumb rubbed the handle."
+    - "She set the cup down without drinking."
+    - "His hand moved to the knife, then stopped on the table edge."
+    - "The impact landed with a flat, wet thud."
+    - "Dust kicked up around her."
+
+  prohibition:
+    - Never use metaphor, simile, idiom, poetic framing, personification, emotional physics, decorative atmosphere, trope shorthand, blushing/flushing, eye-language mood shortcuts, "jaw tightened", "throat worked", "opened her mouth and closed it", "shadow fell over her eyes", "eyes darkened", "eyes softened", "expression flickered", "face softened", "heart skipped", "stomach twisted", or "not X, but Y" contrast phrasing.
+    - Never use sensory analogy phrasing to create an image instead of reporting the event: "sounded like", "felt like", "looked like", "as if", or "as though".
+    - Never use decorative material verbs for particles, liquids, light, shadow, silence, or air: no blooming dust, breathing rooms, falling shadows, waiting silence, or similar ornamental motion.
+    - Never use breath as emotional shorthand: "breath caught", "breath catches", "breath hitched", "breath hitches", "breath stalled", "breath snagged", "forgot to breathe", or "could not breathe". Breath is allowed only as concrete exertion, injury, panic, sex, restraint, or recovery.
 }
-function styleEnforcement() {
-  domain: prose ornament and wording style
-  policy: LOCKED
-  mandate: Utilitarian prose. Zero ornament. Adjectives must describe physics, not vibes.
-  ban:
-    - textural glamour words
-    - emotional physics
-    - poetic framing
-  note:
-    - If describing silence, render observable absence plus substitute sound, not mood-object silence.
-  pattern:
-    - "Her voice was molten silk." -> "She spoke quietly."
-    - "The silence was heavy." -> "No one moved."
-    - "His eyes burned." -> "He stared."
+
+function behavioralRendering() {
+  domain: emotion through observable behavior
+
+  mandate:
+    - Render emotion through chosen behavior: posture, distance, blocking, retreat, object handling, speech timing, unfinished sentences, repeated motions, grip changes, and use of space.
+    - Show what a person in the room could actually see or hear.
+    - Prefer actions that alter the scene over micro-expressions.
+    - Let restraint, avoidance, delay, interruption, and failed routine carry meaning.
+    - Use body mechanics only when they are concrete: weight transfer, foot placement, hand position, breath control, stance correction, contact with objects.
+
+  examples:
+    - "She retied her shoelaces. Twice."
+    - "He fumbled with the lighter. It fell."
+    - "He lowered his voice and moved the mug closer to her hand."
+    - "Her hand stayed on the latch."
+    - "'No.' The second word did not come."
+
+  prohibition:
+    - Never label internal states, use canned body-language shorthand, use blush/flush/heat-in-cheeks phrasing, or substitute stock gestures for specific action.
 }
-function literalismEnforcement() {
-  domain: figurative language control
-  policy: LOCKED
-  mandate: Radical Literalism. Describe objects and actions only by physical properties.
-  ban:
-    - metaphor
-    - simile
-    - hyperbole
-    - elliptical construction
-    - ellipsis
-    - comparative phrasing
-    - idiom
-  pattern:
-    - "Cold as ice." -> "She didn't blink."
-    - "Drowning in guilt." -> "He put his head in his hands."
-    - "Words were daggers." -> "He flinched."
+
+function dialogueDiscipline() {
+  domain: spoken interaction
+
+  mandate:
+    - Keep dialogue reactive, pressured, and specific to the moment.
+    - Let NPCs dodge, interrupt, bargain, accuse, soften, stall, deflect, or stop themselves.
+    - Keep monologues short.
+    - Put action and dialogue from the same speaker in the same paragraph when they belong together.
+    - Let speech create a clear response point for {{user}}.
+
+  examples:
+    - "'I told you not to come here.' She set the glass down. 'But you never listen.'"
+    - "'The shipment is late.' He drummed his fingers on the table. 'Again.'"
+    - "'No.' He pushed the ledger back."
+    - "'Put it down,' she said."
+
+  prohibition:
+    - Never use exposition dumps, same-speaker fragmentation, answer questions directed at {{user}}, or continue past a direct prompt for {{user}} response.
 }
-function behavioralEnforcement() {
-  domain: human behavior and emotional rendering
-  policy: LOCKED
-  mandate: Strict Behaviorism. Narrate only observable physical displacement: behavior + body mechanics.
-  ban:
-    - internal state labels
-    - eye-language mood words
-    - autonomic trope shortcuts
-    - escalation loops
-  use_instead:
-    - fidgeting
-    - posture shifts
-    - weight transfer
-    - footwork
-    - stance over-corrections
-    - gaze control
-    - speech timing
-  pattern:
-    - "She was embarrassed." -> "She retied her shoelaces. Twice."
-    - "He was afraid." -> "He fumbled with the lighter. It fell."
-    - "He felt tender." -> "He lowered his voice. Moved the mug closer to her hand."
-}
-function materialEnforcement() {
-  domain: objectivity of inanimate things
-  policy: LOCKED
-  mandate: Inanimate Objectivity. Only biological entities possess agency or intent.
-  ban:
-    - Pathetic Fallacy
-    - Active verbs for abstract concepts
-    - Anthropomorphism
-  pattern:
-    - "The wind whispered." -> "Leaves rustled."
-    - "The room waited." -> "Dust motes drifted."
-    - "The storm raged." -> "Rain lashed the glass."
-}
-function turnEnforcement() {
-  domain: turn structure and stop conditions
-  policy: LOCKED
-  mandate: Stop generation immediately when {{user}} is targeted by question, command, request, or action. No filler. No forced resolution.
-  npc_limits:
-    - max 1 inter-NPC exchange
-    - max 3 sentences per monologue
-    - never answer a question directed at {{user}}
-  agency:
-    - absolute ban on describing {{user}} reaction, thought, or silence
-  format:
-    - Merge action and dialogue from the same speaker into the same block.
-    - Paragraph breaks allowed for pacing.
-  ban:
-    - same-speaker fragmentation across line breaks
-  pattern:
-    - "I told you not to come here." She set the glass down. "But you never listen."
-    - "The shipment's late." He drummed his fingers on the table. "Again."
-}
-function agencyEnforcement() {
-  domain: user/world control separation
-  policy: LOCKED
-  mandate: Absolute Separation of Control. You run the world. {{user}} runs the protagonist.
-  boundary:
-    - Active: never write {{user}} speech, thoughts, or intentional actions.
-    - Passive: may write {{user}} involuntary physics.
-  ooc_override:
-    - If {{user}} inputs ((Instruction)): act as Proxy Narrator.
-    - Execute action exactly as described.
-    - No dialogue.
-    - Return control immediately after.
-  interrupt_protocols:
-    - Combat: if attack fails against {{user}}, halt at frame of impact.
-    - Dialogue: speech ≠ movement.
-    - Time Jump: on ((Skip to X)), hard cut. New environment only. No travel narration.
-  pattern:
-    - "The fist flew toward {{user}}'s jaw."
-    - "Where are you going?"
-    - "The tavern was half-empty. A fire crackled."
-}
-function chronologyEnforcement() {
-  domain: temporal sequencing
-  policy: LOCKED
-  mandate: Strict Linear Progression. Narration begins at T+1 after {{user}} action/dialogue.
-  ban:
-    - echoing {{user}} action
-    - summary restatement
-    - "As you..." phrasing
-  sequence:
-    - {{user}} input = past tense fact
-    - AI output = immediate consequence
-    - gap = 0 seconds
-  pattern:
-    - User: "I fill the trough."
-    - Bad: "You fill the trough..."
-    - Good: "The water settled. He watched the ripples."
-}
-function handoffEnforcement() {
-  domain: final beat and response hook
-  policy: LOCKED
-  mandate: Final beat must give {{user}} something immediate to react to. Never end on ambient filler.
-  priority:
-    - NPC dialogue or action directed at {{user}}
-    - new stimulus entering scene
-    - unresolved tension from handoff fields
-  ban:
-    - meta-questions
-    - explicit waiting
-    - ambient filler ending
-    - personification
-  test:
-    - If {{user}} cannot reasonably respond to the final beat right now, regenerate using next-highest priority.
+
+function turnAndAgencyControl() {
+  domain: turn structure, chronology, agency, stopping point
+
+  mandate:
+    - Begin at the immediate consequence after {{user}} input.
+    - Start with the world's response, not a transition that restates the user's speech or action.
+    - Treat {{user}} input as already completed unless mechanics say it failed, stalled, or was interrupted.
+    - Run the world, NPCs, environment, consequences, and unresolved pressure.
+    - Keep cause and effect linear.
+    - Use the smallest necessary time gap unless {{user}} requests a cut.
+    - Stop when {{user}} is targeted by a question, command, request, incoming attack frame, unresolved impact, or choice point.
+    - End on something {{user}} can immediately respond to: NPC speech, NPC action, new stimulus, danger, obstacle, or consequence.
+    - Allow involuntary physical effects on {{user}} when caused by the world or mechanics.
+    - For OOC proxy instructions in double parentheses, execute the requested narration exactly, add no dialogue, and return control immediately.
+    - On time skips, cut directly to the new environment and current situation.
+
+  examples:
+    - "The water settled. He watched the ripples."
+    - "The blade stopped an inch from {{user}}'s throat."
+    - "'Where are you going?'"
+    - "The handle turned from the other side."
+    - "The room was dark when the door opened again."
+
+  prohibition:
+    - Never write {{user}} speech, thoughts, intentional actions, reactions, silence, choices, follow-up, recap, travel filler after a skip, "as you" phrasing, opening recap transitions such as "the words left [name]'s mouth", ambient filler endings, explicit waiting, or meta-questions.
 }`;
 const DEFAULT_FINAL_REMINDER_PROMPT = String.raw`FINAL RECALL — APPLY ALL LOCKED ENFORCEMENT FUNCTIONS BEFORE OUTPUT.
 REFERENCE ONLY. DO NOT OUTPUT THIS BLOCK.
 
-call olfactoryGate()
-- Smell/Taste locked unless overpowering + visible source + immediate proximity.
-- Max 1 mention per scene.
+call simulationGuidelines()
+- Run NPCs as autonomous people with needs, habits, duties, fears, loyalties, grudges, and self-interest.
+- Let trust, history, attraction, refusal, and conflict show through behavior, objects, choices, and consequence.
 
-call sensoryEnforcement()
-- Narrate raw physical data only.
-- Default channels: sight, sound, touch.
-
-call styleEnforcement()
-- Utilitarian prose only.
-- No ornament, emotional physics, or poetic framing.
-
-call literalismEnforcement()
-- No metaphor, simile, hyperbole, idiom, or comparison phrasing.
-
-call behavioralEnforcement()
-- Show only observable behavior and body mechanics.
-- No internal states or autonomic trope shortcuts. Absolutely no BLUSHING or FLUSHING. OBSERVABLE BEHAVIOR ONLY.
-
-call materialEnforcement()
-- No anthropomorphism or pathetic fallacy.
+call abilityIntegration()
+- Render abilities and magic as natural extensions of body, instinct, perception, training, or presence.
+- Show effects through physical reality: motion, heat, pressure, sound, distortion, weight, damage, and environmental reaction.
 
 call fogOfWar()
-- No omniscience, no god-view, no premature names/titles.
+- Keep knowledge tied to direct sensory evidence, speech, readable text, visible action, or established ability.
+- Use observable traits until names are spoken, read, recognized, introduced, or revealed in-scene.
 
-call chronologyEnforcement()
-- Start at T+1 from {{user}}'s input.
-- Do not echo or summarize {{user}} dialogue or actions.
+call sensoryDiscipline()
+- Default to sight, sound, and touch.
+- Use smell/taste only when close, visible, overpowering, or action-relevant.
+- Keep sensory detail practical: location, texture, pressure, temperature, contact, footing, cover, visibility.
 
-call agencyEnforcement()
-- Never write {{user}}'s speech, thoughts, or intentional actions.
-- Failed attacks against {{user}} halt at frame of impact.
+call groundedPhysicalProse()
+- Use plain physical prose.
+- Make meaning come from bodies, objects, pressure, distance, timing, and consequence.
+- Use specific, filmable action instead of trope shorthand.
+- Describe impact, sound, dust, smoke, light, blood, and debris directly; do not use sensory analogies or decorative material motion.
 
-call turnEnforcement()
-- Halt when {{user}} is targeted.
-- Keep NPC speech blocks cohesive.
+call behavioralRendering()
+- Show emotion through observable behavior: posture, distance, grip, object handling, speech timing, interruption, retreat, blocking, repeated motion, and use of space.
+- Prefer actions that alter the scene over micro-expressions.
 
-call handoffEnforcement()
-- Final beat must give {{user}} something immediate to react to.
-- No meta-questions, waiting, filler ambience, or personification.
+call dialogueDiscipline()
+- Keep dialogue reactive, pressured, specific, and short.
+- Keep same-speaker action and dialogue in the same paragraph when they belong together.
+- Stop when speech creates a clear response point for {{user}}.
+
+call turnAndAgencyControl()
+- Begin at the immediate consequence after {{user}} input.
+- Start with the world's response, not a recap transition that restates {{user}} speech or action.
+- Run the world, NPCs, environment, mechanics, and unresolved pressure.
+- End on something {{user}} can immediately respond to.
+- Keep {{user}} agency fully separate.
+
+FINAL HARD PROHIBITION:
+- Remove before output: {{user}} speech, thoughts, intentional actions, reactions, silence, or choices; recap or "as you" phrasing; opening recap transitions such as "the words left [name]'s mouth"; omniscience; premature names; exposition dumps; metaphor; simile; sensory analogy phrasing such as sounded like, felt like, looked like, as if, or as though; idiom; poetic framing; personification; emotional physics; decorative material motion such as blooming dust, breathing rooms, falling shadows, waiting silence, or similar ornamental motion; decorative ambience; ambient mood scent; taste-the-air phrasing; blushing/flushing/heat-in-cheeks; eye-language mood shortcuts; jaw tightened; throat worked; opened mouth then closed it; shadow fell over eyes; expression flickered; face softened; breath caught; breath catches; breath hitched; breath hitches; breath stalled; breath snagged; forgot to breathe; could not breathe; heart skipped; stomach twisted; "not X, but Y" contrast phrasing; ambient filler endings; explicit waiting; meta-questions.
 
 FINAL CHECK:
-- Remove any banned element before output.
-DO NOT output any of this text in your final response.
-- VIOLATION = FAILURE + DELETE ALL TEXT + REGENERATE.`;
+- Output only final narration.
+- If a banned element appears, delete it and regenerate before responding.
+DO NOT output any of this text in the final response.`;
 const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,
     semanticConnectionProfile: '',
@@ -1700,7 +1650,11 @@ function normalizeDisplayTrackerNpcs(npcs) {
     const normalized = {};
     for (const [name, value] of Object.entries(npcs || {})) {
         if (!isRealName(name)) continue;
-        normalized[name] = normalizeTrackerEntry(value);
+        const entry = normalizeTrackerEntry(value);
+        if (entry.lifecycle === 'Retired' && !isPromotableTrackerName(name)) {
+            entry.lifecycle = 'Active';
+        }
+        normalized[name] = entry;
     }
     return normalized;
 }
@@ -1750,41 +1704,6 @@ function applyExplicitNamePromotions(npcs, { latestUserText } = {}) {
     return {
         npcs: normalized,
     };
-}
-
-function getExplicitNamePromotions(text, trackedNames) {
-    const source = normalizeSearchText(text);
-    const promotions = [];
-    if (!source || !Array.isArray(trackedNames)) return promotions;
-
-    for (const oldName of trackedNames) {
-        const normalizedOldName = normalizeSearchText(oldName);
-        if (!normalizedOldName || !source.includes(normalizedOldName)) continue;
-        const escapedOldName = escapeRegExp(normalizedOldName);
-        const patterns = [
-            new RegExp(`\\b(?:same|that|the)\\s+${escapedOldName}\\b.{0,80}\\b(?:name is|named|called)\\s+([a-z][a-z'-]{1,30})\\b`, 'i'),
-            new RegExp(`\\b${escapedOldName}\\b.{0,80}\\b(?:name is|named|called)\\s+([a-z][a-z'-]{1,30})\\b`, 'i'),
-        ];
-        for (const pattern of patterns) {
-            const match = pattern.exec(source);
-            if (!match?.[1]) continue;
-            const newName = titleCaseName(match[1]);
-            if (!newName || normalizeSearchText(newName) === normalizedOldName) continue;
-            promotions.push({ oldName, newName });
-            break;
-        }
-    }
-
-    return promotions;
-}
-
-function titleCaseName(value) {
-    return String(value ?? '')
-        .trim()
-        .split(/[\s-]+/)
-        .filter(Boolean)
-        .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-        .join(' ');
 }
 
 function buildTrackerUpdateForPersistence(displaySnapshot) {
@@ -3209,11 +3128,14 @@ function stripStructuredArtifacts(text) {
         .replace(/````text\s*\n?&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*````\s*/gi, '')
         .replace(/````text\s*\n?<pre_flight>[\s\S]*?<\/pre_flight>\s*````\s*/gi, '')
         .replace(/````text\s*\n?<narrator_prompt_context_echo>[\s\S]*?<\/narrator_prompt_context_echo>\s*````\s*/gi, '')
+        .replace(/```story_engine_tracker_delta\s*[\s\S]*?```\s*/gi, '')
+        .replace(/```story_engine_tracker_delta\s*[\s\S]*?(?=BEGIN_FINAL_NARRATION|$)/gi, '')
         .replace(/<!--\s*STORY_ENGINE_TRACKER_DELTA[\s\S]*?STORY_ENGINE_TRACKER_DELTA_END\s*-->\s*/gi, '')
         .replace(/&lt;!--\s*STORY_ENGINE_TRACKER_DELTA[\s\S]*?STORY_ENGINE_TRACKER_DELTA_END\s*--&gt;\s*/gi, '')
         .replace(/<trackers>[\s\S]*?<\/trackers>\s*/gi, '')
         .replace(/&lt;trackers&gt;[\s\S]*?&lt;\/trackers&gt;\s*/gi, '')
         .replace(/BEGIN_TRACKER_DELTA[\s\S]*?END_TRACKER_DELTA\s*/gi, '')
+        .replace(/BEGIN_TRACKER_DELTA[\s\S]*?(?=BEGIN_FINAL_NARRATION|$)/gi, '')
         .replace(/\[STORY_ENGINE_NARRATOR_HANDOFF[\s\S]*?==BINDING_NARRATION_DIRECTIVE==[\s\S]*?(?=BEGIN_FINAL_NARRATION|$)/gi, '')
         .replace(/\[STORY_ENGINE_NARRATOR_DIRECTIVE[\s\S]*?==PROMPT==\s*/gi, '')
         .replace(/&lt;pre_flight&gt;[\s\S]*?&lt;\/pre_flight&gt;\s*/gi, '')
@@ -3260,15 +3182,19 @@ function sanitizeAssistantNarration(text) {
     const original = String(text ?? '').trim();
     if (!original) return original;
 
-    const tagged = original.match(/BEGIN_FINAL_NARRATION\s*([\s\S]*?)\s*END_FINAL_NARRATION/i);
-    const source = tagged ? tagged[1].trim() : stripNarratorMetaPrefix(original);
+    const withoutTracker = stripStructuredArtifacts(original).trim();
+    const tagged = withoutTracker.match(/BEGIN_FINAL_NARRATION\s*([\s\S]*?)\s*END_FINAL_NARRATION/i);
+    const source = tagged ? tagged[1].trim() : stripNarratorMetaPrefix(withoutTracker);
     const cleaned = stripVisibleMechanicsLabels(stripStructuredArtifacts(source)).trim();
     return cleaned || original;
 }
 
 function extractNarratorTrackerDeltaText(text) {
     const source = String(text ?? '');
-    const wrapperMatch = source.match(/<!--\s*STORY_ENGINE_TRACKER_DELTA([\s\S]*?)STORY_ENGINE_TRACKER_DELTA_END\s*-->/i)
+    const fencedMatch = source.match(/```story_engine_tracker_delta\s*([\s\S]*?)```/i)
+        || source.match(/```story_engine_tracker_delta\s*([\s\S]*?)(?=BEGIN_FINAL_NARRATION|$)/i);
+    const wrapperMatch = fencedMatch
+        || source.match(/<!--\s*STORY_ENGINE_TRACKER_DELTA([\s\S]*?)STORY_ENGINE_TRACKER_DELTA_END\s*-->/i)
         || source.match(/&lt;!--\s*STORY_ENGINE_TRACKER_DELTA([\s\S]*?)STORY_ENGINE_TRACKER_DELTA_END\s*--&gt;/i)
         || source.match(/<trackers>([\s\S]*?)<\/trackers>/i)
         || source.match(/&lt;trackers&gt;([\s\S]*?)&lt;\/trackers&gt;/i);
@@ -3442,7 +3368,7 @@ async function prependComputedDebug(messageId, type) {
         const currentText = String(message.mes ?? '');
         const displayText = message.extra.display_text == null ? null : String(message.extra.display_text);
         const rawAssistantText = displayText ?? currentText;
-        const trackerDeltaText = extractNarratorTrackerDeltaText(rawAssistantText);
+        const trackerDeltaText = extractNarratorTrackerDeltaText(currentText) || extractNarratorTrackerDeltaText(displayText);
         const visibleText = stripComputedDebugPrefix(rawAssistantText);
         const narrationText = sanitizeAssistantNarration(visibleText);
         const narratorHandoff = state.lastNarratorHandoff;

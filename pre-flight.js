@@ -256,9 +256,9 @@ function narratorModelInstruction() {
         'If chat history, character tone, relationship vibes, or prior narration conflict with the prompt, obey the prompt.',
         'Do not output mechanics, labels, analysis, bullets, preamble, or audit text.',
         'Do not narrate voluntary {{user}} actions, thoughts, feelings, decisions, counterattacks, or dialogue beyond the explicit user input.',
-        'Return final in-character narration wrapped with BEGIN_FINAL_NARRATION and END_FINAL_NARRATION, then one hidden tracker delta block inside an HTML comment.',
-        'The tracker delta must still contain BEGIN_TRACKER_DELTA and END_TRACKER_DELTA inside the HTML comment wrapper.',
-        'The user sees only the final narration; the HTML comment hides the tracker delta while streaming and the extension strips it before saving display text.',
+        'First output exactly one fenced tracker delta block using ```story_engine_tracker_delta, then return final in-character narration wrapped with BEGIN_FINAL_NARRATION and END_FINAL_NARRATION.',
+        'The tracker delta must contain BEGIN_TRACKER_DELTA and END_TRACKER_DELTA inside that fenced block.',
+        'The user sees only the final narration; the extension hides and strips the fenced tracker block before saving display text.',
     ].join('\n');
 }
 
@@ -694,10 +694,11 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const inflictedUserInstruction = inflictedUserInjuryGuide(handoff.aggressionResults);
     const inflictedAggressionNpcInstruction = inflictedAggressionNpcInjuryGuide(handoff.aggressionResults);
     const injuryInstruction = `${inflictedNpcInstruction}${inflictedUserInstruction}${inflictedAggressionNpcInstruction}`;
+    const aggressionTargetLock = aggressionTargetLockGuide(handoff.aggressionResults);
     const trackerInstruction = trackerDeltaInstruction();
 
     if (aggressionText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} ${aggressionGuide}${naturalProactiveNote} Do not invent any user follow-up.${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${aggressionTargetLock} ${aggressionGuide}${naturalProactiveNote} Do not invent any user follow-up.${nameInstruction}${trackerInstruction}`;
     }
 
     if (intimacyBoundaryGuide.mode === 'DENY' && resolution.boundaryViolationExplicit !== 'Y') {
@@ -733,7 +734,7 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
 
 function trackerDeltaInstruction() {
     return [
-        '\n\nAfter END_FINAL_NARRATION, output exactly one hidden tracker delta block inside the HTML comment wrapper shown below.',
+        '\n\nBefore BEGIN_FINAL_NARRATION, output exactly one fenced tracker delta block using the exact fence shown below. Then output the final narration.',
         TRACKER_DELTA_CONTRACT,
         'Use this exact shape:',
         TRACKER_DELTA_TEMPLATE,
@@ -868,6 +869,18 @@ function inflictedAggressionNpcInjuryGuide(aggressionResults) {
     return ' ' + injuries.map(({ name, injury }) =>
         `${valueOrNone(injury.target)} receives ${valueOrNone(injury.condition)} condition from ${valueOrNone(name)}${injuryDetailPhrase(injury)}. This injury is mechanically persistent; choose the concrete wound and affected body area from the NPC attack context, but do not exceed ${valueOrNone(injury.severity)} severity. Let that narrated injury limit later offense, defense, movement, focus, or other affected actions according to severity.`,
     ).join(' ');
+}
+
+function aggressionTargetLockGuide(aggressionResults) {
+    const entries = Object.entries(aggressionResults ?? {})
+        .filter(([, value]) => value?.InflictedTargetInjury?.targetType === 'npc' || value?.AttackType === 'CompanionAttack');
+    if (!entries.length) return '';
+    const parts = entries.map(([name, value]) => {
+        const target = valueOrNone(value?.ProactivityTarget || value?.InflictedTargetInjury?.target);
+        if (isNoneText(target)) return '';
+        return `${valueOrNone(name)}'s only resolved attack target this beat is ${target}; do not narrate ${valueOrNone(name)} landing a hit, injury, disable, or resolved attack against any other target unless that target has its own listed Aggression result.`;
+    }).filter(Boolean);
+    return parts.length ? ` ${parts.join(' ')}` : '';
 }
 
 function injuryDetailPhrase(injury) {

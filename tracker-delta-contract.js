@@ -2,10 +2,12 @@ export const TRACKER_DELTA_START = 'BEGIN_TRACKER_DELTA';
 export const TRACKER_DELTA_END = 'END_TRACKER_DELTA';
 export const TRACKER_DELTA_WRAPPER_START = '<!-- STORY_ENGINE_TRACKER_DELTA';
 export const TRACKER_DELTA_WRAPPER_END = 'STORY_ENGINE_TRACKER_DELTA_END -->';
+export const TRACKER_DELTA_FENCE = '```story_engine_tracker_delta';
+export const TRACKER_DELTA_FENCE_END = '```';
 
 export const TRACKER_DELTA_CONTRACT = [
     'STRICT SAME-RUN TRACKER DELTA CONTRACT:',
-    '- After writing the final narration, extract only explicit state changes that actually appear in that final narration.',
+    '- Before visible narration, output one tracker delta block based only on explicit state changes that will actually appear in the final narration.',
     '- The tracker block is tracker-only. Do not resolve extra mechanics, relationship, rolls, names, proactivity, or outcomes inside it.',
     '- Use semantic reading, not keyword matching. Identify who is affected, what changed, and whether the change persists beyond the instant of narration.',
     '- Do not infer hidden consequences. Do not add momentary pain, effort, hesitation, fear, impact, or flavor as wounds/status.',
@@ -26,10 +28,10 @@ export const TRACKER_DELTA_CONTRACT = [
     '- NPC entries are only for named or currently tracked NPCs with explicit condition, wound, status, visible gear, or stable personalitySummary changes. NPC inventory is not tracked.',
     '- If TrackerUpdateEngine.NPC.count > 0, every NPC[index] entry must include NPC, personalitySummary, condition, woundsAdd, woundsRemove, statusAdd, statusRemove, gearAdd, and gearRemove.',
     '- If uncertain, output (none).',
-    '- Output exactly the compact block. No markdown. No prose. No JSON.',
+    '- Inside the fenced tracker block, output exactly the compact tracker lines. No prose. No JSON. No extra labels.',
 ].join('\n');
 
-export const TRACKER_DELTA_TEMPLATE = `${TRACKER_DELTA_WRAPPER_START}
+export const TRACKER_DELTA_TEMPLATE = `${TRACKER_DELTA_FENCE}
 ${TRACKER_DELTA_START}
 TrackerUpdateEngine.User.condition=unchanged
 TrackerUpdateEngine.User.woundsAdd=(none)
@@ -55,4 +57,4 @@ TrackerUpdateEngine.NPC[0].statusRemove=(none)
 TrackerUpdateEngine.NPC[0].gearAdd=(none)
 TrackerUpdateEngine.NPC[0].gearRemove=(none)
 ${TRACKER_DELTA_END}
-${TRACKER_DELTA_WRAPPER_END}`;
+${TRACKER_DELTA_FENCE_END}`;
