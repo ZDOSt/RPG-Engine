@@ -412,7 +412,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     audit.push(`2.4 hasStakes=${hasStakes}`);
 
     const sanitizedTargets = sanitizeTargets(identityTargets, targetClassifier, { hasStakes, goal, boundaryViolationExplicit });
-    const targets = repairLivingOppositionTargets(sanitizedTargets, targetClassifier, { hasStakes, semantic, goal, boundaryViolationExplicit }, audit);
+    const directedCompanionTargets = repairDirectedCompanionAttackOppTargets(sanitizedTargets, ledger, trackerSnapshot, semantic, context, audit);
+    const targets = repairLivingOppositionTargets(directedCompanionTargets, targetClassifier, { hasStakes, semantic, goal, boundaryViolationExplicit }, audit);
     audit.push(`2.4d identifyTargets.final=${formatTargets(targets)}`);
     if (!sameTargets(rawTargets, targets)) {
         audit.push(`2.4e deterministicTargetSanitizer=${compact({
@@ -681,17 +682,18 @@ function runRelationships(ledger, trackerSnapshot, resolutionPacket, audit, refe
         audit.push(`3.3k currentRapport=${currentRapport}`);
 
         const outcomeKey = String(resolutionPacket.Outcome || 'no_roll');
-        const stakeReferee = resolveStakeChangeByOutcome(npc, sem, resolutionPacket);
-        const benefitReferee = applyMeaningfulBenefitReferee(npc, resolutionPacket, stakeReferee.value, {
+        const relationshipContext = {
             ...sem,
             identifyGoal: resolutionSemantic.identifyGoal,
             identifyChallenge: resolutionSemantic.identifyChallenge,
             explicitMeans: resolutionSemantic.explicitMeans,
-        });
+        };
+        const stakeReferee = resolveStakeChangeByOutcome(npc, relationshipContext, resolutionPacket);
+        const benefitReferee = applyMeaningfulBenefitReferee(npc, resolutionPacket, stakeReferee.value, relationshipContext);
         const stakeChange = benefitReferee.value;
         const npcStakes = resolutionPacket.STAKES === 'Y' && ['benefit', 'harm'].includes(stakeChange) ? 'Y' : 'N';
         const auditInteraction = npcStakes === 'Y' && stakeChange === 'benefit' ? 'Y' : 'N';
-        const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, sem);
+        const routedTarget = routeDispositionTarget(npc, resolutionPacket, auditInteraction, relationshipContext);
         const boundaryPressureResult = applyPhysicalBoundaryPressure(npc, resolutionPacket, {
             currentDisposition,
         });
@@ -1755,6 +1757,13 @@ function repairLivingOppositionTargets(targets, classifier, options = {}, audit)
 
     const livingActionTarget = firstReal(repaired.ActionTargets.filter(name => classifier.isLiving(name)));
     if (!livingActionTarget) return repaired;
+    if (isCooperativeAidAction(options.semantic, options.goal)) {
+        audit?.push(`2.4f cooperativeAidNoLivingOppositionRepair=${compact({
+            hardRule: 'stakes-bearing cooperative aid/treatment to a living ActionTarget does not make that helped NPC the opposition',
+            target: livingActionTarget,
+        })}`);
+        return repaired;
+    }
 
     repaired.OppTargets.NPC = unique([...repaired.OppTargets.NPC, livingActionTarget]);
     audit?.push(`2.4f deterministicLivingOppositionRepair=${compact({
@@ -1762,6 +1771,78 @@ function repairLivingOppositionTargets(targets, classifier, options = {}, audit)
         target: livingActionTarget,
     })}`);
     return repaired;
+}
+
+function repairDirectedCompanionAttackOppTargets(targets, ledger, trackerSnapshot, semantic, context, audit) {
+    const repaired = {
+        ActionTargets: toRealArray(targets.ActionTargets),
+        OppTargets: {
+            NPC: toRealArray(targets.OppTargets?.NPC),
+            ENV: toRealArray(targets.OppTargets?.ENV),
+        },
+        BenefitedObservers: toRealArray(targets.BenefitedObservers),
+        HarmedObservers: toRealArray(targets.HarmedObservers),
+    };
+    const latestUserText = relationshipText(getLatestUserTextFromContext(context));
+    const companionCommands = repaired.ActionTargets
+        .map(name => ({ name, command: directedCompanionCommandText(name, latestUserText) }))
+        .filter(item => item.command && isDirectedCompanionAttackCommandText(item.command));
+    const companionTargets = companionCommands.map(item => item.name);
+    if (!companionTargets.length) return repaired;
+
+    const source = [
+        ...companionCommands.map(item => item.command),
+        semanticSourceText(semantic),
+    ].filter(Boolean).join(' ').toLowerCase();
+    const hostileTarget = resolveHostileKnownTargetFromText(source, ledger, trackerSnapshot, companionTargets);
+    if (!hostileTarget) return repaired;
+    if (toRealArray(repaired.OppTargets.NPC).some(name => sameName(name, hostileTarget))) return repaired;
+
+    repaired.OppTargets.NPC = unique([...repaired.OppTargets.NPC, hostileTarget]);
+    audit?.push(`2.4f.1 directedCompanionAttackOppRepair=${compact({
+        hardRule: 'explicit companion attack command may name the hostile target in user text even when semantic OppTargets omitted it',
+        companionTargets,
+        target: hostileTarget,
+    })}`);
+    return repaired;
+}
+
+function resolveHostileKnownTargetFromText(source, ledger, trackerSnapshot, excludedNames = []) {
+    const excluded = new Set(toRealArray(excludedNames).map(normalizeNameKey));
+    const candidates = new Map();
+    for (const [name, entry] of Object.entries(trackerSnapshot || {})) {
+        if (excluded.has(normalizeNameKey(name)) || !trackerEntryLooksHostile(entry)) continue;
+        candidates.set(normalizeNameKey(name), { NPC: name, ...normalizeTrackerEntry(entry) });
+    }
+
+    const hostile = Array.from(candidates.values());
+    const exact = hostile.find(item => sourceMentionsNpcOrAlias(source, item));
+    if (exact) return exact.NPC;
+    return hostile.length === 1 && hasGenericHostileCommandTarget(source) ? hostile[0].NPC : null;
+}
+
+function hasGenericHostileCommandTarget(source) {
+    return /\b(?:enemy|foe|hostile|attacker|raider|bandit|guard|ogre|orc|bear|monster|creature|beast|threat|whoever|whatever|him|her|them|it)\b/.test(String(source || '').toLowerCase());
+}
+
+function trackerEntryLooksHostile(entry) {
+    const normalized = normalizeTrackerEntry(entry || {});
+    const fin = normalized.currentDisposition || { B: 2, F: 2, H: 2 };
+    return Number(fin.H || 0) >= 3
+        || normalized.dominantLock === 'HOSTILITY'
+        || String(normalized.personalitySummary || '').toLowerCase().includes('hostile');
+}
+
+function isCooperativeAidAction(semantic, goal) {
+    const source = semanticSourceText({ ...semantic, identifyGoal: goal });
+    if (!source) return false;
+    if (hasCombatActionLanguage(source) || hasDirectBodilyAggression(source) || isBodyBoundaryPressure(source) || isObjectBoundaryContest(source)) {
+        return false;
+    }
+    if (/\b(?:ask|asks|asking|question|questions|questioning|interview|interviews|interviewing|persuad\w*|convinc\w*|haggl\w*|bargain\w*|negotiat\w*|press(?:es|ed|ing)?|pressure|intimidat\w*|threaten\w*|coerc\w*)\b/.test(source)) {
+        return false;
+    }
+    return /\b(?:aid|aids|aiding|help|helps|helping|heal|heals|healing|cure|cures|curing|treat|treats|treating|first[-\s]?aid|bandage|bandages|bandaged|bandaging|binds?\s+(?:the\s+)?wound|dress(?:es|ed|ing)?\s+(?:the\s+)?wound|stabiliz(?:e|es|ed|ing)|medicine|medic|splint|splints|splinted|splinting|set\s+(?:the\s+)?bone|carry|carries|carried|rescue|rescues|rescued|rescuing|pull\s+(?:him|her|them|[a-z]+)\s+(?:clear|free|out)|drag\s+(?:him|her|them|[a-z]+)\s+(?:clear|free|out)|shield|protect|comfort|steady|steadies|support)\b/.test(source);
 }
 
 function defaultLivingOppStatForChallenge(semantic, goal) {
@@ -2971,7 +3052,7 @@ function detectDirectedCompanionAttackTarget(handoff, resolutionPacket, latestUs
     const source = directedCompanionCommandText(handoff?.NPC, latestUserText);
     if (!source) return null;
     if (!isDirectedCompanionAttackCommandText(source)) return null;
-    return resolveFriendlyCrisisAttackTarget(handoff, { resolutionPacket, handoffs });
+    return resolveFriendlyCrisisAttackTarget(handoff, { resolutionPacket, handoffs, commandText: source });
 }
 
 function detectDirectedCompanionDefensiveCommand(handoff, latestUserText) {
@@ -2994,7 +3075,7 @@ function directedCompanionCommandText(npc, text) {
     let quoteMatch;
     while ((quoteMatch = quotePattern.exec(source)) !== null) {
         const quoted = quoteMatch[1] || '';
-        if (new RegExp(`\\b${namePattern}\\b`, 'i').test(quoted)) {
+        if (segmentDirectlyAddressesNpc(quoted, namePattern)) {
             return relationshipText(quoted);
         }
     }
@@ -3005,7 +3086,7 @@ function directedCompanionCommandText(npc, text) {
     const matches = [];
     for (let index = 0; index < segments.length; index += 1) {
         const segment = segments[index];
-        if (!new RegExp(`\\b${namePattern}\\b`, 'i').test(segment)) continue;
+        if (!segmentDirectlyAddressesNpc(segment, namePattern)) continue;
         matches.push(segment);
         const next = segments[index + 1] || '';
         if (/^\s*(?:if|when|should|stop|keep|cover|protect|guard|block|intercept|hit|attack|strike|shoot|rush|charge)\b/i.test(next)) {
@@ -3014,6 +3095,16 @@ function directedCompanionCommandText(npc, text) {
     }
     if (!matches.length) return '';
     return relationshipText(matches.join(' '));
+}
+
+function segmentDirectlyAddressesNpc(segment, namePattern) {
+    const source = relationshipText(segment);
+    if (!source) return false;
+    const commandCue = '(?:attack|attacks|attacked|attacking|hit|hits|hitting|strike|strikes|struck|striking|smash|smashes|smashed|smashing|slam|slams|slammed|slamming|stab|stabs|stabbed|stabbing|slash|slashes|slashed|slashing|punch|punches|punched|punching|kick|kicks|kicked|kicking|maul|mauls|mauled|mauling|flank|flanks|flanked|flanking|charge|charges|charged|charging|rush|rushes|rushed|rushing|cut|cuts|cutting|chop|chops|chopped|chopping|smite|smites|smited|smoting|shoot|shoots|shot|shooting|fire|fires|fired|firing|clobber|clobbers|clobbered|clobbering|bash|bashes|bashed|bashing|clamp|clamps|clamped|clamping|drive|drives|drove|driving|stop|stops|stopped|stopping|keep|hold|pin|force|cover|protect|guard|block|intercept|shield|help|save)';
+    const directAddress = new RegExp(`^\\s*(?:hey\\s+|yo\\s+)?${namePattern}\\b\\s*(?:[,!:;]|\\s+).{0,160}\\b${commandCue}\\b`, 'i');
+    if (directAddress.test(source)) return true;
+    const speechCommand = new RegExp(`\\b(?:tell|tells|told|order|orders|ordered|command|commands|commanded|ask|asks|asked|signal|signals|signaled|gesture|gestures|gestured|shout|shouts|shouted|yell|yells|yelled|call|calls|called)\\s+(?:to\\s+)?${namePattern}\\b.{0,160}\\b(?:to\\s+)?${commandCue}\\b`, 'i');
+    return speechCommand.test(source);
 }
 
 function isDirectedCompanionDefensiveCommandText(text) {
@@ -3374,11 +3465,15 @@ function remapPartnerInitiativeForContext(tag, context, die, handoff, engineCont
 function resolveFriendlyCrisisAttackTarget(handoff, context = {}) {
     const packet = context.resolutionPacket || {};
     const actingNpc = handoff?.NPC;
+    const commandTarget = resolveCommandTextHostileTarget(actingNpc, context);
+    if (commandTarget) return commandTarget;
     const opposedTarget = toRealArray(packet.OppTargets?.NPC)
         .find(name => isValidFriendlyAttackTarget(name, actingNpc));
     if (opposedTarget) return opposedTarget;
-    return toRealArray(packet.ActionTargets)
+    const actionTarget = toRealArray(packet.ActionTargets)
         .find(name => isValidHostileFriendlyAttackFallback(name, actingNpc, context));
+    if (actionTarget) return actionTarget;
+    return null;
 }
 
 function isValidFriendlyAttackTarget(name, actingNpc) {
@@ -3398,6 +3493,72 @@ function isHostileHandoffTarget(name, handoffs = []) {
         || handoff.Lock === 'HATRED'
         || handoff.Behavior === 'HATRED'
         || handoff.DominantLock === 'HOSTILITY';
+}
+
+function resolveCommandTextHostileTarget(actingNpc, context = {}) {
+    const hostile = (context.handoffs || [])
+        .filter(item => isValidFriendlyAttackTarget(item?.NPC, actingNpc) && isHostileHandoffTarget(item?.NPC, context.handoffs));
+    if (!hostile.length) return null;
+
+    const source = relationshipText(context.commandText || '').toLowerCase();
+    const exact = hostile.find(item => sourceMentionsNpcOrAlias(source, item));
+    if (exact) return exact.NPC;
+    return hostile.length === 1 ? hostile[0].NPC : null;
+}
+
+function sourceMentionsNpcOrAlias(source, handoff) {
+    const text = String(source || '').toLowerCase();
+    const npc = String(handoff?.NPC || '').trim();
+    if (!text || !npc) return false;
+    const aliases = [
+        npc,
+        npc.split(/\s+/)[0],
+        ...trackerAliasTerms(handoff),
+    ].filter(item => String(item || '').trim().length >= 3);
+    if (/^raider\d+$/i.test(npc)) {
+        const index = Number(String(npc).match(/\d+/)?.[0] || 0);
+        if (index >= 1) aliases.push(`raider ${index}`, `raider${index}`);
+        if (index === 1) aliases.push('knife raider', 'knife-raider', 'knife-wielder', 'knife wielder');
+        if (index === 2) aliases.push('axe raider', 'axe-raider', 'axe-man', 'axe man', 'axeman');
+    }
+    return unique(aliases).some(alias => new RegExp(`\\b${escapeRegExp(String(alias).toLowerCase())}\\b`, 'i').test(text));
+}
+
+function trackerAliasTerms(handoff) {
+    const text = [
+        handoff?.PersonalitySummary,
+        ...(Array.isArray(handoff?.Gear) ? handoff.Gear : []),
+        ...(Array.isArray(handoff?.Wounds) ? handoff.Wounds : []),
+        ...(Array.isArray(handoff?.StatusEffects) ? handoff.StatusEffects : []),
+    ].filter(Boolean).join(' ').toLowerCase();
+    const aliases = [];
+    const patterns = [
+        /\baxe[-\s]?man\b/g,
+        /\baxe[-\s]?raider\b/g,
+        /\bknife[-\s]?wielder\b/g,
+        /\bknife[-\s]?raider\b/g,
+        /\bblade[-\s]?wielder\b/g,
+        /\bclub[-\s]?bearer\b/g,
+        /\bspear[-\s]?carrier\b/g,
+        /\bsword[-\s]?fighter\b/g,
+        /\braider\b/g,
+        /\bogre\b/g,
+        /\borc\b/g,
+        /\bguard\b/g,
+        /\bmonster\b/g,
+        /\bbear\b/g,
+    ];
+    for (const pattern of patterns) {
+        for (const match of text.matchAll(pattern)) aliases.push(match[0]);
+    }
+    for (const gear of Array.isArray(handoff?.Gear) ? handoff.Gear : []) {
+        const item = String(gear || '').toLowerCase();
+        if (/\baxe\b/.test(item)) aliases.push('axe-man', 'axe man', 'axeman', 'axe raider', 'axe-raider');
+        if (/\bknife|dagger\b/.test(item)) aliases.push('knife-wielder', 'knife wielder', 'knife raider', 'knife-raider');
+        if (/\bspear\b/.test(item)) aliases.push('spear-carrier', 'spear carrier');
+        if (/\bclub|mace\b/.test(item)) aliases.push('club-bearer', 'club bearer');
+    }
+    return aliases;
 }
 
 function normalizeRomanceStyle(value) {

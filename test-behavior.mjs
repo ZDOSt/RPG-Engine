@@ -2035,6 +2035,128 @@ const tests = [
     },
   },
   {
+    name: '12j1a.1 directed ally attack resolves named hostile fallback when semantic OppTargets omitted',
+    run() {
+      const tracker = {
+        Seraphina: trackerEntry({
+          currentDisposition: { B: 4, F: 1, H: 1 },
+          establishedRelationship: 'Y',
+          currentCoreStats: { Rank: 'Trained', MainStat: 'PHY', PHY: 7, MND: 5, CHA: 5 },
+        }),
+        Raider2: trackerEntry({
+          currentDisposition: { B: 1, F: 2, H: 4 },
+          currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 4, MND: 2, CHA: 2 },
+          personalitySummary: 'axe-man raider carrying a heavy axe',
+          gear: ['heavy axe'],
+        }),
+        Darai: trackerEntry({ currentDisposition: { B: 2, F: 3, H: 2 } }),
+      };
+      const randoms = [
+        nthRandomForDie(10, 20),
+        nthRandomForDie(10, 20),
+        ...Array(5).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(88, 100),
+        nthRandomForDie(16, 20),
+        nthRandomForDie(8, 20),
+      ];
+      const report = runCaseWithRandoms({
+        userText: 'I do not attack. I point at the axe-man and shout, "Seraphina, take the axe-man down now. Hit him before he can move."',
+        tracker,
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'OrderAllyAttack',
+            identifyChallenge: 'command Seraphina to attack the axe-man threatening Darai',
+            explicitMeans: 'Seraphina, take the axe-man down now. Hit him before he can move.',
+            identifyTargets: {
+              ActionTargets: ['Seraphina'],
+              OppTargets: { NPC: [], ENV: [] },
+              BenefitedObservers: ['Darai'],
+              HarmedObservers: [],
+            },
+            hasStakes: true,
+            actionCount: ['command'],
+            mapStats: { USER: 'CHA', OPP: 'ENV' },
+            activeHostileThreat: true,
+          },
+          relationshipEngine: [relationship('Seraphina'), relationship('Raider2'), relationship('Darai')],
+          proactivitySemantic: { cap: 3 },
+        }),
+      }, randoms);
+      const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
+      assert.equal(proactive.Proactive, 'Y');
+      assert.equal(proactive.CompanionInitiativeTag, 'Companion_Attack');
+      assert.equal(proactive.ProactivityTarget, 'Raider2');
+      assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.AttackType, 'CompanionAttack');
+      assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Raider2');
+      assert.match(prompt(report), /Seraphina: companion attack against Raider2/);
+    },
+  },
+  {
+    name: '12j1a.2 directed ally attack command target overrides unrelated semantic OppTarget',
+    run() {
+      const tracker = {
+        Seraphina: trackerEntry({
+          currentDisposition: { B: 4, F: 1, H: 1 },
+          establishedRelationship: 'Y',
+          currentCoreStats: { Rank: 'Trained', MainStat: 'PHY', PHY: 7, MND: 5, CHA: 5 },
+        }),
+        Ogre: trackerEntry({
+          currentDisposition: { B: 1, F: 3, H: 3 },
+          currentCoreStats: { Rank: 'Elite', MainStat: 'PHY', PHY: 6, MND: 2, CHA: 2 },
+          personalitySummary: 'scarred ogre pressing Darai against the pillar',
+        }),
+        Raider2: trackerEntry({
+          currentDisposition: { B: 1, F: 2, H: 4 },
+          currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 4, MND: 2, CHA: 2 },
+          personalitySummary: 'axe raider carrying a heavy axe',
+          gear: ['heavy axe'],
+        }),
+        Darai: trackerEntry({ currentDisposition: { B: 1, F: 3, H: 2 } }),
+      };
+      const randoms = [
+        nthRandomForDie(15, 20),
+        nthRandomForDie(2, 20),
+        ...Array(6).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(88, 100),
+        nthRandomForDie(16, 20),
+        nthRandomForDie(8, 20),
+      ];
+      const report = runCaseWithRandoms({
+        userText: 'I do not attack. I back toward Darai and shout, "Seraphina, take the axe raider down now. Hit him before he can move."',
+        tracker,
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'OrderAllyAttack',
+            identifyChallenge: 'shout a command to Seraphina to take down the axe raider',
+            explicitMeans: 'Seraphina, take the axe raider down now. Hit him before he can move.',
+            identifyTargets: {
+              ActionTargets: ['Seraphina'],
+              OppTargets: { NPC: ['Ogre'], ENV: [] },
+              BenefitedObservers: ['Darai'],
+              HarmedObservers: [],
+            },
+            hasStakes: true,
+            actionCount: ['command'],
+            mapStats: { USER: 'CHA', OPP: 'CHA' },
+            activeHostileThreat: true,
+          },
+          relationshipEngine: [relationship('Seraphina'), relationship('Ogre'), relationship('Raider2'), relationship('Darai')],
+          proactivitySemantic: { cap: 3 },
+        }),
+      }, randoms);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['Ogre', 'Raider2']);
+      const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
+      assert.equal(proactive.Proactive, 'Y');
+      assert.equal(proactive.CompanionInitiativeTag, 'Companion_Attack');
+      assert.equal(proactive.ProactivityTarget, 'Raider2');
+      assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.AttackType, 'CompanionAttack');
+      assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Raider2');
+      assert.match(prompt(report), /Seraphina: companion attack against Raider2/);
+      assert.match(prompt(report), /Seraphina's only resolved attack target this beat is Raider2/i);
+      assert.equal(auditIncludes(report, 'directedCompanionAttackOppRepair'), true);
+    },
+  },
+  {
     name: '12j1b companion stop command does not borrow later user attack wording',
     run() {
       const tracker = {
@@ -3460,6 +3582,95 @@ const tests = [
         }),
       });
       assert.equal(report.finalNarrativeHandoff.npcHandoffs[0].Target, 'Bond');
+    },
+  },
+  {
+    name: '14a hostile direct/opposed target cannot receive Bond from generic success benefit',
+    run() {
+      const stakes = emptyStakeMap('none');
+      stakes.success = 'benefit';
+      const report = runCase({
+        userText: 'I step between Darai and the ogre, forcing the ogre back long enough for Darai to move.',
+        dice: [18, 8, 1, 1, 1, 1, 1, 1],
+        tracker: {
+          Ogre: trackerEntry({ currentDisposition: { B: 1, F: 2, H: 4 }, dominantLock: 'HOSTILITY' }),
+          Darai: trackerEntry({ currentDisposition: { B: 2, F: 3, H: 2 } }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'ProtectDaraiFromOgre',
+            identifyChallenge: 'step between Darai and the ogre and force the ogre back',
+            explicitMeans: 'interpose against the ogre to protect Darai',
+            identifyTargets: {
+              ActionTargets: ['Ogre'],
+              OppTargets: { NPC: ['Ogre'], ENV: [] },
+              BenefitedObservers: ['Darai'],
+              HarmedObservers: [],
+            },
+            hasStakes: true,
+            actionCount: ['interpose'],
+            mapStats: { USER: 'PHY', OPP: 'PHY' },
+            classifyHostilePhysicalIntent: false,
+            classifyPhysicalBoundaryPressure: true,
+          },
+          relationshipEngine: [
+            relationship('Ogre', { auditInteraction: true, stakeChangeByOutcome: stakes }),
+            relationship('Darai', { auditInteraction: true, stakeChangeByOutcome: stakes }),
+          ],
+        }),
+      });
+      const ogre = report.finalNarrativeHandoff.npcHandoffs.find(item => item.NPC === 'Ogre');
+      const darai = report.finalNarrativeHandoff.npcHandoffs.find(item => item.NPC === 'Darai');
+      assert.notEqual(ogre.Target, 'Bond');
+      assert.equal(ogre.Target, 'Hostility');
+      assert.equal(ogre.NPC_STAKES, 'Y');
+      assert.equal(darai.Target, 'Bond');
+      assert.equal(auditIncludes(report, 'deterministicStakeChangeReferee'), true);
+    },
+  },
+  {
+    name: '14b cooperative first aid remains direct aid, not living opposition',
+    run() {
+      const stakes = emptyStakeMap('none');
+      stakes.success = 'benefit';
+      const report = runCase({
+        userText: 'I kneel beside Darai and bandage the cut across his thigh.',
+        dice: [16, 5, 1, 1, 1, 1, 1, 1],
+        tracker: {
+          Darai: trackerEntry({
+            currentDisposition: { B: 2, F: 2, H: 2 },
+            condition: 'wounded',
+            wounds: ['bleeding cut across the thigh'],
+          }),
+          Seraphina: trackerEntry({ currentDisposition: { B: 4, F: 1, H: 1 } }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'TreatDaraiWound',
+            identifyChallenge: 'bandage Darai thigh wound',
+            explicitMeans: 'first aid bandage for Darai',
+            identifyTargets: {
+              ActionTargets: ['Darai'],
+              OppTargets: { NPC: [], ENV: [] },
+              BenefitedObservers: [],
+              HarmedObservers: [],
+            },
+            hasStakes: true,
+            actionCount: ['bandage wound'],
+            mapStats: { USER: 'MND', OPP: 'ENV' },
+          },
+          relationshipEngine: [
+            relationship('Darai', { auditInteraction: true, stakeChangeByOutcome: stakes }),
+            relationship('Seraphina'),
+          ],
+        }),
+      });
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.ActionTargets, ['Darai']);
+      const darai = report.finalNarrativeHandoff.npcHandoffs.find(item => item.NPC === 'Darai');
+      assert.equal(darai.Target, 'Bond');
+      assert.equal(darai.NPC_STAKES, 'Y');
+      assert.equal(auditIncludes(report, 'cooperativeAidNoLivingOppositionRepair'), true);
     },
   },
   {

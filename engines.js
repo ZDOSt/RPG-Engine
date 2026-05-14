@@ -967,6 +967,10 @@ export function routeDispositionTarget(npc, packet, auditInteraction, sem) {
     const landed = landedBool(packet.LandedActions);
     const out = packet.Outcome;
     const hasStakes = packet.STAKES === 'Y';
+    const benefitAllowedForDirect = auditInteraction === 'Y'
+        && (isDirect || isOpp)
+        && !isHarmed
+        && directOrOpposedBenefitAllowed(npc, packet, sem);
 
     if (!isDirect && !isOpp && !isBenefited && !isHarmed) return 'No Change';
     if (!hasStakes) return 'No Change';
@@ -975,14 +979,14 @@ export function routeDispositionTarget(npc, packet, auditInteraction, sem) {
             ? 'FearHostility'
             : 'Hostility';
     }
-    if (auditInteraction === 'Y' && !isHarmed) return 'Bond';
     if (!isDirect && !isOpp && isBenefited) return auditInteraction === 'Y' ? 'Bond' : 'No Change';
     if (!isDirect && !isOpp && isHarmed) return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     if (bool(sem.explicitIntimidationOrCoercion)) return 'Fear';
     if (landed && (isDirect || isOpp || isHarmed) && landedActionHarmsRelationship(packet, sem, out, isHarmed)) {
         return ['dominant_impact', 'solid_impact'].includes(out) ? 'FearHostility' : 'Hostility';
     }
-    if (auditInteraction === 'Y') return 'Bond';
+    if (benefitAllowedForDirect) return 'Bond';
+    if (auditInteraction === 'Y' && !isDirect && !isOpp && !isHarmed) return 'Bond';
     return 'No Change';
 }
 
@@ -993,6 +997,15 @@ function landedActionHarmsRelationship(packet, sem, outcome, isHarmed) {
     if (packet.boundaryViolationExplicit === 'Y') return true;
     if (bool(sem.explicitIntimidationOrCoercion)) return true;
     return normalizeStakeChange(sem.stakeChangeByOutcome?.[String(outcome || 'no_roll')]) === 'harm';
+}
+
+function directOrOpposedBenefitAllowed(npc, packet, sem) {
+    if (packet.classifyHostilePhysicalIntent === 'Y') return false;
+    if (packet.classifyPhysicalBoundaryPressure === 'Y') return false;
+    if (packet.boundaryViolationExplicit === 'Y') return false;
+    if (bool(sem.explicitIntimidationOrCoercion)) return false;
+    const source = relationshipBenefitSourceText(packet, sem);
+    return isConcreteAidBenefitForNpc(source, npc);
 }
 
 export function resolveStakeChangeByOutcome(npc, sem, packet) {
@@ -1044,17 +1057,22 @@ export function applyMeaningfulBenefitReferee(npc, packet, stakeChange, sem = {}
     const relation = relationToUserAction(npc, packet);
     if (relation.isBenefited && !relation.isDirect && !relation.isOpp) return { value: stakeChange };
 
-    const source = [
-        sem?.auditInteraction,
-        sem?.identifyGoal,
-        sem?.identifyChallenge,
-        sem?.explicitMeans,
-        packet?.GOAL,
-        packet?.Outcome,
-    ].filter(Boolean).join(' ').toLowerCase();
-
-    const strongBenefit = /\b(rescu\w*|protect\w*|shield\w*|save[sd]?|free[sd]?|liberat\w*|restore\w* autonomy|grant\w* autonomy|give[sn]?|donat\w*|pay\w*|reward\w*|heal\w*|cure\w*|stabiliz\w*|prevent\w* (?:harm|injury|death|loss)|stop\w* (?:harm|injury|attack|assault)|advance\w* .*goal|status|standing|reputation|resource\w*)\b/.test(source);
+    const source = relationshipBenefitSourceText(packet, sem);
+    const strongBenefit = isConcreteAidBenefit(source);
     const falseBenefit = /\b(compliment\w*|flirt\w*|smil\w*|polite|conversation|talk\w* down|de-?escalat\w*|negotiate\w*|persuad\w*|convinc\w*|fail\w*|miss(?:ed)?|surviv\w*|safe|unharmed|choose\w* not to harm|not harm|spare[sd]?|own goal|self-advancement)\b/.test(source);
+
+    if ((relation.isDirect || relation.isOpp) && !directOrOpposedBenefitAllowed(npc, packet, sem)) {
+        return {
+            value: 'none',
+            referee: {
+                hardRule: 'RelationshipEngine.auditInteraction: direct/opposed targets cannot receive Bond from generic success, pressure, de-escalation, or opposition; direct Bond requires concrete aid/treatment/rescue to that NPC',
+                from: stakeChange,
+                to: 'none',
+                relation,
+                directOrOpposedBenefitVeto: true,
+            },
+        };
+    }
 
     if (strongBenefit && !falseBenefit) return { value: stakeChange };
 
@@ -1067,6 +1085,42 @@ export function applyMeaningfulBenefitReferee(npc, packet, stakeChange, sem = {}
             relation,
         },
     };
+}
+
+function relationshipBenefitSourceText(packet, sem = {}) {
+    return [
+        sem?.auditInteraction,
+        sem?.identifyGoal,
+        sem?.identifyChallenge,
+        sem?.explicitMeans,
+        packet?.GOAL,
+        ...(Array.isArray(packet?.actions) ? packet.actions : []),
+        packet?.Outcome,
+    ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function isConcreteAidBenefit(source) {
+    const text = String(source || '').toLowerCase();
+    return /\b(rescu\w*|protect\w*|shield\w*|save[sd]?|free[sd]?|liberat\w*|restore\w* autonomy|grant\w* autonomy|give[sn]?|donat\w*|pay\w*|reward\w*|heal\w*|cure\w*|stabiliz\w*|treat\w*|bandag\w*|first[-\s]?aid|splint\w*|medicine|medic\w*|prevent\w* (?:harm|injury|death|loss)|stop\w* (?:harm|injury|attack|assault)|advance\w* .*goal|status|standing|reputation|resource\w*)\b/.test(text);
+}
+
+function isConcreteAidBenefitForNpc(source, npc) {
+    const text = String(source || '').toLowerCase();
+    const name = String(npc || '').trim().toLowerCase();
+    if (!text || !name) return false;
+    const npcPattern = escapeNameForLocalRegExp(name);
+    const threatPattern = new RegExp(`\\b(?:against|versus|vs|from|away\\s+from)\\s+(?:the\\s+)?${npcPattern}\\b|\\b${npcPattern}\\b.{0,50}\\b(?:back|away|off|down|aside|retreat|withdraw|stop|halt|block|bar|interpose|oppose|threat|attack)\\b`, 'i');
+    if (threatPattern.test(text)) return false;
+
+    const medicalVerb = '\\b(?:heal\\w*|cure\\w*|stabiliz\\w*|treat\\w*|bandag\\w*|first[-\\s]?aid|splint\\w*|medic\\w*|dress(?:es|ed|ing)?\\s+(?:the\\s+)?wound)\\b';
+    const rescueVerb = '\\b(?:rescu\\w*|save[sd]?|free[sd]?|liberat\\w*|pull\\w*|drag\\w*|carry\\w*|shield\\w*|protect\\w*)\\b';
+    const targetAfterVerb = new RegExp(`(?:${medicalVerb}|${rescueVerb}).{0,70}\\b(?:${npcPattern}|him|her|them)\\b`, 'i');
+    const targetBeforeNeed = new RegExp(`\\b${npcPattern}\\b.{0,70}\\b(?:wound\\w*|injur\\w*|hurt\\w*|bleed\\w*|poison\\w*|sick\\w*|unconscious|dying|critical|trapped|pinned|bound|restrained|falling|danger|clear|free|safe|heal\\w*|cure\\w*|stabiliz\\w*|treat\\w*|bandag\\w*|first[-\\s]?aid|splint\\w*)\\b`, 'i');
+    return targetAfterVerb.test(text) || targetBeforeNeed.test(text);
+}
+
+function escapeNameForLocalRegExp(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
 }
 
 export function relationToUserAction(npc, packet) {
