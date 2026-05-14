@@ -412,8 +412,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     audit.push(`2.4 hasStakes=${hasStakes}`);
 
     const sanitizedTargets = sanitizeTargets(identityTargets, targetClassifier, { hasStakes, goal, boundaryViolationExplicit });
-    const directedCompanionTargets = repairDirectedCompanionAttackOppTargets(sanitizedTargets, ledger, trackerSnapshot, semantic, context, audit);
-    const targets = repairLivingOppositionTargets(directedCompanionTargets, targetClassifier, { hasStakes, semantic, goal, boundaryViolationExplicit }, audit);
+    const directedCompanionTargets = repairDirectedCompanionAttackHostilePool(sanitizedTargets, ledger, trackerSnapshot, semantic, context, audit);
+    const targets = repairLivingOppositionTargets(directedCompanionTargets, targetClassifier, { hasStakes, semantic, goal, boundaryViolationExplicit, context }, audit);
     audit.push(`2.4d identifyTargets.final=${formatTargets(targets)}`);
     if (!sameTargets(rawTargets, targets)) {
         audit.push(`2.4e deterministicTargetSanitizer=${compact({
@@ -476,10 +476,16 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         }
         if (oppStat !== 'ENV' && !oppTargetsNpcFirst) {
             const livingActionTarget = firstReal(toRealArray(targets.ActionTargets).filter(name => targetClassifier.isLiving(name)));
-            if (livingActionTarget) {
+            if (livingActionTarget && !isDirectedCompanionCommandAction(semantic, goal, targets, context)) {
                 targets.OppTargets.NPC = unique([...toRealArray(targets.OppTargets.NPC), livingActionTarget]);
                 audit.push(`2.7c.3 deterministicLivingOppTargetFallback=${compact({
                     hardRule: 'stakes-bearing living ActionTarget supplies opposing NPC when semantic omitted OppTargets.NPC',
+                    target: livingActionTarget,
+                })}`);
+            } else if (livingActionTarget) {
+                oppStat = 'ENV';
+                audit.push(`2.7c.3 directedCompanionCommandNoLivingOppTargetFallback=${compact({
+                    hardRule: 'a directed ally command does not make the commanded ally the opposing NPC',
                     target: livingActionTarget,
                 })}`);
             } else {
@@ -591,6 +597,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         classifyCombatActionSequence: combatActionSequence ? 'Y' : 'N',
         activeHostileThreat: bool(semantic.activeHostileThreat) ? 'Y' : 'N',
         classifyPhysicalBoundaryPressure: boundaryReferee.value ? 'Y' : 'N',
+        hostilesInScene: { NPC: showNone(targets.hostilesInScene?.NPC) },
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
         BenefitedObservers: showNone(targets.BenefitedObservers),
@@ -1743,6 +1750,9 @@ function classifyCombatActionSequence({ semantic, goal, targets, actions, hostil
 
 function repairLivingOppositionTargets(targets, classifier, options = {}, audit) {
     const repaired = {
+        hostilesInScene: {
+            NPC: toRealArray(targets.hostilesInScene?.NPC),
+        },
         ActionTargets: toRealArray(targets.ActionTargets),
         OppTargets: {
             NPC: toRealArray(targets.OppTargets?.NPC),
@@ -1764,6 +1774,13 @@ function repairLivingOppositionTargets(targets, classifier, options = {}, audit)
         })}`);
         return repaired;
     }
+    if (isDirectedCompanionCommandAction(options.semantic, options.goal, repaired, options.context)) {
+        audit?.push(`2.4f directedCompanionCommandNoLivingOppositionRepair=${compact({
+            hardRule: 'a directed ally command does not make the commanded ally the opposition; hostile selection uses hostilesInScene',
+            target: livingActionTarget,
+        })}`);
+        return repaired;
+    }
 
     repaired.OppTargets.NPC = unique([...repaired.OppTargets.NPC, livingActionTarget]);
     audit?.push(`2.4f deterministicLivingOppositionRepair=${compact({
@@ -1773,8 +1790,20 @@ function repairLivingOppositionTargets(targets, classifier, options = {}, audit)
     return repaired;
 }
 
-function repairDirectedCompanionAttackOppTargets(targets, ledger, trackerSnapshot, semantic, context, audit) {
+function isDirectedCompanionCommandAction(semantic, goal, targets, context) {
+    const latestUserText = relationshipText(getLatestUserTextFromContext(context));
+    const actionTargets = toRealArray(targets?.ActionTargets);
+    return actionTargets.some(name => {
+        const command = directedCompanionCommandText(name, latestUserText);
+        return command && (isDirectedCompanionAttackCommandText(command) || isDirectedCompanionDefensiveCommandText(command));
+    });
+}
+
+function repairDirectedCompanionAttackHostilePool(targets, ledger, trackerSnapshot, semantic, context, audit) {
     const repaired = {
+        hostilesInScene: {
+            NPC: toRealArray(targets.hostilesInScene?.NPC),
+        },
         ActionTargets: toRealArray(targets.ActionTargets),
         OppTargets: {
             NPC: toRealArray(targets.OppTargets?.NPC),
@@ -1796,11 +1825,11 @@ function repairDirectedCompanionAttackOppTargets(targets, ledger, trackerSnapsho
     ].filter(Boolean).join(' ').toLowerCase();
     const hostileTarget = resolveHostileKnownTargetFromText(source, ledger, trackerSnapshot, companionTargets);
     if (!hostileTarget) return repaired;
-    if (toRealArray(repaired.OppTargets.NPC).some(name => sameName(name, hostileTarget))) return repaired;
+    if (toRealArray(repaired.hostilesInScene.NPC).some(name => sameName(name, hostileTarget))) return repaired;
 
-    repaired.OppTargets.NPC = unique([...repaired.OppTargets.NPC, hostileTarget]);
-    audit?.push(`2.4f.1 directedCompanionAttackOppRepair=${compact({
-        hardRule: 'explicit companion attack command may name the hostile target in user text even when semantic OppTargets omitted it',
+    repaired.hostilesInScene.NPC = unique([...repaired.hostilesInScene.NPC, hostileTarget]);
+    audit?.push(`2.4f.1 directedCompanionAttackHostilePoolRepair=${compact({
+        hardRule: 'explicit companion attack command may choose only an already-established hostile target; this repairs hostilesInScene, not OppTargets.NPC',
         companionTargets,
         target: hostileTarget,
     })}`);
@@ -3473,6 +3502,9 @@ function resolveFriendlyCrisisAttackTarget(handoff, context = {}) {
     const actionTarget = toRealArray(packet.ActionTargets)
         .find(name => isValidHostileFriendlyAttackFallback(name, actingNpc, context));
     if (actionTarget) return actionTarget;
+    const hostilePool = toRealArray(packet.hostilesInScene?.NPC)
+        .filter(name => isValidFriendlyAttackTarget(name, actingNpc));
+    if (hostilePool.length === 1) return hostilePool[0];
     return null;
 }
 
@@ -3496,14 +3528,37 @@ function isHostileHandoffTarget(name, handoffs = []) {
 }
 
 function resolveCommandTextHostileTarget(actingNpc, context = {}) {
-    const hostile = (context.handoffs || [])
-        .filter(item => isValidFriendlyAttackTarget(item?.NPC, actingNpc) && isHostileHandoffTarget(item?.NPC, context.handoffs));
+    const hostile = getEstablishedHostileTargetCandidates(context, actingNpc);
     if (!hostile.length) return null;
 
     const source = relationshipText(context.commandText || '').toLowerCase();
     const exact = hostile.find(item => sourceMentionsNpcOrAlias(source, item));
     if (exact) return exact.NPC;
     return hostile.length === 1 ? hostile[0].NPC : null;
+}
+
+function getEstablishedHostileTargetCandidates(context = {}, actingNpc) {
+    const packet = context.resolutionPacket || {};
+    const candidates = new Map();
+    const addCandidate = (name, details = {}) => {
+        if (!isValidFriendlyAttackTarget(name, actingNpc)) return;
+        const key = normalizeNameKey(name);
+        if (!key || candidates.has(key)) return;
+        candidates.set(key, { NPC: name, ...details });
+    };
+
+    for (const handoff of context.handoffs || []) {
+        if (isHostileHandoffTarget(handoff?.NPC, context.handoffs)) {
+            addCandidate(handoff.NPC, handoff);
+        }
+    }
+
+    for (const name of toRealArray(packet.hostilesInScene?.NPC)) {
+        const handoff = (context.handoffs || []).find(item => sameName(item?.NPC, name));
+        addCandidate(name, handoff || { NPC: name });
+    }
+
+    return Array.from(candidates.values());
 }
 
 function sourceMentionsNpcOrAlias(source, handoff) {
@@ -3995,6 +4050,9 @@ function isUserReference(value, refereeContext = null) {
 function removeUserReferencesFromTargets(targets, refereeContext = null) {
     const withoutUser = values => toRealArray(values).filter(name => !isUserReference(name, refereeContext));
     return {
+        hostilesInScene: {
+            NPC: withoutUser(targets?.hostilesInScene?.NPC),
+        },
         ActionTargets: withoutUser(targets?.ActionTargets),
         OppTargets: {
             NPC: withoutUser(targets?.OppTargets?.NPC),
@@ -4214,6 +4272,11 @@ function buildTargetClassifier(ledger, trackerSnapshot, context) {
     const livingNames = new Set();
 
     for (const name of Object.keys(trackerSnapshot || {})) addLivingName(livingNames, name);
+    for (const name of toRealArray(ledger?.resolutionEngine?.identifyTargets?.hostilesInScene?.NPC)) addLivingName(livingNames, name);
+    for (const name of toRealArray(ledger?.resolutionEngine?.identifyTargets?.ActionTargets)) addLivingName(livingNames, name);
+    for (const name of toRealArray(ledger?.resolutionEngine?.identifyTargets?.OppTargets?.NPC)) addLivingName(livingNames, name);
+    for (const name of toRealArray(ledger?.resolutionEngine?.identifyTargets?.BenefitedObservers)) addLivingName(livingNames, name);
+    for (const name of toRealArray(ledger?.resolutionEngine?.identifyTargets?.HarmedObservers)) addLivingName(livingNames, name);
     for (const item of ledger.relationshipEngine || []) addLivingName(livingNames, item?.NPC);
 
     try {

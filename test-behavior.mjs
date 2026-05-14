@@ -101,6 +101,7 @@ function baseLedger(overrides = {}) {
       identifyChallenge: 'ordinary conversation',
       explicitMeans: 'ordinary conversation',
       identifyTargets: {
+        hostilesInScene: { NPC: [] },
         ActionTargets: [],
         OppTargets: { NPC: [], ENV: [] },
         BenefitedObservers: [],
@@ -1397,6 +1398,7 @@ const tests = [
           relationshipEngine: [relationship('Seraphina', { romanceStyle: 'flirt' })],
         }),
       }, randoms);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
       const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
       assert.equal(proactive.Proactive, 'Y');
       assert.equal(proactive.RomanceInitiative, 'Y');
@@ -1442,6 +1444,7 @@ const tests = [
           relationshipEngine: [relationship('Seraphina')],
         }),
       }, randoms);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
       const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
       const memory = report.trackerUpdate.npcs.Seraphina.proactivityMemory;
       assert.equal(proactive.RomanceInitiativeTag, 'Thoughtful_Gift');
@@ -1491,6 +1494,7 @@ const tests = [
           relationshipEngine: [relationship('Seraphina', { romanceStyle: 'flirt' })],
         }),
       }, randoms);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
       const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
       const memory = report.trackerUpdate.npcs.Seraphina.proactivityMemory;
       assert.equal(memory.pendingTag, 'NONE');
@@ -1535,6 +1539,7 @@ const tests = [
           relationshipEngine: [relationship('Seraphina', { romanceStyle: 'flirt' })],
         }),
       }, randoms);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
       const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
       assert.equal(proactive.RomanceInitiativeRawTag, 'Date_And_Confess');
       assert.equal(proactive.RomanceInitiativeTag, 'Romantic_Flirt');
@@ -2144,7 +2149,8 @@ const tests = [
           proactivitySemantic: { cap: 3 },
         }),
       }, randoms);
-      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['Ogre', 'Raider2']);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.hostilesInScene.NPC, ['Raider2']);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['Ogre']);
       const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
       assert.equal(proactive.Proactive, 'Y');
       assert.equal(proactive.CompanionInitiativeTag, 'Companion_Attack');
@@ -2153,7 +2159,52 @@ const tests = [
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Raider2');
       assert.match(prompt(report), /Seraphina: companion attack against Raider2/);
       assert.match(prompt(report), /Seraphina's only resolved attack target this beat is Raider2/i);
-      assert.equal(auditIncludes(report, 'directedCompanionAttackOppRepair'), true);
+      assert.equal(auditIncludes(report, 'directedCompanionAttackHostilePoolRepair'), true);
+    },
+  },
+  {
+    name: '12j1a.3 directed ally attack hostile fallback preserves narrow OppTargets',
+    run() {
+      const tracker = {
+        Seraphina: trackerEntry({
+          currentDisposition: { B: 4, F: 1, H: 1 },
+          establishedRelationship: 'Y',
+          currentCoreStats: { Rank: 'Trained', MainStat: 'PHY', PHY: 7, MND: 5, CHA: 5 },
+        }),
+        Raider2: trackerEntry({
+          currentDisposition: { B: 1, F: 2, H: 4 },
+          currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 4, MND: 2, CHA: 2 },
+          personalitySummary: 'axe-man raider carrying a heavy axe',
+          gear: ['heavy axe'],
+        }),
+        Darai: trackerEntry({ currentDisposition: { B: 2, F: 3, H: 2 } }),
+      };
+      const report = runCase({
+        userText: 'I do not attack. I point at the axe-man and shout, "Seraphina, take the axe-man down now. Hit him before he can move."',
+        tracker,
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'OrderAllyAttack',
+            identifyChallenge: 'command Seraphina to attack the axe-man threatening Darai',
+            explicitMeans: 'Seraphina, take the axe-man down now. Hit him before he can move.',
+            identifyTargets: {
+              ActionTargets: ['Seraphina'],
+              OppTargets: { NPC: [], ENV: [] },
+              BenefitedObservers: ['Darai'],
+              HarmedObservers: [],
+            },
+            hasStakes: true,
+            actionCount: ['command'],
+            mapStats: { USER: 'CHA', OPP: 'ENV' },
+            activeHostileThreat: true,
+          },
+          relationshipEngine: [relationship('Seraphina'), relationship('Raider2'), relationship('Darai')],
+        }),
+      });
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.hostilesInScene.NPC, ['Raider2']);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
+      assert.equal(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'Raider2');
+      assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Raider2');
     },
   },
   {
@@ -4587,6 +4638,120 @@ const tests = [
       assert.equal(isPromotableTrackerName('Unknown Woman'), true);
       const promotions = getExplicitNamePromotions('The Raider1 name is Mora.', ['Raider1']);
       assert.deepEqual(promotions, [{ oldName: 'Raider1', newName: 'Mora' }]);
+    },
+  },
+  {
+    name: '37 hostilesInScene is carried without relationship routing',
+    run() {
+      const report = runCase({
+        userText: 'I keep my shield raised beside Seraphina.',
+        tracker: {
+          Seraphina: trackerEntry({ currentDisposition: { B: 3, F: 1, H: 1 } }),
+          Ogre: trackerEntry({ currentDisposition: { B: 1, F: 2, H: 4 } }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'ProtectSeraphina',
+            identifyChallenge: 'keep a shield raised beside Seraphina',
+            explicitMeans: 'shield raised beside Seraphina',
+            identifyTargets: {
+              hostilesInScene: { NPC: ['Ogre'] },
+              ActionTargets: ['Seraphina'],
+              OppTargets: { NPC: [], ENV: [] },
+              BenefitedObservers: [],
+              HarmedObservers: [],
+            },
+            activeHostileThreat: true,
+            hasStakes: false,
+          },
+          relationshipEngine: [relationship('Seraphina')],
+        }),
+      });
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.hostilesInScene.NPC, ['Ogre']);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.NPCInScene, ['Seraphina']);
+      assert.equal(report.finalNarrativeHandoff.npcHandoffs.some(item => item.NPC === 'Ogre'), false);
+      assert.match(auditPrompt(report), /hostiles:Ogre; action:Seraphina/);
+    },
+  },
+  {
+    name: '38 directed companion attack uses hostilesInScene without mutating OppTargets',
+    run() {
+      const report = runCase({
+        userText: 'Seraphina, hit the axe raider hard.',
+        dice: [
+          10, 10, 10, 10, 10, 10,
+          100,
+          18, 4,
+        ],
+        tracker: {
+          Seraphina: trackerEntry({ currentDisposition: { B: 3, F: 1, H: 1 }, currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 6, MND: 4, CHA: 4 } }),
+          'axe raider': trackerEntry({ currentDisposition: { B: 1, F: 2, H: 4 }, currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 3, CHA: 2 }, gear: ['axe'] }),
+          'knife raider': trackerEntry({ currentDisposition: { B: 1, F: 2, H: 4 }, currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 4, MND: 3, CHA: 2 }, gear: ['knife'] }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'CommandCompanionAttack',
+            identifyChallenge: 'command Seraphina to hit the axe raider',
+            explicitMeans: 'command Seraphina to hit the axe raider',
+            identifyTargets: {
+              hostilesInScene: { NPC: ['axe raider', 'knife raider'] },
+              ActionTargets: ['Seraphina'],
+              OppTargets: { NPC: [], ENV: [] },
+              BenefitedObservers: [],
+              HarmedObservers: [],
+            },
+            activeHostileThreat: true,
+            hasStakes: false,
+          },
+          relationshipEngine: [relationship('Seraphina')],
+        }),
+      });
+      const packet = report.finalNarrativeHandoff.resolutionPacket;
+      assert.deepEqual(packet.hostilesInScene.NPC, ['axe raider', 'knife raider']);
+      assert.deepEqual(packet.OppTargets.NPC, ['(none)']);
+      assert.equal(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'axe raider');
+      assert.equal(report.finalNarrativeHandoff.proactivityResults.Seraphina.CompanionInitiativeTag, 'Companion_Attack');
+      assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'axe raider');
+      assert.equal(report.finalNarrativeHandoff.npcHandoffs.some(item => item.NPC === 'axe raider'), false);
+    },
+  },
+  {
+    name: '39 ambiguous companion attack does not guess among multiple hostiles',
+    run() {
+      const report = runCase({
+        userText: 'Seraphina, hit them hard.',
+        dice: [
+          10, 10, 10, 10, 10, 10,
+          100,
+        ],
+        tracker: {
+          Seraphina: trackerEntry({ currentDisposition: { B: 3, F: 1, H: 1 } }),
+          'axe raider': trackerEntry({ currentDisposition: { B: 1, F: 2, H: 4 }, gear: ['axe'] }),
+          'knife raider': trackerEntry({ currentDisposition: { B: 1, F: 2, H: 4 }, gear: ['knife'] }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'CommandCompanionAttack',
+            identifyChallenge: 'command Seraphina to hit the enemies',
+            explicitMeans: 'command Seraphina to hit them',
+            identifyTargets: {
+              hostilesInScene: { NPC: ['axe raider', 'knife raider'] },
+              ActionTargets: ['Seraphina'],
+              OppTargets: { NPC: [], ENV: [] },
+              BenefitedObservers: [],
+              HarmedObservers: [],
+            },
+            activeHostileThreat: true,
+            hasStakes: false,
+          },
+          relationshipEngine: [relationship('Seraphina')],
+        }),
+      });
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
+      assert.notEqual(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'axe raider');
+      assert.notEqual(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'knife raider');
+      assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina, undefined);
     },
   },
 ];

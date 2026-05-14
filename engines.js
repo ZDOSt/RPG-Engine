@@ -57,17 +57,23 @@ function ResolutionEngine(input) {
 
   identifyTargets(input, challenge, finalGoal, context):
     policy: LOCKED, EXPLICIT-ONLY
+    hostilesInScene.NPC = ALL established, present, living hostile entities in the current scene, whether or not they directly oppose {{user}}'s current action
     ActionTargets = LIVING entities {{user}} directly tries to affect as the main resolution target
-    OppTargets.NPC = LIVING entities whose stakes are at risk and who actively or passively oppose, contest, or resist {{user}}'s actions
+    OppTargets.NPC = LIVING entities whose stakes are at risk and who actively or passively oppose, contest, or resist {{user}}'s current action
     OppTargets.ENV = NON-LIVING environmental or terrain feature, hazard, object, or other obstacle directly obstructing {{user}}'s actions
     BenefitedObservers = THIRD-PARTY LIVING entities present in scene, not ActionTargets and not OppTargets.NPC, whose stakes materially improve as a result of {{user}}'s actions, as per DEF.STAKES. Protective/rescue contact with an ally, shielding them, pulling/pushing them out of danger, or standing between them and harm makes them BenefitedObservers when {{user}} is not contesting their will, harming them, restraining them, or making them the main opposed challenge. Example: {{user}} pushes a woman out of danger and stands between her and a harasser. Harasser = ActionTargets and OppTargets.NPC; woman = BenefitedObservers.
     HarmedObservers = THIRD-PARTY LIVING entities present in scene, not ActionTargets and not OppTargets.NPC, whose stakes materially worsen as a result of {{user}}'s actions, as per DEF.STAKES. This requires an explicit material stake, relationship, duty, protection role, authority role, or similar; mere witnessing alone is not enough. Example: {{user}} hurts an NPC while that NPC's father witnesses it. Hurt NPC = ActionTargets and OppTargets.NPC; witnessing father = HarmedObservers.
+    rule: identify hostilesInScene.NPC before OppTargets.NPC; then identify which of those, if any, directly oppose {{user}}'s current action
+    rule: hostilesInScene.NPC is a scene-level hostile pool only; it does not create relationship changes, rolls, NPCInScene entries, or OppTargets.NPC by itself
+    rule: hostilesInScene.NPC may include hostile enemies threatening {{user}}, companions, protected NPCs, bystanders, or the scene generally, as long as they are established and present
+    rule: hostilesInScene.NPC must be established by assistant narration, tracker, character/scenario/lore context, or initial test setup; do not create a hostile from the latest user input alone
+    rule: hostilesInScene.NPC excludes neutral/friendly NPCs, absent/offscreen entities, defeated/incapacitated entities no longer posing danger, and non-living hazards or obstacles
     rule: if hasStakes=N, OppTargets.NPC must be [(none)]
     rule: a direct ActionTarget can also be OppTargets.NPC only when that target's stakes are meaningfully contested or resisted
     rule: protective/rescue movement of an ally does not make that ally ActionTargets unless {{user}} contests their will, harms them, restrains them, or makes them the main opposed challenge
     rule: ActionTargets, OppTargets.NPC, BenefitedObservers, and HarmedObservers are mutually exclusive observer categories except that direct ActionTargets may also be OppTargets.NPC when they are the resisting/opposing party
     rule: if any target list is not present, return [(none)]
-    return {ActionTargets, OppTargets, BenefitedObservers, HarmedObservers}
+    return {hostilesInScene, ActionTargets, OppTargets, BenefitedObservers, HarmedObservers}
 
   boundaryViolationExplicit(input, finalGoal, challenge, targets, context):
     policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
@@ -198,7 +204,7 @@ function ResolutionEngine(input) {
         if missing -> targetCore = genStats(first OppTargets.NPC, context)
       outcome = resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore)
     NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, plus a single pending-offer NPC only when the user gives a clear generic accept/refuse response to that pending offer
-    return {GOAL:finalGoal, actions:actions, intimacyAdvanceExplicit:intimacyAdvanceExplicit, boundaryViolationExplicit:boundaryViolationExplicit, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
+    return {GOAL:finalGoal, actions:actions, intimacyAdvanceExplicit:intimacyAdvanceExplicit, boundaryViolationExplicit:boundaryViolationExplicit, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, hostilesInScene:targets.hostilesInScene, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
 }
 ---------------------------
 function RelationshipEngine(npc, resolutionPacket) {
@@ -766,8 +772,12 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     rule: applies only to companion crisis initiative during crisis remaps
     rule: never target {{user}}
     rule: do not use friendly/neutral ActionTargets, BenefitedObservers, or HarmedObservers as friendly attack targets
+    rule: hostilesInScene.NPC is the established hostile pool; use it only for hostile target selection, not relationship routing
+    rule: direct companion commands may choose a hostile by name only from established hostiles in hostilesInScene.NPC, hostile handoffs, or hostile tracker entries; never create a new hostile from user wording alone
+    rule: if multiple established hostiles exist and the command/narration does not name one, do not guess
     if OppTargets.NPC has a valid hostile target not equal to acting NPC -> that NPC
     else if ActionTargets has a valid hostile target not equal to acting NPC and that target's tracker/handoff state is hostile (H>=3, HATRED, or HOSTILITY lock) -> that NPC
+    else if hostilesInScene.NPC has exactly one valid hostile target not equal to acting NPC -> that NPC
     else -> (none), downgrade to support/protect/teamwork without attack roll
 
   proactivityTarget(handoff, resolutionPacket, intent):
@@ -1504,7 +1514,7 @@ export function buildPersistencePolicy() {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
         npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportCooldownUntilActiveMs', 'userHistory', 'raceProfile', 'personalitySummary', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'lifecycle', 'condition', 'wounds', 'statusEffects', 'gear'],
         playerPersistentRuleMutated: ['condition', 'wounds', 'statusEffects', 'gear', 'inventory', 'tasks', 'commitments'],
-        perTurn: ['GOAL', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
+        perTurn: ['GOAL', 'hostilesInScene', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
 }
 
@@ -1769,6 +1779,9 @@ export function normalizeDisposition(value) {
 
 export function normalizeTargets(value) {
     return {
+        hostilesInScene: {
+            NPC: toRealArray(value?.hostilesInScene?.NPC),
+        },
         ActionTargets: toRealArray(value?.ActionTargets),
         OppTargets: {
             NPC: toRealArray(value?.OppTargets?.NPC),
@@ -1780,12 +1793,16 @@ export function normalizeTargets(value) {
 }
 
 export function sanitizeTargets(targets, classifier, options = {}) {
+    const hostilesNpc = [];
     const actionTargets = [];
     const oppNpc = [];
     const oppEnv = [...targets.OppTargets.ENV];
     const benefitedCandidates = [];
     const harmedCandidates = [];
 
+    for (const name of targets.hostilesInScene?.NPC || []) {
+        if (classifier.isLiving(name)) hostilesNpc.push(name);
+    }
     for (const name of targets.ActionTargets) {
         if (classifier.isLiving(name)) actionTargets.push(name);
         else oppEnv.push(name);
@@ -1811,6 +1828,9 @@ export function sanitizeTargets(targets, classifier, options = {}) {
     const harmed = harmedCandidates.filter(name => !directOrOpposed.has(normalizeNameKey(name)));
 
     return {
+        hostilesInScene: {
+            NPC: unique(hostilesNpc),
+        },
         ActionTargets: unique(actionTargets),
         OppTargets: {
             NPC: unique(oppNpc),
@@ -1827,6 +1847,9 @@ export function sameTargets(a, b) {
 
 export function targetSummary(targets) {
     return {
+        hostilesInScene: {
+            NPC: showNone(targets.hostilesInScene?.NPC),
+        },
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: {
             NPC: showNone(targets.OppTargets?.NPC),
@@ -2041,6 +2064,7 @@ export function clamp(value, min, max) {
 
 export function formatTargets(targets) {
     return compact({
+        hostilesInScene: { NPC: showNone(targets.hostilesInScene?.NPC) },
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
         BenefitedObservers: showNone(targets.BenefitedObservers),

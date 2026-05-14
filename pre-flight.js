@@ -86,6 +86,7 @@ function buildReadableSemanticDebug(ledger) {
         'identifyChallenge=' + valueOrNone(resolution.identifyChallenge),
         'explicitMeans=' + valueOrNone(resolution.explicitMeans),
         'identifyTargets:',
+        'hostilesInScene.NPC=' + list(targets.hostilesInScene?.NPC),
         'ActionTargets=' + list(targets.ActionTargets),
         'OppTargets.NPC=' + list(oppTargets.NPC),
         'OppTargets.ENV=' + list(oppTargets.ENV),
@@ -147,6 +148,7 @@ function buildReadableDeterministicDebug(handoff) {
         'resolutionPacket.classifyPhysicalBoundaryPressure=' + valueOrNone(resolution.classifyPhysicalBoundaryPressure),
         'resolutionPacket.UserImpairment=' + inline(resolution.UserImpairment ?? {}),
         'resolutionPacket.NPCImpairment=' + inline(resolution.NPCImpairment ?? {}),
+        'resolutionPacket.hostilesInScene.NPC=' + list(resolution.hostilesInScene?.NPC),
         'resolutionPacket.ActionTargets=' + list(resolution.ActionTargets),
         'resolutionPacket.OppTargets.NPC=' + list(resolution.OppTargets?.NPC),
         'resolutionPacket.OppTargets.ENV=' + list(resolution.OppTargets?.ENV),
@@ -656,11 +658,13 @@ function readableActionDescription(semanticResolution, resolution) {
 
 function targetSummary(resolution) {
     const parts = [];
+    const hostiles = list(resolution.hostilesInScene?.NPC);
     const actionTargets = list(resolution.ActionTargets);
     const oppNpc = list(resolution.OppTargets?.NPC);
     const oppEnv = list(resolution.OppTargets?.ENV);
     const benefited = list(resolution.BenefitedObservers);
     const harmed = list(resolution.HarmedObservers);
+    if (!isNoneText(hostiles)) parts.push(`hostiles:${hostiles}`);
     if (!isNoneText(actionTargets)) parts.push(`action:${actionTargets}`);
     if (!isNoneText(oppNpc)) parts.push(`opposes:${oppNpc}`);
     if (!isNoneText(oppEnv)) parts.push(`env:${oppEnv}`);
