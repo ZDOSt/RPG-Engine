@@ -699,41 +699,52 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const inflictedAggressionNpcInstruction = inflictedAggressionNpcInjuryGuide(handoff.aggressionResults);
     const injuryInstruction = `${inflictedNpcInstruction}${inflictedUserInstruction}${inflictedAggressionNpcInstruction}`;
     const aggressionTargetLock = aggressionTargetLockGuide(handoff.aggressionResults);
+    const companionCommandInstruction = companionCommandGuide(resolution);
     const trackerInstruction = trackerDeltaInstruction();
 
     if (aggressionText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${aggressionTargetLock} ${aggressionGuide}${naturalProactiveNote} Do not invent any user follow-up.${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${companionCommandInstruction}${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${aggressionTargetLock} ${aggressionGuide}${naturalProactiveNote} Do not invent any user follow-up.${nameInstruction}${trackerInstruction}`;
     }
 
     if (intimacyBoundaryGuide.mode === 'DENY' && resolution.boundaryViolationExplicit !== 'Y') {
-        return `The user action is ${userAction}; no roll is needed. ${intimacyBoundaryGuide.text}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${naturalProactiveNote}${chaosNote}${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; no roll is needed.${companionCommandInstruction} ${intimacyBoundaryGuide.text}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${naturalProactiveNote}${chaosNote}${nameInstruction}${trackerInstruction}`;
     }
 
     if (proactiveText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote}${intimacyBoundaryGuide.text ? ` ${intimacyBoundaryGuide.text}` : ''}${naturalProactiveNote}${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${companionCommandInstruction}${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote}${intimacyBoundaryGuide.text ? ` ${intimacyBoundaryGuide.text}` : ''}${naturalProactiveNote}${nameInstruction}${trackerInstruction}`;
     }
 
     if (resolution.STAKES === 'N') {
         const chaosNote = chaosText !== 'none' ? ` ${chaosGuide}` : '';
         if (intimacyBoundaryGuide.mode === 'ALLOW') {
-            return `The user action is ${userAction}; no roll is needed. ${intimacyBoundaryGuide.text}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${chaosNote}${nameInstruction}${trackerInstruction}`;
+            return `The user action is ${userAction}; no roll is needed.${companionCommandInstruction} ${intimacyBoundaryGuide.text}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${chaosNote}${nameInstruction}${trackerInstruction}`;
         }
-        return `The user action is ${userAction}; no roll is needed.${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Keep ${npcName}'s response aligned with this behavior: ${npcGuide} Romantic, flirtatious, affectionate, suggestive, sexual, or intimate conversation should continue naturally according to context and personality; do not invent hostility, refusal, or extra mechanics unless a boundary is actually violated or the NPC state supports it${chaosNote}.${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; no roll is needed.${companionCommandInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Keep ${npcName}'s response aligned with this behavior: ${npcGuide} Romantic, flirtatious, affectionate, suggestive, sexual, or intimate conversation should continue naturally according to context and personality; do not invent hostility, refusal, or extra mechanics unless a boundary is actually violated or the NPC state supports it${chaosNote}.${nameInstruction}${trackerInstruction}`;
     }
 
     if (resolution.boundaryViolationExplicit === 'Y') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} This is an explicit boundary violation or pressure past refusal; narrate refusal, guardedness, resistance, withdrawal, anger, fear, call for help, or escalation as fits this behavior: ${npcGuide}${aggressionNote}${chaosNote}${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${companionCommandInstruction}${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} This is an explicit boundary violation or pressure past refusal; narrate refusal, guardedness, resistance, withdrawal, anger, fear, call for help, or escalation as fits this behavior: ${npcGuide}${aggressionNote}${chaosNote}${nameInstruction}${trackerInstruction}`;
     }
 
     if (resolution.classifyPhysicalBoundaryPressure === 'Y') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance with this behavior: ${npcGuide} Do not invent a landed attack.${chaosNote}${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${companionCommandInstruction}${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction} Treat this as physical boundary pressure, not combat: narrate contested possession, space, access, refusal, anger, or resistance with this behavior: ${npcGuide} Do not invent a landed attack.${chaosNote}${nameInstruction}${trackerInstruction}`;
     }
 
     if (chaosText !== 'none') {
-        return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Keep NPC behavior anchored to this guidance: ${npcGuide}. ${chaosGuide}${nameInstruction}${trackerInstruction}`;
+        return `The user action is ${userAction}; resolve it as ${outcome}.${companionCommandInstruction}${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Keep NPC behavior anchored to this guidance: ${npcGuide}. ${chaosGuide}${nameInstruction}${trackerInstruction}`;
     }
 
-    return `The user action is ${userAction}; resolve it as ${outcome}.${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Narrate the NPC response with this behavior: ${npcGuide} Keep targets limited to the named scene targets.${nameInstruction}${trackerInstruction}`;
+    return `The user action is ${userAction}; resolve it as ${outcome}.${companionCommandInstruction}${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}${boundaryNote} Narrate the NPC response with this behavior: ${npcGuide} Keep targets limited to the named scene targets.${nameInstruction}${trackerInstruction}`;
+}
+
+function companionCommandGuide(resolution) {
+    const command = resolution?.CompanionCommand;
+    if (!command || command.Mode !== 'REQUEST_ONLY') return '';
+    const npcs = list(command.NPCs);
+    const commands = Array.isArray(command.Commands) && command.Commands.length
+        ? ` Command text: ${command.Commands.map(item => `"${item}"`).join('; ')}.`
+        : '';
+    return ` Treat the addressed companion command as spoken tactical input only, not as a resolved companion action and not as obedience.${commands} ${npcs} may respond autonomously according to listed proactivity/aggression only. If no proactivity or aggression result lists a companion attack, do not narrate the companion striking, pinning, disabling, injuring, killing, or successfully controlling a target.`;
 }
 
 function trackerDeltaInstruction() {

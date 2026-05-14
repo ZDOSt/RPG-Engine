@@ -1828,7 +1828,7 @@ const tests = [
     },
   },
   {
-    name: '12j1 explicit ally attack command reaches companion aggression and narrator prompt',
+    name: '12j1 explicit ally attack command is request-only but can guide autonomous companion aggression',
     run() {
       const tracker = {
         Seraphina: trackerEntry({
@@ -1839,8 +1839,8 @@ const tests = [
         Ogre: trackerEntry({ currentCoreStats: { Rank: 'Trained', MainStat: 'PHY', PHY: 6, MND: 2, CHA: 1 } }),
       };
       const randoms = [
-        nthRandomForDie(20, 20),
-        ...Array(5).fill(nthRandomForDie(10, 20)),
+        ...Array(11).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(18, 20),
         nthRandomForDie(88, 100),
         nthRandomForDie(16, 20),
         nthRandomForDie(8, 20),
@@ -1874,6 +1874,8 @@ const tests = [
       assert.equal(proactive.Proactive, 'Y');
       assert.equal(proactive.CompanionInitiativeTag, 'Companion_Attack');
       assert.equal(proactive.ProactivityTarget, 'Ogre');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.STAKES, 'N');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.CompanionCommand.Mode, 'REQUEST_ONLY');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.AttackType, 'CompanionAttack');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Ogre');
       const companionInjury = report.finalNarrativeHandoff.aggressionResults.Seraphina.InflictedTargetInjury;
@@ -1882,6 +1884,7 @@ const tests = [
       assert.equal(companionInjury.woundsAdd.length, 0);
       assert.match(prompt(report), /choose the concrete wound and affected body area from the NPC attack context/i);
       assert.match(auditPrompt(report), /detailMode:narrator_contextual/i);
+      assert.match(prompt(report), /spoken tactical input only/i);
       assert.match(prompt(report), /Seraphina/);
       assert.match(prompt(report), /companion attack against Ogre/);
       assert.equal(/companion attack against Seraphina|companion attack against Mira/i.test(prompt(report)), false);
@@ -1986,7 +1989,7 @@ const tests = [
     },
   },
   {
-    name: '12j1a casual hit wording still routes explicit ally attack',
+    name: '12j1a casual hit wording stays request-only and can guide autonomous companion attack',
     run() {
       const tracker = {
         Seraphina: trackerEntry({
@@ -1997,8 +2000,8 @@ const tests = [
         Ogre: trackerEntry({ currentCoreStats: { Rank: 'Trained', MainStat: 'PHY', PHY: 6, MND: 2, CHA: 1 } }),
       };
       const randoms = [
-        nthRandomForDie(20, 20),
-        ...Array(5).fill(nthRandomForDie(10, 20)),
+        ...Array(11).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(18, 20),
         nthRandomForDie(88, 100),
         nthRandomForDie(16, 20),
         nthRandomForDie(8, 20),
@@ -2032,15 +2035,18 @@ const tests = [
       assert.equal(proactive.Proactive, 'Y');
       assert.equal(proactive.CompanionInitiativeTag, 'Companion_Attack');
       assert.equal(proactive.ProactivityTarget, 'Ogre');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.STAKES, 'N');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.CompanionCommand.Mode, 'REQUEST_ONLY');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.AttackType, 'CompanionAttack');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Ogre');
+      assert.match(prompt(report), /spoken tactical input only/i);
       assert.match(prompt(report), /Seraphina/);
       assert.match(prompt(report), /companion attack against Ogre/);
       assert.match(prompt(report), /Seraphina's only resolved attack target this beat is Ogre/i);
     },
   },
   {
-    name: '12j1a.1 directed ally attack resolves named hostile fallback when semantic OppTargets omitted',
+    name: '12j1a.1 directed ally attack request resolves named hostile fallback only after autonomous companion attack',
     run() {
       const tracker = {
         Seraphina: trackerEntry({
@@ -2057,9 +2063,8 @@ const tests = [
         Darai: trackerEntry({ currentDisposition: { B: 2, F: 3, H: 2 } }),
       };
       const randoms = [
-        nthRandomForDie(10, 20),
-        nthRandomForDie(10, 20),
-        ...Array(5).fill(nthRandomForDie(10, 20)),
+        ...Array(11).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(18, 20),
         nthRandomForDie(88, 100),
         nthRandomForDie(16, 20),
         nthRandomForDie(8, 20),
@@ -2091,6 +2096,8 @@ const tests = [
       assert.equal(proactive.Proactive, 'Y');
       assert.equal(proactive.CompanionInitiativeTag, 'Companion_Attack');
       assert.equal(proactive.ProactivityTarget, 'Raider2');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.STAKES, 'N');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.CompanionCommand.Mode, 'REQUEST_ONLY');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.AttackType, 'CompanionAttack');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Raider2');
       assert.match(prompt(report), /Seraphina: companion attack against Raider2/);
@@ -2119,9 +2126,8 @@ const tests = [
         Darai: trackerEntry({ currentDisposition: { B: 1, F: 3, H: 2 } }),
       };
       const randoms = [
-        nthRandomForDie(15, 20),
-        nthRandomForDie(2, 20),
-        ...Array(6).fill(nthRandomForDie(10, 20)),
+        ...Array(11).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(18, 20),
         nthRandomForDie(88, 100),
         nthRandomForDie(16, 20),
         nthRandomForDie(8, 20),
@@ -2150,13 +2156,15 @@ const tests = [
         }),
       }, randoms);
       assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.hostilesInScene.NPC, ['Raider2']);
-      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['Ogre']);
+      assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
       const proactive = report.finalNarrativeHandoff.proactivityResults.Seraphina;
       assert.equal(proactive.Proactive, 'Y');
       assert.equal(proactive.CompanionInitiativeTag, 'Companion_Attack');
       assert.equal(proactive.ProactivityTarget, 'Raider2');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.AttackType, 'CompanionAttack');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Raider2');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.STAKES, 'N');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.CompanionCommand.Mode, 'REQUEST_ONLY');
       assert.match(prompt(report), /Seraphina: companion attack against Raider2/);
       assert.match(prompt(report), /Seraphina's only resolved attack target this beat is Raider2/i);
       assert.equal(auditIncludes(report, 'directedCompanionAttackHostilePoolRepair'), true);
@@ -2179,7 +2187,7 @@ const tests = [
         }),
         Darai: trackerEntry({ currentDisposition: { B: 2, F: 3, H: 2 } }),
       };
-      const report = runCase({
+      const report = runCaseWithRandoms({
         userText: 'I do not attack. I point at the axe-man and shout, "Seraphina, take the axe-man down now. Hit him before he can move."',
         tracker,
         ledger: baseLedger({
@@ -2200,9 +2208,17 @@ const tests = [
           },
           relationshipEngine: [relationship('Seraphina'), relationship('Raider2'), relationship('Darai')],
         }),
-      });
+      }, [
+        ...Array(11).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(18, 20),
+        nthRandomForDie(88, 100),
+        nthRandomForDie(16, 20),
+        nthRandomForDie(8, 20),
+      ]);
       assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.hostilesInScene.NPC, ['Raider2']);
       assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.STAKES, 'N');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.CompanionCommand.Mode, 'REQUEST_ONLY');
       assert.equal(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'Raider2');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'Raider2');
     },
@@ -2917,8 +2933,8 @@ const tests = [
         }),
       };
       const randoms = [
-        nthRandomForDie(1, 20),
-        nthRandomForDie(20, 20),
+        ...Array(11).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(18, 20),
         nthRandomForDie(88, 100),
         nthRandomForDie(4, 20),
         nthRandomForDie(18, 20),
@@ -2986,7 +3002,8 @@ const tests = [
         }),
       };
       const randoms = [
-        ...Array(6).fill(nthRandomForDie(10, 20)),
+        ...Array(11).fill(nthRandomForDie(10, 20)),
+        nthRandomForDie(18, 20),
         nthRandomForDie(88, 100),
         nthRandomForDie(16, 20),
         nthRandomForDie(8, 20),
@@ -4675,13 +4692,14 @@ const tests = [
     },
   },
   {
-    name: '38 directed companion attack uses hostilesInScene without mutating OppTargets',
+    name: '38 directed companion attack request uses hostilesInScene without mutating OppTargets',
     run() {
       const report = runCase({
         userText: 'Seraphina, hit the axe raider hard.',
         dice: [
           10, 10, 10, 10, 10, 10,
-          100,
+          10, 10, 10, 10, 10,
+          18, 100,
           18, 4,
         ],
         tracker: {
@@ -4710,6 +4728,8 @@ const tests = [
       const packet = report.finalNarrativeHandoff.resolutionPacket;
       assert.deepEqual(packet.hostilesInScene.NPC, ['axe raider', 'knife raider']);
       assert.deepEqual(packet.OppTargets.NPC, ['(none)']);
+      assert.equal(packet.STAKES, 'N');
+      assert.equal(packet.CompanionCommand.Mode, 'REQUEST_ONLY');
       assert.equal(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'axe raider');
       assert.equal(report.finalNarrativeHandoff.proactivityResults.Seraphina.CompanionInitiativeTag, 'Companion_Attack');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina.ProactivityTarget, 'axe raider');
@@ -4749,6 +4769,8 @@ const tests = [
         }),
       });
       assert.deepEqual(report.finalNarrativeHandoff.resolutionPacket.OppTargets.NPC, ['(none)']);
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.STAKES, 'N');
+      assert.equal(report.finalNarrativeHandoff.resolutionPacket.CompanionCommand.Mode, 'REQUEST_ONLY');
       assert.notEqual(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'axe raider');
       assert.notEqual(report.finalNarrativeHandoff.proactivityResults.Seraphina.ProactivityTarget, 'knife raider');
       assert.equal(report.finalNarrativeHandoff.aggressionResults.Seraphina, undefined);

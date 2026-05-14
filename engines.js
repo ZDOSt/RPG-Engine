@@ -773,7 +773,8 @@ function NPCProactivityEngine(npcHandoffList, resolutionPacket, chaosHandoff, di
     rule: never target {{user}}
     rule: do not use friendly/neutral ActionTargets, BenefitedObservers, or HarmedObservers as friendly attack targets
     rule: hostilesInScene.NPC is the established hostile pool; use it only for hostile target selection, not relationship routing
-    rule: direct companion commands may choose a hostile by name only from established hostiles in hostilesInScene.NPC, hostile handoffs, or hostile tracker entries; never create a new hostile from user wording alone
+    rule: direct companion commands are tactical requests only; they never force proactivity, never create a user-resolved roll to make the companion act, and never guarantee obedience
+    rule: if companion crisis initiative independently produces Companion_Attack, a direct companion command may choose a hostile by name only from established hostiles in hostilesInScene.NPC, hostile handoffs, or hostile tracker entries; never create a new hostile from user wording alone
     rule: if multiple established hostiles exist and the command/narration does not name one, do not guess
     if OppTargets.NPC has a valid hostile target not equal to acting NPC -> that NPC
     else if ActionTargets has a valid hostile target not equal to acting NPC and that target's tracker/handoff state is hostile (H>=3, HATRED, or HOSTILITY lock) -> that NPC

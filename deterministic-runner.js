@@ -400,7 +400,9 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     audit.push(`2.3 intimacyAdvanceExplicit=${intimacyAdvanceExplicit}`);
     audit.push(`2.3a boundaryViolationExplicit=${boundaryViolationExplicit}`);
     const pureLoveDeclarationEvidence = getPureLoveDeclarationNoRollEvidence(semantic, goal, refereeContext);
-    const stakesOverrideEvidence = pureLoveDeclarationEvidence
+    const companionCommandNoRollEvidence = getDirectedCompanionCommandNoRollEvidence(semantic, identityTargets, trackerSnapshot, targetClassifier, context);
+    const stakesOverrideEvidence = companionCommandNoRollEvidence
+        || pureLoveDeclarationEvidence
         || getRomanceNoRollOverrideEvidence(semantic, semanticHasStakes, boundaryViolationExplicit, intimacyAdvanceExplicit);
     const hasStakes = stakesOverrideEvidence?.hasStakes || semanticHasStakes;
     const stakesRule = stakesOverrideEvidence?.rule || 'semantic_final';
@@ -411,7 +413,10 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     }
     audit.push(`2.4 hasStakes=${hasStakes}`);
 
-    const sanitizedTargets = sanitizeTargets(identityTargets, targetClassifier, { hasStakes, goal, boundaryViolationExplicit });
+    const semanticTargetsForResolution = companionCommandNoRollEvidence
+        ? normalizeDirectedCompanionCommandTargets(identityTargets, targetClassifier, semantic, trackerSnapshot, context, audit)
+        : identityTargets;
+    const sanitizedTargets = sanitizeTargets(semanticTargetsForResolution, targetClassifier, { hasStakes, goal, boundaryViolationExplicit });
     const directedCompanionTargets = repairDirectedCompanionAttackHostilePool(sanitizedTargets, ledger, trackerSnapshot, semantic, context, audit);
     const targets = repairLivingOppositionTargets(directedCompanionTargets, targetClassifier, { hasStakes, semantic, goal, boundaryViolationExplicit, context }, audit);
     audit.push(`2.4d identifyTargets.final=${formatTargets(targets)}`);
@@ -597,6 +602,13 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         classifyCombatActionSequence: combatActionSequence ? 'Y' : 'N',
         activeHostileThreat: bool(semantic.activeHostileThreat) ? 'Y' : 'N',
         classifyPhysicalBoundaryPressure: boundaryReferee.value ? 'Y' : 'N',
+        CompanionCommand: companionCommandNoRollEvidence
+            ? {
+                Mode: 'REQUEST_ONLY',
+                NPCs: companionCommandNoRollEvidence.companions,
+                Commands: companionCommandNoRollEvidence.commands,
+            }
+            : null,
         hostilesInScene: { NPC: showNone(targets.hostilesInScene?.NPC) },
         ActionTargets: showNone(targets.ActionTargets),
         OppTargets: { NPC: showNone(targets.OppTargets.NPC), ENV: showNone(targets.OppTargets.ENV) },
@@ -1799,6 +1811,116 @@ function isDirectedCompanionCommandAction(semantic, goal, targets, context) {
     });
 }
 
+function getDirectedCompanionCommandNoRollEvidence(semantic, targets, trackerSnapshot, classifier, context) {
+    const latestUserText = relationshipText(getLatestUserTextFromContext(context));
+    if (!latestUserText) return null;
+    const commands = directedCompanionCommandItems(targets, trackerSnapshot, classifier, latestUserText);
+    if (!commands.length) return null;
+
+    const companionKeys = new Set(commands.map(item => normalizeNameKey(item.name)));
+    const otherDirectTargets = toRealArray(targets?.ActionTargets).filter(name => !companionKeys.has(normalizeNameKey(name)));
+    const commandSource = [
+        ...commands.map(item => item.command),
+        semanticSourceText(semantic),
+    ].filter(Boolean).join(' ');
+    const requestedHostileTargets = otherDirectTargets.filter(name =>
+        isRequestedHostileCompanionTarget(name, commandSource, trackerSnapshot, classifier)
+    );
+    const unresolvedDirectTargets = otherDirectTargets.filter(name =>
+        !requestedHostileTargets.some(hostile => sameName(hostile, name))
+    );
+    if (unresolvedDirectTargets.length || toRealArray(targets?.HarmedObservers).length) return null;
+
+    const source = semanticSourceText(semantic);
+    if (!looksLikeCompanionCommandGoal(source)
+        && !looksLikeCompanionCommandGoal(commandSource)
+        && !commands.some(item => source.includes(normalizeNameKey(item.name)))) {
+        return null;
+    }
+
+    return {
+        hasStakes: 'N',
+        rule: 'hard_override_companion_command_request_only',
+        companions: commands.map(item => item.name),
+        commands: commands.map(item => item.command),
+        evidence: {
+            hardRule: 'ResolutionEngine.hasStakes: direct ally/companion commands are tactical requests, not user-resolved attempts to make the NPC act',
+            from: bool(semantic?.hasStakes) ? 'Y' : 'N',
+            to: 'N',
+            companions: commands.map(item => item.name),
+            requestedHostiles: requestedHostileTargets,
+            evidence: source.slice(0, 220),
+        },
+    };
+}
+
+function isRequestedHostileCompanionTarget(name, commandSource, trackerSnapshot, classifier) {
+    if (!classifier?.isLiving?.(name)) return false;
+    if (!sourceMentionsNpcOrAlias(commandSource, { NPC: name, ...normalizeTrackerEntry(trackerSnapshot?.[name] || {}) })) return false;
+    return trackerEntryLooksHostile(trackerSnapshot?.[name]);
+}
+
+function directedCompanionCommandItems(targets, trackerSnapshot, classifier, latestUserText) {
+    const actionTargets = toRealArray(targets?.ActionTargets);
+    const trackerCompanions = Object.entries(trackerSnapshot || {})
+        .filter(([name, entry]) => isLikelyCompanionCommandTarget(name, entry, classifier))
+        .map(([name]) => name);
+    const names = unique([...actionTargets, ...trackerCompanions]);
+    return names
+        .map(name => ({ name, command: directedCompanionCommandText(name, latestUserText) }))
+        .filter(item => item.command && (
+            isDirectedCompanionAttackCommandText(item.command)
+            || isDirectedCompanionDefensiveCommandText(item.command)
+        ));
+}
+
+function isLikelyCompanionCommandTarget(name, entry, classifier) {
+    if (!classifier?.isLiving?.(name)) return false;
+    const normalized = normalizeTrackerEntry(entry || {});
+    const fin = normalized.currentDisposition || { B: 2, F: 2, H: 2 };
+    return Number(fin.B || 0) >= 2
+        && Number(fin.F || 0) <= 2
+        && Number(fin.H || 0) <= 2
+        && (normalized.dominantLock || 'None') === 'None';
+}
+
+function looksLikeCompanionCommandGoal(source) {
+    const text = String(source || '').toLowerCase();
+    return /\b(?:command|order|tell|ask|signal|gesture|call|shout|yell|snap)\b.{0,120}\b(?:ally|companion|partner|friend|seraphina|npc)\b/.test(text)
+        || /\b(?:ally|companion|partner|friend|seraphina|npc)\b.{0,120}\b(?:attack|hit|strike|cover|protect|guard|block|intercept|help|save|stop)\b/.test(text)
+        || /\b(?:orderallyattack|commandcompanionattack|orderally|commandcompanion|tactical request)\b/.test(text.replace(/\s+/g, ''));
+}
+
+function normalizeDirectedCompanionCommandTargets(targets, classifier, semantic, trackerSnapshot, context, audit) {
+    const latestUserText = relationshipText(getLatestUserTextFromContext(context));
+    const hostilesInScene = toRealArray(targets?.hostilesInScene?.NPC);
+    const actionTargets = toRealArray(targets?.ActionTargets);
+    const companionTargets = directedCompanionCommandItems(targets, trackerSnapshot, classifier, latestUserText).map(item => item.name);
+    const companionKeys = new Set(companionTargets.map(normalizeNameKey));
+    const commandSource = [
+        ...companionTargets.map(name => directedCompanionCommandText(name, latestUserText)),
+        semanticSourceText(semantic),
+    ].filter(Boolean).join(' ').toLowerCase();
+    const commandMentionedHostiles = [
+        ...toRealArray(targets?.OppTargets?.NPC),
+        ...actionTargets.filter(name => !companionKeys.has(normalizeNameKey(name))),
+        ...toRealArray(targets?.HarmedObservers),
+    ].filter(name => classifier.isLiving(name) && sourceMentionsNpcOrAlias(commandSource, { NPC: name }));
+    const normalized = {
+        hostilesInScene: { NPC: unique([...hostilesInScene, ...commandMentionedHostiles]) },
+        ActionTargets: companionTargets,
+        OppTargets: { NPC: [], ENV: toRealArray(targets?.OppTargets?.ENV) },
+        BenefitedObservers: [],
+        HarmedObservers: [],
+    };
+    audit?.push(`2.4c.1 directedCompanionCommandTargetNormalization=${compact({
+        hardRule: 'ally commands are request-only; keep addressed companion as ActionTarget, preserve hostile pool, and remove requested victims/beneficiaries from resolution routing until companion proactivity actually acts',
+        from: targetSummary(targets),
+        to: targetSummary(normalized),
+    })}`);
+    return normalized;
+}
+
 function repairDirectedCompanionAttackHostilePool(targets, ledger, trackerSnapshot, semantic, context, audit) {
     const repaired = {
         hostilesInScene: {
@@ -2924,7 +3046,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
         let tier = proactivityGuard
             ? 'DORMANT'
             : classifyProactivityTier(handoff, chaosBand, counterPotential, lock, fin);
-        tier = adjustCompanionProactivityTier(tier, handoff, fin, { kind, resolutionPacket, chaosBand, counterPotential, handoffs });
+        tier = adjustCompanionProactivityTier(tier, handoff, fin, { kind, resolutionPacket, chaosBand, counterPotential, handoffs, latestUserText });
 
         results[handoff.NPC] = {
             Proactive: 'N',
@@ -2944,56 +3066,20 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             audit.push(`6.4g.1 proactivityRefereeGuard=${proactivityGuard}`);
         }
 
-        const directedCompanionAttackTarget = detectDirectedCompanionAttackTarget(handoff, resolutionPacket, latestUserText, handoffs);
-        const defensiveCompanionCommand = detectDirectedCompanionDefensiveCommand(handoff, latestUserText);
-        if (directedCompanionAttackTarget && isDirectedCompanionAttackEligible(handoff, fin)) {
-            const commandDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
-            candidates.push({
+        const directedCompanionCommand = directedCompanionCommandText(handoff.NPC, latestUserText);
+        if (directedCompanionCommand) {
+            audit.push(`6.4h directedCompanionCommandContext=${compact({
                 NPC: handoff.NPC,
-                die: 1000 + commandDie,
-                tier: 'FORCED',
-                intent: 'ESCALATE_VIOLENCE',
-                impulse: 'BOND',
-                ProactivityTarget: directedCompanionAttackTarget,
-                TargetsUser: 'N',
-                Threshold: 'AUTO',
-                passes: 'Y',
-                CompanionInitiative: 'Y',
-                CompanionInitiativeTag: 'Companion_Attack',
-                CompanionInitiativeDie: commandDie,
-                CompanionInitiativeContext: 'crisis',
-                CompanionCrisisDire: isDireCompanionCrisis({ resolutionPacket }) ? 'Y' : 'N',
-            });
-            audit.push(`6.4h directedCompanionAttack=${compact({ NPC: handoff.NPC, target: directedCompanionAttackTarget, CompanionInitiativeDie: commandDie })}`);
-            continue;
-        }
-        if (defensiveCompanionCommand && isDirectedCompanionAttackEligible(handoff, fin)) {
-            const commandDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
-            candidates.push({
-                NPC: handoff.NPC,
-                die: 900 + commandDie,
-                tier: 'FORCED',
-                intent: 'SUPPORT_ACT',
-                impulse: 'BOND',
-                ProactivityTarget: USER_PROACTIVITY_TARGET,
-                TargetsUser: 'Y',
-                Threshold: 'AUTO',
-                passes: 'Y',
-                CompanionInitiative: 'Y',
-                CompanionInitiativeTag: 'Companion_Cover',
-                CompanionInitiativeDie: commandDie,
-                CompanionInitiativeContext: 'crisis',
-                CompanionCrisisDire: isDireCompanionCrisis({ resolutionPacket }) ? 'Y' : 'N',
-            });
-            audit.push(`6.4h.1 directedCompanionDefense=${compact({ NPC: handoff.NPC, CompanionInitiativeDie: commandDie })}`);
-            continue;
+                hardRule: 'ally commands are tactical requests only; they do not force proactivity or resolve the companion action',
+                command: directedCompanionCommand,
+            })}`);
         }
 
         if (tier === 'FORCED') {
             const intent = selectIntent(impulse, kind, fin, handoff.Override, handoff.PressureMode);
             const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
             const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }, refereeContext) ? 'Y' : 'N';
-            candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die: 20, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential, handoffs }));
+            candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die: 20, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: 'AUTO', passes: 'Y' }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential, handoffs, latestUserText }));
             audit.push('6.4i FORCED candidate');
             continue;
         }
@@ -3012,7 +3098,7 @@ function runProactivity(ledger, handoffs, resolutionPacket, chaosHandoff, dice, 
             const intent = selectIntent(impulse, kind, fin, handoff.Override, handoff.PressureMode);
             const proactivityTarget = proactivityGuard ? NONE : deriveProactivityTarget(handoff, resolutionPacket, intent);
             const targetsUser = isUserProactivityTarget({ ProactivityTarget: proactivityTarget }, refereeContext) ? 'Y' : 'N';
-            candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: threshold, passes }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential, handoffs }));
+            candidates.push(applyInitiativeOverridesIfEligible({ NPC: handoff.NPC, die, tier, intent, impulse, ProactivityTarget: proactivityTarget, TargetsUser: targetsUser, Threshold: threshold, passes }, handoff, fin, dice, audit, { kind, resolutionPacket, chaosBand, counterPotential, handoffs, latestUserText }));
             audit.push(`6.5c selectIntent=${intent}`);
             audit.push(`6.5e ProactivityTarget=${proactivityTarget}; TargetsUser=${targetsUser}`);
         } else {
@@ -3161,7 +3247,8 @@ function applyCompanionCrisisInitiativeIfEligible(candidate, handoff, fin, dice,
 
     const companionDie = typeof dice.d100 === 'function' ? dice.d100() : Math.floor(Math.random() * 100) + 1;
     const companionContext = classifyCompanionInitiativeContext(context);
-    const attackTarget = resolveFriendlyCrisisAttackTarget(handoff, context);
+    const commandText = directedCompanionCommandText(handoff?.NPC, context.latestUserText);
+    const attackTarget = resolveFriendlyCrisisAttackTarget(handoff, { ...context, commandText });
     const crisisDire = isDireCompanionCrisis(context) ? 'Y' : 'N';
     const canRetreat = canCompanionRetreatInCrisis(handoff, fin, crisisDire);
     const tag = companionCrisisTagFromDie(companionDie, fin, handoff?.EstablishedRelationship === 'Y', crisisDire, canRetreat, attackTarget);
@@ -3189,11 +3276,13 @@ function applyCompanionCrisisInitiativeIfEligible(candidate, handoff, fin, dice,
 
 function isCompanionCrisisInitiativeEligible(handoff, fin, context = {}) {
     const relation = handoff?.RelationToUserAction || {};
+    const requestOnlyDirectCommand = context?.resolutionPacket?.CompanionCommand?.Mode === 'REQUEST_ONLY'
+        && toRealArray(context.resolutionPacket.CompanionCommand.NPCs).some(name => sameName(name, handoff?.NPC));
     return fin.B >= 2
         && fin.F <= 2
         && fin.H <= 2
         && (handoff?.Lock || 'None') === 'None'
-        && !relation.isDirect
+        && (!relation.isDirect || requestOnlyDirectCommand)
         && !relation.isOpp
         && !relation.isHarmed
         && classifyCompanionInitiativeContext(context) === 'crisis';
@@ -3454,6 +3543,11 @@ function classifyCompanionInitiativeContext(context = {}) {
     const packet = context.resolutionPacket || {};
     if (context.counterPotential && context.counterPotential !== 'none') return 'crisis';
     if (packet.classifyCombatActionSequence === 'Y' || packet.classifyHostilePhysicalIntent === 'Y' || packet.activeHostileThreat === 'Y') return 'crisis';
+    if (packet.CompanionCommand?.Mode === 'REQUEST_ONLY'
+        && toRealArray(packet.CompanionCommand.NPCs).length
+        && toRealArray(packet.hostilesInScene?.NPC).length === 1) {
+        return 'crisis';
+    }
     if (context.chaosBand && context.chaosBand !== 'None') return 'active';
     if (packet.STAKES === 'Y' && firstReal(packet.OppTargets?.ENV) && environmentThreatLooksUrgent(packet)) return 'crisis';
     if (packet.STAKES === 'Y') return context.kind === 'Skill' || context.kind === 'Social' ? 'active' : 'crisis';
