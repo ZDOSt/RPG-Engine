@@ -1302,6 +1302,10 @@ function getTrackerRoot(context = getContext()) {
     const root = context.chatMetadata.structuredPreflightTracker;
     root.npcs = root.npcs || {};
     root.user = normalizeTrackerUserState(root.user || {});
+    const seededPlayerTracker = seedPlayerTrackerFromPersonaIfEmpty(root, context);
+    if (seededPlayerTracker && typeof context.saveMetadataDebounced === 'function') {
+        context.saveMetadataDebounced();
+    }
     root.rapportClock = normalizeRapportClockState(root.rapportClock);
     root.snapshots = root.snapshots || {};
     return root;
@@ -1345,6 +1349,123 @@ function getPersonaText(context = getContext()) {
 
 function getPersonaCoreStats(context = getContext()) {
     return parseCoreStatsBlock(getPersonaText(context));
+}
+
+function seedPlayerTrackerFromPersonaIfEmpty(root, context = getContext()) {
+    if (!root || root.personaInventorySeeded) return false;
+    const user = normalizeTrackerUserState(root.user || {});
+    if (user.gear.length || user.inventory.length) {
+        root.user = user;
+        root.personaInventorySeeded = { skipped: true, reason: 'tracker_already_has_items', at: Date.now() };
+        return false;
+    }
+
+    const persona = getPersonaText(context);
+    const seed = extractPersonaTrackerSeed(persona);
+    if (!seed.gear.length && !seed.inventory.length) return false;
+
+    root.user = normalizeTrackerUserState({
+        ...user,
+        gear: seed.gear,
+        inventory: seed.inventory,
+    });
+    root.personaInventorySeeded = {
+        at: Date.now(),
+        hash: hashTextForSeed(persona),
+        gearCount: seed.gear.length,
+        inventoryCount: seed.inventory.length,
+    };
+    return true;
+}
+
+function extractPersonaTrackerSeed(personaText) {
+    const gear = [];
+    const inventory = [];
+    const explicitGear = extractPersonaListSection(personaText, ['gear', 'equipment', 'equipped']);
+    const explicitInventory = extractPersonaListSection(personaText, ['inventory', 'items', 'carried items']);
+
+    for (const item of explicitGear) addUniqueTrackerSeedItem(gear, item);
+    for (const item of explicitInventory) {
+        if (!explicitGear.length && looksLikeEquippedGear(item)) {
+            addUniqueTrackerSeedItem(gear, item);
+        } else {
+            addUniqueTrackerSeedItem(inventory, item);
+        }
+    }
+
+    return { gear, inventory };
+}
+
+function extractPersonaListSection(text, headingNames) {
+    const lines = String(text ?? '').split(/\r?\n/);
+    const result = [];
+    let active = false;
+    for (const line of lines) {
+        if (isPersonaSectionHeading(line)) {
+            active = personaHeadingMatches(line, headingNames);
+            continue;
+        }
+        if (!active) continue;
+        const item = parsePersonaListItem(line);
+        if (item) result.push(item);
+    }
+    return result;
+}
+
+function isPersonaSectionHeading(line) {
+    const text = String(line ?? '').trim();
+    if (!text) return false;
+    if (/^#{1,6}\s+/.test(text)) return true;
+    if (/^[A-Z][A-Z0-9 _/&()-]{2,}:?\s*$/.test(stripMarkdownFormatting(text))) return true;
+    return false;
+}
+
+function personaHeadingMatches(line, headingNames) {
+    const heading = stripMarkdownFormatting(line)
+        .replace(/^#{1,6}\s*/, '')
+        .replace(/[:=]+$/g, '')
+        .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    return headingNames.some(name => new RegExp(`\\b${escapeRegExp(name)}\\b`, 'i').test(heading));
+}
+
+function parsePersonaListItem(line) {
+    const text = stripMarkdownFormatting(line)
+        .replace(/^\s*(?:[-*+]|[0-9]+[.)])\s+/, '')
+        .trim();
+    if (!text || text === stripMarkdownFormatting(line).trim()) return '';
+    if (/^(?:none|not specified|n\/a|null|empty)$/i.test(text)) return '';
+    return text;
+}
+
+function stripMarkdownFormatting(value) {
+    return String(value ?? '')
+        .replace(/[`*_~]/g, '')
+        .trim();
+}
+
+function looksLikeEquippedGear(item) {
+    if (/\b(?:knife|dagger|sword|axe|mace|bow|crossbow|staff|wand|tool|kit|waterskin|key|coin|coins|potion|scroll|book|rope|torch|flint|ration|rations)\b/i.test(String(item || ''))) return false;
+    return /\b(?:shirt|tunic|robe|coat|cloak|jacket|trousers|pants|skirt|dress|boots?|shoes?|sandals?|gloves?|belt|armor|armour|helmet|hat|hood|mask|gauntlets?|bracers?|greaves?|clothes?|clothing|linen|leather)\b/i.test(String(item || ''));
+}
+
+function addUniqueTrackerSeedItem(list, item) {
+    const text = String(item || '').trim();
+    if (!text) return;
+    if (list.some(existing => existing.toLowerCase() === text.toLowerCase())) return;
+    list.push(text);
+}
+
+function hashTextForSeed(text) {
+    let hash = 2166136261;
+    const source = String(text || '');
+    for (let index = 0; index < source.length; index += 1) {
+        hash ^= source.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
 }
 
 function getPlayerCoreStats(context = getContext()) {
@@ -2853,6 +2974,11 @@ async function approvePlayerSheet(root, context = getContext()) {
         source: creator.flow === 'persona' ? 'existing_persona_conversion' : 'generated_character',
         approvedAt: Date.now(),
     };
+    const trackerRoot = getTrackerRoot(context);
+    if (trackerRoot && !normalizeTrackerUserState(trackerRoot.user || {}).gear.length && !normalizeTrackerUserState(trackerRoot.user || {}).inventory.length) {
+        trackerRoot.personaInventorySeeded = null;
+        seedPlayerTrackerFromPersonaIfEmpty(trackerRoot, context);
+    }
     root.creator = { stage: 'approved' };
     globalThis.toastr?.success?.('Player sheet inserted into the active persona.', EXTENSION_NAME, { timeOut: 6000 });
 }
@@ -3595,6 +3721,7 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
 
     state.chatSignature = captureChatSignature(context);
     restoreTrackerForRegeneration(type);
+    getTrackerRoot(context);
     state.pendingGeneration = {
         type: type || 'normal',
         trackerSnapshot: buildTrackerSnapshot(context),
