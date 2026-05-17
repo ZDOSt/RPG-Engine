@@ -284,7 +284,7 @@ function turnAndAgencyControl() {
   policy: LOCKED
 
   mandate:
-    Begin at the immediate consequence after {{user}} input. Treat {{user}} input as already completed unless mechanics say it failed, stalled, or was interrupted. Run the world, NPCs, environment, mechanics, and unresolved pressure in strict cause-effect order. Stop when {{user}} is targeted by a question, command, request, incoming attack frame, unresolved impact, or choice point. End on a playable concrete beat: speech, action, danger, obstacle, object, changed position, revealed consequence, blocked access, or incoming pressure.
+    Begin at the immediate consequence after {{user}} input. Treat {{user}} input as already completed unless mechanics say it failed, stalled, or was interrupted. If the narrator handoff explicitly enables PROXY USER ACTION MODE, narrate only the specified {{user}} action as resolved for that turn, then return to normal agency separation. Run the world, NPCs, environment, mechanics, and unresolved pressure in strict cause-effect order. Stop when {{user}} is targeted by a question, command, request, incoming attack frame, unresolved impact, or choice point. End on a playable concrete beat: speech, action, danger, obstacle, object, changed position, revealed consequence, blocked access, or incoming pressure.
 
   pattern:
     - "The blade stopped an inch from {{user}}'s throat."
@@ -292,7 +292,7 @@ function turnAndAgencyControl() {
     - "The guard stepped into the doorway and lowered the spear across the frame. \"Not another step.\""
 
   ABSOLUTE BAN:
-    - Writing {{user}} speech, thoughts, intentional actions, reactions, silence, choices, follow-up, recap, travel filler after a skip, "as you" phrasing, opening recap transitions, ambient filler endings, passive waiting endings, explicit waiting, meta-invitations, all-eyes-on-user framing, silence-as-ending, and meta-questions.
+    - Writing {{user}} speech, thoughts, reactions, silence, choices, follow-up, or intentional actions beyond the exact active PROXY USER ACTION MODE instruction; recap, travel filler after a skip, "as you" phrasing, opening recap transitions, ambient filler endings, passive waiting endings, explicit waiting, meta-invitations, all-eyes-on-user framing, silence-as-ending, and meta-questions.
 }`;
 const DEFAULT_FINAL_REMINDER_PROMPT = String.raw`FINAL RECALL — APPLY ALL LOCKED ENFORCEMENT FUNCTIONS BEFORE OUTPUT.
 REFERENCE ONLY. DO NOT OUTPUT THIS BLOCK.
@@ -346,14 +346,15 @@ call dialogueDiscipline()
 call turnAndAgencyControl()
 - Begin at the immediate consequence after {{user}} input.
 - Start with the world's response, not a recap transition that restates {{user}} speech or action.
+- If the narrator handoff explicitly enables PROXY USER ACTION MODE, narrate only that specified {{user}} action as resolved for this turn.
 - Run the world, NPCs, environment, mechanics, and unresolved pressure.
 - End on something {{user}} can immediately respond to: speech, action, danger, obstacle, object, changed position, revealed consequence, blocked access, or incoming pressure.
 - Make the final beat playable: {{user}} can answer, move, defend, take, refuse, inspect, interrupt, or choose a direction.
 - For quiet endings, leave a concrete unresolved change in view.
-- Keep {{user}} agency fully separate.
+- Keep {{user}} agency fully separate outside the exact active PROXY USER ACTION MODE instruction; add no extra {{user}} speech, thoughts, choices, reactions, or follow-up.
 
 FINAL HARD PROHIBITION:
-- Remove before output: {{user}} speech, thoughts, intentional actions, reactions, silence, or choices; recap or "as you" phrasing; opening recap transitions such as "the words left [name]'s mouth"; omniscience; premature names; exposition dumps; metaphor; simile; sensory analogy phrasing such as sounded like, felt like, looked like, as if, or as though; idiom; poetic framing; personification; emotional physics; decorative material motion such as blooming dust, breathing rooms, falling shadows, waiting silence, or similar ornamental motion; decorative ambience; ambient mood scent; describing the smell or taste of air; romanticized odor language; taste-the-air phrasing; decorative sensory haze; floating atmosphere; repeated smell/taste mentions unless physically unavoidable; internal-state labels; canned body-language shorthand; somatic emotional shorthand; stock body-language shorthand; autonomic tells used as emotion labels; micro-expression shorthand; body-part emotion metonymy; isolated jaw, throat, mouth, eye, facial muscle, breath, pulse, heart, stomach, skin, cheek, or hand reactions as coded emotion; blushing/flushing/heat-in-cheeks; eye-language mood shortcuts; jaw tightened; jaw worked; muscle in her jaw; muscle in his jaw; throat worked; throat bobbed; opened mouth then closed it; shadow fell over eyes; expression flickered; face softened; breath caught; breath catches; breath hitched; breath hitches; breath stalled; breath snagged; breathing caught; breathing hitched; forgot to breathe; could not breathe; heart skipped; pulse jumped; stomach twisted; "not X, but Y" contrast phrasing; ambient filler endings; passive waiting endings; explicit waiting; waits for your response; awaits your response; the choice is yours; what do you do; all eyes turn to {{user}}; meta-questions; robotic one-action-per-sentence cadence; repetitive subject-verb action lists.
+- Remove before output: {{user}} speech, thoughts, reactions, silence, choices, follow-up, or intentional actions beyond the exact active PROXY USER ACTION MODE instruction; recap or "as you" phrasing; opening recap transitions such as "the words left [name]'s mouth"; omniscience; premature names; exposition dumps; metaphor; simile; sensory analogy phrasing such as sounded like, felt like, looked like, as if, or as though; idiom; poetic framing; personification; emotional physics; decorative material motion such as blooming dust, breathing rooms, falling shadows, waiting silence, or similar ornamental motion; decorative ambience; ambient mood scent; describing the smell or taste of air; romanticized odor language; taste-the-air phrasing; decorative sensory haze; floating atmosphere; repeated smell/taste mentions unless physically unavoidable; internal-state labels; canned body-language shorthand; somatic emotional shorthand; stock body-language shorthand; autonomic tells used as emotion labels; micro-expression shorthand; body-part emotion metonymy; isolated jaw, throat, mouth, eye, facial muscle, breath, pulse, heart, stomach, skin, cheek, or hand reactions as coded emotion; blushing/flushing/heat-in-cheeks; eye-language mood shortcuts; jaw tightened; jaw worked; muscle in her jaw; muscle in his jaw; throat worked; throat bobbed; opened mouth then closed it; shadow fell over eyes; expression flickered; face softened; breath caught; breath catches; breath hitched; breath hitches; breath stalled; breath snagged; breathing caught; breathing hitched; forgot to breathe; could not breathe; heart skipped; pulse jumped; stomach twisted; "not X, but Y" contrast phrasing; ambient filler endings; passive waiting endings; explicit waiting; waits for your response; awaits your response; the choice is yours; what do you do; all eyes turn to {{user}}; meta-questions; robotic one-action-per-sentence cadence; repetitive subject-verb action lists.
 
 FINAL CHECK:
 - Output only final narration.
@@ -3435,6 +3436,52 @@ function getLatestUserText(chat) {
     return '';
 }
 
+function getLatestUserTextFromContext(context = getContext()) {
+    if (!Array.isArray(context?.chat)) return '';
+    for (let index = context.chat.length - 1; index >= 0; index -= 1) {
+        const message = context.chat[index];
+        if (!message?.is_user && message?.role !== 'user') continue;
+        const text = String(message?.mes ?? message?.content ?? '').trim();
+        if (text) return text;
+    }
+    return '';
+}
+
+function detectStructuredUserInputMode(text) {
+    const trimmed = String(text ?? '').trim();
+    if (!trimmed) return { mode: 'normal', innerText: '' };
+
+    if (trimmed.length >= 6 && trimmed.startsWith('(((') && trimmed.endsWith(')))')) {
+        return { mode: 'proxy', innerText: trimmed.slice(3, -3).trim() };
+    }
+
+    if (trimmed.length >= 4 && trimmed.startsWith('((') && trimmed.endsWith('))')) {
+        return { mode: 'ooc', innerText: trimmed.slice(2, -2).trim() };
+    }
+
+    return { mode: 'normal', innerText: trimmed };
+}
+
+function clearPromptOptionPrompts(context = getContext()) {
+    if (!context?.extensionPrompts) return;
+    delete context.extensionPrompts[WRITING_STYLE_PROMPT_KEY];
+    delete context.extensionPrompts[PROSE_RULES_PROMPT_KEY];
+    delete context.extensionPrompts[FINAL_REMINDER_PROMPT_KEY];
+    delete context.extensionPrompts[LEGACY_WRITING_STYLE_PROMPT_KEY];
+    delete context.extensionPrompts[LEGACY_PROSE_RULES_PROMPT_KEY];
+}
+
+function buildOocResponsePrompt(userText) {
+    const note = clipText(String(userText ?? ''), 2000);
+    return [
+        '[STRUCTURED_PREFLIGHT_OOC]',
+        'The latest user message is out of character.',
+        'Reply directly to the user as an assistant answer.',
+        'Do not narrate the story, do not use scene mechanics, and do not update tracker state.',
+        note ? `User message: ${note}` : '',
+    ].filter(Boolean).join('\n');
+}
+
 function firstChangedIndex(before, after) {
     const max = Math.max(before?.length || 0, after?.length || 0);
     for (let index = 0; index < max; index += 1) {
@@ -3897,6 +3944,23 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
         if (typeof abort === 'function') abort(true);
         return true;
     }
+    const latestUserText = getLatestUserTextFromContext(context);
+    const userInputMode = detectStructuredUserInputMode(latestUserText);
+    if (userInputMode.mode === 'ooc') {
+        clearPromptOptionPrompts(context);
+        clearRuntimePrompts();
+        state.pendingGeneration = {
+            type: type || 'normal',
+            mode: 'ooc',
+            rawUserText: latestUserText,
+            latestUserText: userInputMode.innerText || latestUserText,
+            createdAt: Date.now(),
+        };
+        state.activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        showProgress('Handling out-of-character reply...');
+        return false;
+    }
+
     injectPromptOptionPrompts();
 
     if (playerSetupNeeded(context)) {
@@ -3920,6 +3984,9 @@ globalThis.StructuredPreflightEngines_generationInterceptor = async function (co
     getTrackerRoot(context);
     state.pendingGeneration = {
         type: type || 'normal',
+        mode: userInputMode.mode === 'proxy' ? 'proxy' : 'normal',
+        rawUserText: latestUserText,
+        latestUserText: userInputMode.innerText || latestUserText,
         trackerSnapshot: buildTrackerSnapshot(context),
         playerTrackerSnapshot: buildPlayerTrackerSnapshot(context),
         contextSize,
@@ -3940,6 +4007,20 @@ async function handleChatCompletionPromptReady(eventData) {
     if (!context) return;
 
     try {
+        const generationMode = state.pendingGeneration.mode || 'normal';
+        if (generationMode === 'ooc') {
+            clearPromptOptionPrompts(context);
+            clearRuntimePrompts();
+            eventData.chat.push({
+                role: 'system',
+                content: buildOocResponsePrompt(state.pendingGeneration.latestUserText || getLatestUserText(eventData.chat)),
+            });
+            state.lastNarratorHandoff = '';
+            state.pendingRun = null;
+            clearAllProgress();
+            return;
+        }
+
         state.runningSemanticPass = true;
         const trackerSnapshot = state.pendingGeneration.trackerSnapshot || buildTrackerSnapshot(context);
         const semanticLedger = await runSemanticPassWithPromptReadyBypass(
@@ -3952,10 +4033,11 @@ async function handleChatCompletionPromptReady(eventData) {
         context.structuredPreflightSettings = getSettings();
         const report = runDeterministicEngines(semanticLedger, trackerSnapshot, context, state.pendingGeneration.type);
 
-        const narratorContext = formatNarratorPromptContext(report);
-        const narratorModelContext = formatNarratorModelPromptContext(report);
+        const narratorContext = formatNarratorPromptContext(report, state.pendingGeneration);
+        const narratorModelContext = formatNarratorModelPromptContext(report, state.pendingGeneration);
         state.pendingRun = {
             type: state.pendingGeneration.type || 'normal',
+            mode: generationMode,
             trackerBefore: trackerSnapshot,
             trackerAfter: report.trackerUpdate?.npcs || {},
             userBefore: state.pendingGeneration.playerTrackerSnapshot || buildPlayerTrackerSnapshot(context),
@@ -3963,7 +4045,7 @@ async function handleChatCompletionPromptReady(eventData) {
             resolutionPacket: report.finalNarrativeHandoff?.resolutionPacket || {},
             userCoreStats: report.semanticLedger?.engineContext?.userCoreStats || null,
             contextualInjuryCaps: collectContextualInjuryCaps(report),
-            latestUserText: getLatestUserText(eventData.chat),
+            latestUserText: state.pendingGeneration.latestUserText || getLatestUserText(eventData.chat),
             report,
         };
         state.lastNarratorHandoff = narratorContext;
@@ -3997,6 +4079,8 @@ async function runSemanticPassWithPromptReadyBypass(context, assembledChat, type
             semanticProfileId: settings?.semanticProfileId,
             semanticProfileName: settings?.semanticProfileName,
             nameStyle: getSettings().nameStyle,
+            userInputMode: state.pendingGeneration?.mode || 'normal',
+            proxyUserAction: state.pendingGeneration?.mode === 'proxy' ? state.pendingGeneration?.latestUserText : '',
         }));
     } finally {
         flushEphemeralStoppingStrings();

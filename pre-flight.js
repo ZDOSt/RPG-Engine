@@ -188,10 +188,10 @@ function buildReadableDeterministicDebug(handoff) {
     ];
 }
 
-export function formatNarratorPromptContext(report) {
+export function formatNarratorPromptContext(report, options = {}) {
     const handoff = report?.finalNarrativeHandoff ?? {};
     const resolution = handoff.resolutionPacket ?? {};
-    const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {});
+    const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {}, options);
 
     const lines = [
         '[STORY_ENGINE_NARRATOR_HANDOFF v0.8 - AUDIT DISPLAY]',
@@ -201,7 +201,7 @@ export function formatNarratorPromptContext(report) {
         ...formatMechanicsResultList(summary, resolution),
         '',
         '==MODEL_INSTRUCTION==',
-        narratorModelInstruction(),
+        narratorModelInstruction(options),
         '',
         '==PROMPT==',
         summary.bindingDirective,
@@ -238,20 +238,21 @@ function formatMechanicsResultList(summary, resolution) {
     ].map(([key, value]) => `- ${key}: ${valueOrNone(value)}`);
 }
 
-export function formatNarratorModelPromptContext(report) {
+export function formatNarratorModelPromptContext(report, options = {}) {
     const handoff = report?.finalNarrativeHandoff ?? {};
     const resolution = handoff.resolutionPacket ?? {};
-    const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {});
+    const summary = buildNarratorSummary(handoff, resolution, report?.semanticLedger ?? {}, options);
 
     return [
-        narratorModelInstruction(),
+        narratorModelInstruction(options),
         '',
         '==PROMPT==',
         summary.bindingDirective,
     ].join('\n');
 }
 
-function narratorModelInstruction() {
+function narratorModelInstruction(options = {}) {
+    const proxyInstruction = proxyUserActionInstruction(options);
     return [
         'STORY_ENGINE_NARRATOR_DIRECTIVE',
         '',
@@ -269,16 +270,29 @@ function narratorModelInstruction() {
         'A command to an ally/companion is only spoken tactical input unless the PROMPT explicitly lists a resolved ally/companion action, proactivity result, or aggression result.',
         'Do not upgrade requests, threats, intentions, setup, or attempted actions into completed outcomes.',
         '',
+        proxyInstruction,
+        '',
         'OUTPUT CONTRACT:',
         'Do not output mechanics, labels, analysis, bullets, preamble, or audit text.',
         'Do not narrate voluntary {{user}} actions, thoughts, feelings, decisions, counterattacks, or dialogue beyond the explicit user input.',
         'First output exactly one fenced tracker delta block using ```story_engine_tracker_delta, then return final in-character narration wrapped with BEGIN_FINAL_NARRATION and END_FINAL_NARRATION.',
         'The tracker delta must contain BEGIN_TRACKER_DELTA and END_TRACKER_DELTA inside that fenced block.',
         'The user sees only the final narration; the extension hides and strips the fenced tracker block before saving display text.',
+    ].filter(line => line !== null && line !== undefined).join('\n');
+}
+
+function proxyUserActionInstruction(options = {}) {
+    if (options?.mode !== 'proxy') return '';
+    const action = valueOrNone(options?.latestUserText || options?.proxyUserAction);
+    return [
+        'PROXY USER ACTION MODE:',
+        `The latest user message used triple parentheses. For this response only, you may narrate {{user}}'s voluntary action as needed to carry out this exact user instruction: ${action}`,
+        'This is the only exception to the normal agency ban.',
+        'Do not add extra {{user}} dialogue, thoughts, feelings, decisions, follow-up actions, reactions, silence, or choices beyond that instruction and the resolved mechanics.',
     ].join('\n');
 }
 
-function buildNarratorSummary(handoff, resolution, ledger = {}) {
+function buildNarratorSummary(handoff, resolution, ledger = {}, options = {}) {
     const semanticResolution = ledger?.resolutionEngine ?? {};
     const userAction = readableActionDescription(semanticResolution, resolution);
     const npcText = (handoff.npcHandoffs ?? []).map(h => [
@@ -336,7 +350,7 @@ function buildNarratorSummary(handoff, resolution, ledger = {}) {
     const result = naturalOutcomeSummary(resolution);
     const rollAudit = rollAuditFromResultLine(handoff.resultLine, resolution);
     const intimacyBoundary = intimacyBoundarySummary(handoff);
-    const bindingDirective = cleanNarratorDirective(buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment, inflictedNpcInjury, inflictedUserInjury }));
+    const bindingDirective = cleanNarratorDirective(buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment, inflictedNpcInjury, inflictedUserInjury, options }));
 
     return {
         userAction,
@@ -687,7 +701,7 @@ function targetSummary(resolution) {
     return parts.join('; ') || 'none';
 }
 
-function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment }) {
+function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactiveText, proactivityGuide, chaosText, chaosGuide, aggressionText, aggressionGuide, userImpairment, npcImpairment, options = {} }) {
     const outcome = naturalOutcomeSummary(resolution);
     const partialActionInstruction = partialActionGuide(resolution);
     const primaryNpc = primaryNarrationNpc(handoff, resolution);
@@ -717,7 +731,10 @@ function buildNaturalGuide({ userAction, resolution, handoff, npcText, proactive
     const injuryInstruction = `${inflictedNpcInstruction}${inflictedUserInstruction}${inflictedAggressionNpcInstruction}`;
     const aggressionTargetLock = aggressionTargetLockGuide(handoff.aggressionResults);
     const companionCommandInstruction = companionCommandGuide(resolution);
-    const trackerInstruction = `${universalIntimacyPermissionGuard(handoff)}${trackerDeltaInstruction()}`;
+    const proxyInstruction = options?.mode === 'proxy'
+        ? ` Proxy user action mode is active: narrate {{user}} attempting or completing only the specified triple-parentheses action as resolved by this prompt; do not invent extra {{user}} speech, thoughts, choices, reactions, or follow-up actions.`
+        : '';
+    const trackerInstruction = `${universalIntimacyPermissionGuard(handoff)}${proxyInstruction}${trackerDeltaInstruction()}`;
 
     const commonResultInstruction = `${companionCommandInstruction}${partialActionInstruction}${impairmentInstruction}${npcImpairmentInstruction}${injuryInstruction}`;
     const stackedPressureInstruction = [

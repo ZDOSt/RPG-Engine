@@ -1365,13 +1365,24 @@ function getLatestUserTextFromContext(context) {
     for (let index = chat.length - 1; index >= 0; index -= 1) {
         const message = chat[index];
         if (!message?.is_user && message?.role !== 'user') continue;
-        if (typeof message.mes === 'string') return message.mes;
-        if (typeof message.content === 'string') return message.content;
+        if (typeof message.mes === 'string') return unwrapStructuredUserInputText(message.mes);
+        if (typeof message.content === 'string') return unwrapStructuredUserInputText(message.content);
         if (Array.isArray(message.content)) {
-            return message.content.map(part => typeof part === 'string' ? part : part?.text).filter(Boolean).join('\n');
+            return unwrapStructuredUserInputText(message.content.map(part => typeof part === 'string' ? part : part?.text).filter(Boolean).join('\n'));
         }
     }
     return '';
+}
+
+function unwrapStructuredUserInputText(text) {
+    const trimmed = String(text ?? '').trim();
+    if (trimmed.length >= 6 && trimmed.startsWith('(((') && trimmed.endsWith(')))')) {
+        return trimmed.slice(3, -3).trim();
+    }
+    if (trimmed.length >= 4 && trimmed.startsWith('((') && trimmed.endsWith('))')) {
+        return trimmed.slice(2, -2).trim();
+    }
+    return trimmed;
 }
 
 function normalizeNameSeed(seed) {
