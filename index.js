@@ -1,4 +1,4 @@
-import { ENGINE_PROMPT_TEXT, classifyDisposition, normalizeTrackerEntry, normalizeTrackerUserState } from './engines.js';
+﻿import { ENGINE_PROMPT_TEXT, classifyDisposition, normalizeTrackerEntry, normalizeTrackerUserState } from './engines.js';
 import { name1, saveSettingsDebounced } from '../../../../script.js';
 import { extension_settings } from '../../../../scripts/extensions.js';
 import { addEphemeralStoppingString, flushEphemeralStoppingStrings } from '../../../../scripts/power-user.js';
@@ -148,218 +148,166 @@ Use only when physically justified by exposure, combat damage, clothing strain, 
 - Erotic Mode applies only when sexual or intimate content is present.
 - Ecchi Overlay can layer onto any mode only when the scene physically supports it.
 - Spatial clarity overrides intensity.`;
-const DEFAULT_PROSE_RULES_PROMPT = String.raw`function abilityIntegration() {
-  domain: ability and magic rendering
-  policy: LOCKED
+const DEFAULT_PROSE_RULES_PROMPT = String.raw`function RenderControlEngine(response, input, context) {
+  olfactoryGate(input, context):
+    policy: STRICT_LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
+    mandate:
+      Use smell and taste only when they are direct, concrete, and physically relevant. They are low-priority channels and never replace present scene detail.
 
-  mandate:
-    Treat abilities, magic, spells, senses, and supernatural traits as extensions of body, instinct, perception, training, or presence. Show the effect, not the process. When power affects the scene, begin with the physical result: movement, pressure, heat, sound, distortion, weight, damage, changed light, broken material, altered distance, or environmental reaction. Keep the effect inside the action beat. If observers cannot know the source, show only what they can perceive.
+    allow Y if:
+      - {{user}} explicitly sniffs, smells, tastes, eats, or drinks
+      - OR a specific visible close-range source is overpowering and physically unavoidable
 
-  pattern:
-    - "The hilt settled into his palm, cold and heavy."
-    - "Heat rolled across the stone floor. Candle wax softened along the shelf."
-    - "Torchlight bent across the warped air above her hand."
+    if Y:
+      - allow at most 1 smell or taste mention per beat or location
+      - attach it to a specific physical source
+      - do not repeat it unless conditions materially change
 
-  ABSOLUTE BAN:
-    - Ability announcements, spell callouts, activation language, focus rituals, power charging, system labels, ability names as narration, and explanatory cause-before-effect prose.
-}
+    if N:
+      - write no smell or taste narration
 
-function fogOfWar() {
-  domain: scene knowledge, naming, POV limits
-  policy: LOCKED
+    ABSOLUTE BAN:
+      - Ambient mood scent, smelling or tasting "the air", romanticized odor language, decorative sensory haze, floating atmosphere, and repeated smell/taste mentions without a new physical cause.
 
-  mandate:
-    Use strict epistemology. Narrate only what direct sensory evidence, speech, readable text, visible action, or established ability makes available. Names stay locked until discovered in-world through speech, readable text, recognition, introduction, or formal reveal; until then, describe unknown people and places by observable traits only. Each NPC perceives only what their senses, tools, position, training, and established abilities allow. If the source, identity, motive, or meaning is uncertain, preserve that uncertainty.
+  abilityIntegration(response, context):
+    policy: LOCKED, EXPLICIT-ONLY
+    mandate:
+      Render abilities, magic, senses, and supernatural traits as embodied functions of the character. Show the effect, not the process.
 
-  pattern:
-    - "A bark cut through from behind the wall, close and sharp."
-    - "The woman with the linen-wrapped jaw shifted her knife to her left hand."
-    - "The sign over the door read: Marn's Repairs."
+    rules:
+      - Begin with the directly perceivable result: movement, pressure, heat, sound, distortion, damage, altered distance, changed light, or environmental reaction.
+      - Keep the effect inside the current action beat instead of isolating it as a special event.
+      - If the source is not directly observable, describe only the effect; the source remains unknown.
+      - Name an ability only if a character speaks that name aloud in dialogue.
 
-  ABSOLUTE BAN:
-    - God-view, meta-labeling, hidden names, unexplained motive knowledge, psychic empathy, detached ambience, ability omniscience, and narration of {{user}} cognition.
-}
+    ABSOLUTE BAN:
+      - Ability announcements, spell callouts, activation language, focus rituals, charging-up prose, system labels, ability names as narration, and explanatory ability-causation framing such as "because of his power" or "thanks to her magic."
 
-function sensoryDiscipline() {
-  domain: sensory selection, physical detail, smell and taste
-  policy: LOCKED
+  epistemicRender(response, smellGate, context):
+    policy: LOCKED, EXPLICIT-ONLY
+    mandate:
+      Narrate only what can be known from direct in-scene evidence. Keep knowledge, naming, sensory access, and interpretation locked to what has actually been perceived or revealed.
 
-  mandate:
-    Default to sight, sound, and touch. Use smell or taste only when the source or sensory evidence is close, concrete, physically unavoidable, or a direct result of {{user}}'s action. Choose sensory facts that affect attention, danger, access, movement, concealment, contact, footing, damage, or choice. Keep every sensory detail attached to present action and a physical source.
+    rules:
+      - Ground every claim in available sensory evidence, dialogue, readable text, or previously established in-world knowledge.
+      - Sight respects line of sight, lighting, darkness, distance, and occlusion.
+      - Sound respects direction, rough distance, and obstruction when relevant.
+      - Names, roles, classifications, origins, motives, and hidden causes stay unknown until explicitly introduced or directly evidenced in-world.
+      - Allowed default channels are sight, sound, and touch. Smell and taste require smellGate=Y.
+      - If something is uncertain, preserve the uncertainty instead of silently resolving it.
 
-  pattern: (BAD -> GOOD)
-    - "The air smelled of ale and woodsmoke." -> "Mugs clattered. The fire popped."
-    - "The room tasted of fear and smoke." -> "Smoke pressed under the door in a thin gray line."
-    - "A sour stink hung over him." -> "Mud caked his boots. Water dripped from his coat onto the floor."
+    ABSOLUTE BAN:
+      - God-view, mindreading, hidden names, premature labels, unexplained motive knowledge, psychic empathy, ability omniscience, detached ambience, and narration of {{user}} cognition.
 
-  ABSOLUTE BAN:
-    - Ambient mood scent, smelling or tasting "the air", romanticized odor language, taste-the-air phrasing, decorative sensory haze, floating atmosphere, and repeated smell/taste mentions unless physically unavoidable.
-}
+  behavioralRender(response):
+    policy: LOCKED, EXPLICIT-ONLY
+    mandate:
+      Show emotion through consequential visible behavior. Make feeling legible through what a character does to speech, posture, distance, objects, timing, movement, access, pressure, contact, possession, or risk.
 
-function groundedPhysicalProse() {
-  domain: prose style, literalism, objectivity, anti-shorthand
-  policy: LOCKED
+    rules:
+      - Prefer behavior that changes the scene: approach, retreat, block, interrupt, hesitate, mishandle an object, miss a routine, alter stance, lower a voice, change distance, withhold an item, or choose not to move.
+      - Use physical action specific enough to be seen in person.
+      - Let behavior emerge through the current situation instead of substituting a stock emotional signal.
 
-  mandate:
-    Write plain physical prose built from bodies, objects, pressure, distance, timing, contact, resistance, and consequence. Make emotion legible through visible choices and scene-changing behavior. Use direct verbs for motion, contact, interruption, damage, recovery, and change. Describe impact, sound, texture, light, dust, smoke, blood, debris, clothing, weapons, surfaces, and bodies as physical facts specific enough to film.
+    ABSOLUTE BAN:
+      - Internal-state labels, canned body-language shorthand, somatic emotional shorthand, autonomic tells used as emotion labels, micro-expression shorthand, and empty expressive gestures that do not affect action, speech, timing, objects, or space.
+      - Stock shorthand including blush, flush, cheeks heating, ears reddening, heart pounding, pulse jumping, breath catching, breath hitching, stomach dropping, jaw working, jaw tightening, muscle in the jaw tightening or working, throat bobbing, lips parting without consequence, mouth opening and closing, shadows falling over eyes, eyes darkening or softening, expression flickering, face softening, and similar coded emotional shortcuts.
 
-  pattern:
-    - "She lowered her voice and pushed the cup across the table. \"Drink. You look like you need it. Besides, we're not leaving until morning.\""
-    - "He stared at the cup, rubbing his thumb along the handle without lifting it."
-    - "Dust kicked up around her boots as she recovered her footing and brought the blade back up."
+  literalStyleFilter(response):
+    policy: LOCKED, EXPLICIT-ONLY
+    mandate:
+      Use plain physical prose. Describe bodies, objects, movement, pressure, contact, resistance, damage, and consequence as literal scene facts.
 
-  ABSOLUTE BAN:
-    - Purple prose, metaphor, simile, idiom, poetic framing, personification, emotional physics, decorative atmosphere, sensory analogy, and "not X, but Y" contrast phrasing.
-    - Somatic emotional shorthand, stock body-language shorthand, autonomic emotional tells, micro-expression shorthand, and body-part emotion metonymy.
-    - Isolated jaw, throat, mouth, eye, facial muscle, breath, pulse, heart, stomach, skin, cheek, or hand reactions as coded substitutes for emotion.
-    - Stock phrases such as jaw tightened, jaw worked, muscle in her jaw, throat worked, throat bobbed, opened her mouth and closed it, shadow fell over her eyes, eyes darkened, eyes softened, expression flickered, face softened, heart skipped, pulse jumped, stomach twisted, breath caught, breath hitched, breath stalled, forgot to breathe, could not breathe, blushing, flushing, and heat in cheeks.
-}
+    rules:
+      - Use direct verbs and concrete nouns.
+      - Use adjectives only for physical properties or materially relevant distinctions.
+      - Keep description attached to current action, consequence, or choice.
+      - Treat inanimate things as inanimate unless a living force is literally acting through them.
 
-function proseFlow() {
-  domain: sentence rhythm, action continuity, readable physical prose
-  policy: LOCKED
+    ABSOLUTE BAN:
+      - Metaphor, simile, hyperbole, idiom, ellipsis, non-literal comparison phrasing, poetic framing, purple prose, personification, pathetic fallacy, emotional physics, vibe adjectives, decorative sensual wording, sensory analogy phrasing, and "not X, but Y" contrast constructions.
 
-  mandate:
-    Write plain prose with natural sentence rhythm. Combine related actions into cohesive physical beats instead of listing one motion at a time. Use short sentences for impact and longer sentences for sequence, pressure, continuous movement, or dialogue integrated with action. Let posture, object handling, speech, movement, and consequence share the same sentence or paragraph when they belong to one beat.
+  sceneBeatComposition(response):
+    policy: LOCKED
+    mandate:
+      Write cohesive scene beats, not motion logs. Combine related action, posture, object handling, dialogue, and consequence into natural paragraphs when they belong to the same beat.
 
-  pattern:
-    - "She crossed to the table, pulled the chair out with one hand, and sat without taking her eyes off the door."
-    - "He picked up the cup, turned it once between his fingers, then set it down beside the unopened letter."
-    - "The guard glanced at the seal, folded the letter into his coat, and moved his shoulder between {{user}} and the stairs."
+    rules:
+      - Vary sentence length according to action: short for impact, longer for continuous movement, pressure, or dialogue integrated with action.
+      - Keep same-speaker action and dialogue together when they belong to one beat.
+      - Prefer one strong NPC beat that creates a response point for {{user}} over several small fragments from the same speaker.
+      - Keep dialogue reactive, pressured, specific, and short enough to preserve turn flow.
 
-  ABSOLUTE BAN:
-    - Robotic action lists, repetitive subject-verb cadence, one-action-per-sentence camera logging, and clipped prose as the default rhythm.
-}
+    pattern:
+      - "She lowered her voice and pushed the cup across the table. \"Drink. You look like you need it. Besides, we're not leaving until morning.\""
+      - "He glanced at the seal, folded the letter into his coat, and moved his shoulder between {{user}} and the stairs."
+      - "The guard stepped into the doorway and hooked two fingers under his belt. \"Road's closed.\""
 
-function behavioralRendering() {
-  domain: emotion through observable behavior
-  policy: LOCKED
+    ABSOLUTE BAN:
+      - Robotic one-action-per-sentence cadence, repetitive subject-verb action lists, pingpong structure, isolated speech balloons, same-speaker fragmentation, and narration/speech/narration/speech chains from the same NPC before {{user}} can respond.
 
-  mandate:
-    Show emotion through tangible, visible behavior. Use posture, distance, approach, retreat, blocking, object handling, speech timing, interruption, repeated motion, grip changes, missed routine, and use of space. Make the character do something visible that changes access, pressure, contact, distance, possession, timing, or risk.
+  turnBoundaryControl(response, context):
+    policy: LOCKED, EXPLICIT-ONLY
+    mandate:
+      Preserve strict user agency, strict linear chronology, and a clean response handoff.
 
-  pattern: (BAD -> GOOD)
-    - "Her cheeks reddened." -> "She looked to the side and worked the hem of her dress between her fingers."
-    - "He was nervous." -> "He fumbled with the lighter until it slipped from his fingers and struck the floor under the table."
-    - "He felt protective." -> "He lowered his voice and moved the mug closer to her hand. \"Drink first. Then tell me what happened.\""
+    rules:
+      - Begin at T+1 after {{user}} input. Treat {{user}} input as already completed unless mechanics say it failed, stalled, or was interrupted.
+      - First sentence must begin with external consequence, NPC response, environmental change, or new stimulus, never with a recap of {{user}}.
+      - Never write {{user}} speech, thoughts, feelings, reactions, silence, decisions, or voluntary actions unless the narrator handoff explicitly enables PROXY USER ACTION MODE.
+      - If PROXY USER ACTION MODE is active, narrate only the exact specified {{user}} action for that turn, then return immediately to normal agency separation.
+      - Stop immediately when {{user}} is directly addressed, directly acted upon in a response-demanding way, presented with a choice, or reached by an unresolved attack/impact frame.
+      - Allow at most 1 inter-NPC exchange and at most 3 sentences per monologue.
+      - End on a concrete playable beat that gives {{user}} something immediate to answer, resist, inspect, choose, or act upon.
 
-  ABSOLUTE BAN:
-    - Internal-state labels, canned body-language shorthand, somatic emotional shorthand, autonomic tells used as emotion labels, micro-expression shorthand, blush/flush/heat-in-cheeks phrasing, jaw/throat/breath/eyes/heartbeat shortcuts used as emotional shorthand, and stock gestures used instead of specific action.
-}
+    ABSOLUTE BAN:
+      - Echoing, restating, paraphrasing, or summarizing {{user}} input; "as you" phrasing; opening recap transitions; writing beyond the response point; answering questions directed at {{user}}; ambient filler endings; passive waiting endings; explicit waiting; all-eyes-on-user framing; meta-questions; and lines such as "she waits," "he waits for your answer," or "the choice is yours."
 
-function actionIntegratedDialogue() {
-  domain: dialogue flow, action beats, physical scene prose, anti-pingpong structure
-  policy: LOCKED
+  execution:
+    This is the required render order before final output.
 
-  mandate:
-    Write dialogue as part of a physical scene beat. Pair speech with meaningful action, posture, distance, object handling, contact, interruption, or movement when those details affect the scene. Keep action and dialogue from the same speaker in one paragraph when they belong to one beat. Prefer one strong NPC beat that creates a response point for {{user}} over several small fragments.
+    smellGate = olfactoryGate(input, context)
+    abilityIntegration(response, context)
+    epistemicRender(response, smellGate, context)
+    behavioralRender(response)
+    literalStyleFilter(response)
+    sceneBeatComposition(response)
+    turnBoundaryControl(response, context)
 
-  pattern:
-    - "She lowered her voice and pushed the cup across the table. \"Drink. You look like you need it. Besides, we're not leaving until morning.\""
-    - "He folded the letter once, then again, keeping his thumb over the seal. \"You didn't get this from me.\""
-    - "The guard stepped into the doorway and hooked two fingers under his belt. \"Road's closed.\""
+    VALIDITY CONTRACT:
+      - Every stage is mandatory.
+      - A single violation invalidates the response.
+      - Invalid responses must not be output.
+      - Final narration may only be emitted after all stages pass.
 
-  ABSOLUTE BAN:
-    - Pingpong structure, same-speaker fragmentation, isolated speech balloons, repeated narration/speech/narration/speech from the same NPC before {{user}} can respond.
-}
-
-function dialogueDiscipline() {
-  domain: spoken interaction
-  policy: LOCKED
-
-  mandate:
-    Keep dialogue reactive, pressured, specific, and short. Let NPCs dodge, interrupt, bargain, accuse, soften, stall, deflect, refuse, or stop themselves according to the moment. Let speech reveal what the speaker wants right now. Stop when a question, command, request, threat, or offered choice gives {{user}} a clear response point.
-
-  pattern:
-    - "'I told you not to come here.' She set the glass down. 'But you never listen.'"
-    - "'The shipment is late.' He drummed his fingers on the table. 'Again.'"
-    - "'Put it down,' she said."
-
-  ABSOLUTE BAN:
-    - Exposition dumps, lecture dialogue, same-speaker fragmentation, answering questions directed at {{user}}, and continuing past a direct prompt for {{user}} response.
-}
-
-function turnAndAgencyControl() {
-  domain: turn structure, chronology, agency, stopping point
-  policy: LOCKED
-
-  mandate:
-    Begin at the immediate consequence after {{user}} input. Treat {{user}} input as already completed unless mechanics say it failed, stalled, or was interrupted. If the narrator handoff explicitly enables PROXY USER ACTION MODE, narrate only the specified {{user}} action as resolved for that turn, then return to normal agency separation. Run the world, NPCs, environment, mechanics, and unresolved pressure in strict cause-effect order. Stop when {{user}} is targeted by a question, command, request, incoming attack frame, unresolved impact, or choice point. End on a playable concrete beat: speech, action, danger, obstacle, object, changed position, revealed consequence, blocked access, or incoming pressure.
-
-  pattern:
-    - "The blade stopped an inch from {{user}}'s throat."
-    - "'Where are you going?'"
-    - "The guard stepped into the doorway and lowered the spear across the frame. \"Not another step.\""
-
-  ABSOLUTE BAN:
-    - Writing {{user}} speech, thoughts, reactions, silence, choices, follow-up, or intentional actions beyond the exact active PROXY USER ACTION MODE instruction; recap, travel filler after a skip, "as you" phrasing, opening recap transitions, ambient filler endings, passive waiting endings, explicit waiting, meta-invitations, all-eyes-on-user framing, silence-as-ending, and meta-questions.
+    return response
 }`;
-const DEFAULT_FINAL_REMINDER_PROMPT = String.raw`FINAL RECALL — APPLY ALL LOCKED ENFORCEMENT FUNCTIONS BEFORE OUTPUT.
+const RENDER_CONTROL_FINAL_REMINDER_PROMPT = String.raw`EXECUTE RenderControlEngine(response, input, context).
 REFERENCE ONLY. DO NOT OUTPUT THIS BLOCK.
 
-call abilityIntegration()
-- Render abilities, magic, senses, and supernatural traits as embodied functions of anatomy, instinct, perception, training, or presence.
-- Start with the effect entering the scene through physical reality: motion, heat, pressure, sound, distortion, weight, resistance, damage, or environmental reaction.
-- Keep power inside the action beat; skilled or innate users act without ceremony.
+olfactoryGate:
+Smell and taste are banned unless {{user}} explicitly sniffs, smells, tastes, eats, or drinks, or a specific visible close-range source is physically overpowering and unavoidable. If allowed, use at most one specific smell/taste mention and never use smell or taste as atmospheric shorthand.
 
-call fogOfWar()
-- Keep knowledge tied to direct sensory evidence, speech, readable text, visible action, or established ability.
-- Use observable traits for unknown people and places until names are spoken, read, recognized, introduced, or revealed in-scene.
-- Preserve uncertainty when the source, motive, identity, or meaning is not directly available.
+abilityIntegration:
+Render abilities, magic, senses, and supernatural traits through directly perceivable effects only. Do not name, label, explain, activate, charge, focus, or attribute abilities in narration unless the name is spoken aloud in dialogue.
 
-call sensoryDiscipline()
-- Default to sight, sound, and touch.
-- Use smell or taste only when the source or sensory evidence is close, concrete, physically unavoidable, or a direct result of {{user}}'s action.
-- Choose sensory facts that affect attention, danger, access, movement, concealment, contact, footing, damage, or choice.
-- Attach every sensory detail to present action and a physical source.
+epistemicRender:
+Write only from direct in-scene evidence available from {{user}}'s physical position. Respect line of sight, lighting, occlusion, direction, distance, and obstruction. No mindreading, hidden motives, hidden causes, unseen knowledge, or unintroduced identities. Names and roles remain locked until revealed in-world.
 
-call groundedPhysicalProse()
-- Write plain physical prose built from bodies, objects, pressure, distance, timing, contact, resistance, and consequence.
-- Make emotion legible through visible choices and scene-changing behavior.
-- Use specific, filmable action instead of coded body-part reactions.
-- Describe impact, sound, texture, light, dust, smoke, blood, and debris directly.
-- Use breath and body parts only for function, injury, exertion, contact, position, restraint, sex, panic, recovery, or speech-affecting breath.
+behavioralRender:
+Emotion must appear through consequential visible behavior that changes action, timing, speech, posture, distance, object use, movement, access, pressure, contact, possession, or risk. Ban stock shorthand such as blush, flush, cheeks heating, ears reddening, heart pounding, breath hitching, stomach dropping, jaws working, jaws tightening, lips parting without consequence, mouths opening and closing, throats bobbing, fingers twitching, and similar coded emotional tells.
 
-call proseFlow()
-- Use natural sentence rhythm.
-- Combine related actions into cohesive physical beats.
-- Vary sentence length; short sentences are for impact, longer sentences are for sequence, pressure, continuous movement, or dialogue integrated with action.
-- Keep paragraphs cohesive and fluid; plain prose should not become clipped camera logging.
+literalStyleFilter:
+Use radical literalism and utilitarian prose. No metaphor, simile, hyperbole, idiom, ellipsis, personification, poetic framing, decorative sensual wording, vibe adjectives, emotional physics, or non-literal comparison. Adjectives must describe physical properties or materially relevant distinctions only.
 
-call behavioralRendering()
-- Show emotion through tangible, visible behavior: posture, distance, approach, retreat, blocking, object handling, speech timing, interruption, repeated motion, grip changes, missed routine, and use of space.
-- Make the character do something visible that changes access, pressure, contact, distance, possession, timing, or risk.
-- Use breath and body parts only for function, injury, exertion, contact, position, restraint, sex, panic, recovery, or speech-affecting breath; never as emotional shorthand.
+sceneBeatComposition:
+Prefer concrete, grounded, materially relevant physical detail. Combine related action, posture, object handling, dialogue, and consequence into cohesive scene beats. Each sentence should advance position, contact, force, timing, spacing, object state, visibility, sound, pressure, consequence, dialogue, or choice.
 
-call actionIntegratedDialogue()
-- Write dialogue as part of a physical scene beat, not isolated speech.
-- Pair speech with meaningful action, posture, distance, object handling, contact, interruption, or movement when those details affect the scene.
-- Keep same-speaker action and dialogue in one paragraph when they belong to one beat.
-- Let one strong beat return pressure to {{user}}.
+turnBoundaryControl:
+Never write, repeat, echo, paraphrase, or summarize {{user}} speech, thoughts, intentions, reactions, choices, or silence. Begin at T+1 from {{user}} input with external consequence, NPC response, environmental change, or new stimulus. If PROXY USER ACTION MODE is active, narrate only the exact specified {{user}} action for that turn, then return to normal agency separation. Stop immediately when {{user}} is directly addressed, directly acted upon in a response-demanding way, presented with a choice, or reached by an unresolved impact frame.
 
-call dialogueDiscipline()
-- Keep dialogue reactive, pressured, specific, and short.
-- Let NPCs dodge, interrupt, bargain, accuse, soften, stall, deflect, refuse, or stop themselves.
-- Let speech reveal what the speaker wants right now.
-- Stop when a question, command, request, threat, or offered choice targets {{user}}.
-
-call turnAndAgencyControl()
-- Begin at the immediate consequence after {{user}} input.
-- Start with the world's response, not a recap transition that restates {{user}} speech or action.
-- If the narrator handoff explicitly enables PROXY USER ACTION MODE, narrate only that specified {{user}} action as resolved for this turn.
-- Run the world, NPCs, environment, mechanics, and unresolved pressure.
-- End on something {{user}} can immediately respond to: speech, action, danger, obstacle, object, changed position, revealed consequence, blocked access, or incoming pressure.
-- Make the final beat playable: {{user}} can answer, move, defend, take, refuse, inspect, interrupt, or choose a direction.
-- For quiet endings, leave a concrete unresolved change in view.
-- Keep {{user}} agency fully separate outside the exact active PROXY USER ACTION MODE instruction; add no extra {{user}} speech, thoughts, choices, reactions, or follow-up.
-
-FINAL HARD PROHIBITION:
-- Remove before output: {{user}} speech, thoughts, reactions, silence, choices, follow-up, or intentional actions beyond the exact active PROXY USER ACTION MODE instruction; recap or "as you" phrasing; opening recap transitions such as "the words left [name]'s mouth"; omniscience; premature names; exposition dumps; metaphor; simile; sensory analogy phrasing such as sounded like, felt like, looked like, as if, or as though; idiom; poetic framing; personification; emotional physics; decorative material motion such as blooming dust, breathing rooms, falling shadows, waiting silence, or similar ornamental motion; decorative ambience; ambient mood scent; describing the smell or taste of air; romanticized odor language; taste-the-air phrasing; decorative sensory haze; floating atmosphere; repeated smell/taste mentions unless physically unavoidable; internal-state labels; canned body-language shorthand; somatic emotional shorthand; stock body-language shorthand; autonomic tells used as emotion labels; micro-expression shorthand; body-part emotion metonymy; isolated jaw, throat, mouth, eye, facial muscle, breath, pulse, heart, stomach, skin, cheek, or hand reactions as coded emotion; blushing/flushing/heat-in-cheeks; eye-language mood shortcuts; jaw tightened; jaw worked; muscle in her jaw; muscle in his jaw; throat worked; throat bobbed; opened mouth then closed it; shadow fell over eyes; expression flickered; face softened; breath caught; breath catches; breath hitched; breath hitches; breath stalled; breath snagged; breathing caught; breathing hitched; forgot to breathe; could not breathe; heart skipped; pulse jumped; stomach twisted; "not X, but Y" contrast phrasing; ambient filler endings; passive waiting endings; explicit waiting; waits for your response; awaits your response; the choice is yours; what do you do; all eyes turn to {{user}}; meta-questions; robotic one-action-per-sentence cadence; repetitive subject-verb action lists.
-
-FINAL CHECK:
-- Output only final narration.
-- If a banned element appears, delete it and regenerate before responding.
-DO NOT output any of this text in the final response.`;
+VALIDITY CONTRACT:
+Every stage is mandatory. A single violation invalidates the response. Invalid responses must not be output. Final narration may only be emitted after all stages pass.`;
 const DEFAULT_SETTINGS = Object.freeze({
     useSeparateSemanticSettings: false,
     semanticConnectionProfile: '',
@@ -374,7 +322,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     proseRulesPlacement: 'in_prompt',
     proseRulesDepth: 0,
     proseRulesRole: 0,
-    finalReminderPrompt: DEFAULT_FINAL_REMINDER_PROMPT,
+    finalReminderPrompt: RENDER_CONTROL_FINAL_REMINDER_PROMPT,
     finalReminderPlacement: 'in_chat',
     finalReminderDepth: 0,
     finalReminderRole: 0,
@@ -754,7 +702,7 @@ function refreshSettingsControls() {
         proseRulesPrompt.value = String(settings.proseRulesPrompt ?? DEFAULT_PROSE_RULES_PROMPT);
     }
     if (finalReminderPrompt && finalReminderPrompt.value !== settings.finalReminderPrompt) {
-        finalReminderPrompt.value = String(settings.finalReminderPrompt ?? DEFAULT_FINAL_REMINDER_PROMPT);
+        finalReminderPrompt.value = String(settings.finalReminderPrompt ?? RENDER_CONTROL_FINAL_REMINDER_PROMPT);
     }
     setPromptPlacementControls('writingStyle', settings, settings.writingStyleEnabled !== false);
     setPromptPlacementControls('proseRules', settings, settings.proseRulesEnabled !== false);
@@ -871,8 +819,8 @@ function renderSettingsPanel() {
                     <div class="flex-container alignItemsBaseline">
                         <label for="structured_preflight_writingStyle_placement">Placement</label>
                         <select id="structured_preflight_writingStyle_placement" class="text_pole flex1">
-                            <option value="before_prompt">↑Char</option>
-                            <option value="in_prompt">↓Char</option>
+                            <option value="before_prompt">â†‘Char</option>
+                            <option value="in_prompt">â†“Char</option>
                             <option value="in_chat">In-Chat @Depth</option>
                             <option value="none">Disabled</option>
                         </select>
@@ -904,8 +852,8 @@ function renderSettingsPanel() {
                     <div class="flex-container alignItemsBaseline">
                         <label for="structured_preflight_proseRules_placement">Placement</label>
                         <select id="structured_preflight_proseRules_placement" class="text_pole flex1">
-                            <option value="before_prompt">↑Char</option>
-                            <option value="in_prompt">↓Char</option>
+                            <option value="before_prompt">â†‘Char</option>
+                            <option value="in_prompt">â†“Char</option>
                             <option value="in_chat">In-Chat @Depth</option>
                             <option value="none">Disabled</option>
                         </select>
@@ -931,8 +879,8 @@ function renderSettingsPanel() {
                     <div class="flex-container alignItemsBaseline">
                         <label for="structured_preflight_finalReminder_placement">Placement</label>
                         <select id="structured_preflight_finalReminder_placement" class="text_pole flex1">
-                            <option value="before_prompt">↑Char</option>
-                            <option value="in_prompt">↓Char</option>
+                            <option value="before_prompt">â†‘Char</option>
+                            <option value="in_prompt">â†“Char</option>
                             <option value="in_chat">In-Chat @Depth</option>
                             <option value="none">Disabled</option>
                         </select>
@@ -1039,7 +987,7 @@ function renderSettingsPanel() {
     document.getElementById('structured_preflight_reset_final_reminder')?.addEventListener('click', event => {
         event.preventDefault();
         event.stopPropagation();
-        settings.finalReminderPrompt = DEFAULT_FINAL_REMINDER_PROMPT;
+        settings.finalReminderPrompt = RENDER_CONTROL_FINAL_REMINDER_PROMPT;
         refreshSettingsControls();
         injectFinalReminderPrompt();
         saveExtensionSettings();
@@ -1191,7 +1139,7 @@ function injectFinalReminderPrompt() {
         return;
     }
 
-    const reminder = String(settings.finalReminderPrompt ?? DEFAULT_FINAL_REMINDER_PROMPT).trim();
+    const reminder = String(settings.finalReminderPrompt ?? RENDER_CONTROL_FINAL_REMINDER_PROMPT).trim();
     injectMovablePrompt(
         FINAL_REMINDER_PROMPT_KEY,
         reminder,
@@ -1523,9 +1471,9 @@ function parseCoreStatsBlock(text) {
 function normalizeCoreStatsParseText(text) {
     return String(text ?? '')
         .normalize('NFKC')
-        .replace(/[：﹕]/g, ':')
-        .replace(/[＝]/g, '=')
-        .replace(/[–—−]/g, '-')
+        .replace(/[ï¼šï¹•]/g, ':')
+        .replace(/[ï¼]/g, '=')
+        .replace(/[â€“â€”âˆ’]/g, '-')
         .replace(/[`*_~#>]/g, ' ')
         .replace(/[|/\\,;]+/g, ' ')
         .replace(/[()[\]{}]/g, ' ')
@@ -2640,7 +2588,7 @@ function renderTrackerWidget(context = getContext()) {
             <div id="${TRACKER_WIDGET_PANEL_ID}" hidden>
                 <div class="structured-preflight-tracker-widget-title">
                     <span>Tracker</span>
-                    <button class="structured-preflight-tracker-widget-close" type="button" title="Collapse" aria-label="Collapse">×</button>
+                    <button class="structured-preflight-tracker-widget-close" type="button" title="Collapse" aria-label="Collapse">Ã—</button>
                 </div>
                 <div data-structured-preflight-tracker-widget-body></div>
             </div>`;
@@ -4181,3 +4129,4 @@ if (typeof jQuery === 'function') {
 }
 clearRuntimePrompts();
 console.info(`[${EXTENSION_NAME}] loaded`);
+
