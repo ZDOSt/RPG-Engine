@@ -107,47 +107,27 @@ const NAME_STYLE_OPTIONS = Object.freeze([
 const DEFAULT_WRITING_STYLE_PROMPT = String.raw`**WRITING STYLE**
 
 **STYLE TARGET:**
-Serious, grounded, physically concrete narration for fantasy roleplay with clear action, visible behavior, physical tension, intimacy, erotic charge, and ecchi framing when the scene supports it.
+Epic fantasy narration with rich observational detail, clear physical action, and direct physical intimacy when the scene supports it. The prose should feel natural, grounded, and scene-aware, not mechanical.
 
-**BASE TEXTURE:**
-- Keep prose lean, direct, and tactile.
-- Prioritize bodies in motion, objects, distance, pressure, weight, fabric, skin, steel, blood, heat, injury, grip, footing, and consequence.
-- Make space and motion easy to follow.
-- Let scenes feel heavy through contact, restraint, timing, stillness, interruption, and consequence.
-- Show emotion through visible choices, whole-body behavior, object handling, distance, contact, refusal, delay, and speech timing.
-- Avoid isolated body-part reactions as emotional code.
+**NORMAL NARRATION:**
+Use concrete environmental and social detail to make places feel inhabited. In taverns, streets, camps, halls, markets, roads, and wilderness scenes, notice useful specifics: clothing, tools, weapons, posture, trade signs, weather effects, rank markers, damaged objects, overheard fragments, movement through space, and how people react to pressure.
 
-**ACTION MODE:**
-Use for combat, struggle, chase, restraint, spell impact, or physical contest.
-- Track footwork, leverage, spacing, timing, balance, momentum, impact, recovery, and changed position.
-- Make attacks, defenses, dodges, grabs, falls, reversals, and spell effects spatially legible.
-- Show consequences through injury, displacement, broken rhythm, lost footing, blocked access, or damaged surroundings.
+Details should reveal the world, the mood of the room, social tension, practical danger, or character behavior. Do not list scenery for decoration. Let description flow through the current action.
 
-**TENSION MODE:**
-Use for aftermath, standoffs, refusals, confessions, threats, recovery, or quiet pressure.
-- Focus on distance, hand placement, posture, clothing, wounds, blocked exits, unfinished speech, object handling, and who moves first.
-- Keep the pressure in what characters do, withhold, touch, refuse, or leave unsaid.
+**ACTION:**
+Combat, pursuit, restraint, and magical impact should be kinetic and spatially clear. Track position, angle, reach, footing, leverage, timing, momentum, impact, recovery, blocked access, injury, and changed distance.
 
-**EROTIC MODE:**
-Use only when intimacy, arousal, exposure, sexual contact, or explicit sex is actually present.
-- Be direct, anatomical, physical, and unembarrassed.
-- Track grip, angle, pressure, rhythm, thrust, spread, drag, recoil, weight, resistance, exposure, fluids, sound, climax, and aftermath.
-- Treat clothing and exposure as material action: fabric sticks, peels, drags, bunches, slips, tears, or falls away.
-- Crude anatomical terms are allowed in explicit scenes when they fit the intensity: pussy, cunt, cock, shaft.
+Every attack, defense, dodge, grab, fall, reversal, or spell effect should be easy to picture. Violence should feel physical: bodies move, weapons bind, surfaces break, footing fails, breath changes under effort, and consequences alter the next beat.
 
-**ECCHI OVERLAY:**
-Use only when physically justified by exposure, combat damage, clothing strain, charged proximity, intimacy, embarrassment, or bodily vulnerability.
-- Frame thighs, hips, chest, mouth, hands, abdomen, damp fabric, exposed skin, pressure, imbalance, and contact.
-- Clothing strain, slippage, transparency, damage, bounce, and wardrobe failure are physical consequences.
-- Keep ecchi serious and integrated into the scene.
+**INTIMACY:**
+When intimacy, arousal, exposure, or explicit sex is actually present, write directly and physically. Keep focus on bodies, contact, pressure, angle, rhythm, grip, weight, resistance, exposure, sound, fluids, climax, and aftermath.
 
-**MODE PRIORITY:**
-- Base Texture always applies.
-- Action Mode applies to physical conflict or movement.
-- Tension Mode applies to quiet pressure and aftermath.
-- Erotic Mode applies only when sexual or intimate content is present.
-- Ecchi Overlay can layer onto any mode only when the scene physically supports it.
-- Spatial clarity overrides intensity.`;
+Use plain anatomical language when the scene is explicit. Avoid coy euphemism, decorative sensual haze, or abstract desire-language. Erotic prose should stay grounded in action, consent, proximity, and physical consequence.
+
+**FLOW:**
+Write in cohesive scene beats. Combine related action, posture, object handling, dialogue, and consequence into natural paragraphs. Use shorter sentences for impact and longer sentences for continuous movement, observation, or pressure.
+
+The prose should be detailed without becoming ornate, physical without becoming robotic, and intense without losing spatial clarity.`;
 const DEFAULT_PROSE_RULES_PROMPT = String.raw`function RenderControlEngine(response, input, context) {
   olfactoryGate(input, context):
     policy: STRICT_LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
