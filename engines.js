@@ -55,6 +55,14 @@ function ResolutionEngine(input) {
     rule: this field is only an intimacy permission/boundary signal. It does not create stakes, rolls, landed actions, Bond loss, Fear, or Hostility by itself.
     else -> N
 
+  nonLethal(input, finalGoal, challenge, targets, context):
+    policy: LOCKED, EXPLICIT-ONLY, FIRST-YES-WINS
+    rule: return Y only for explicitly nonlethal violence or contests: sparring, training, practice combat, fistfights, barehanded brawls, wrestling/grappling without lethal force, restraint-only takedowns, capture-only attempts, or stated intent to avoid serious/fatal harm
+    rule: return Y when the scene rules, instructor, arena, duel terms, or {{user}} explicitly frame the current physical conflict as nonlethal
+    rule: return N for weapons, blades, arrows, spears, axes, clubs, improvised weapons, claws, teeth, horns, natural weapons, lethal magic, body-damaging supernatural effects, or any attack not explicitly framed as nonlethal
+    rule: uncertain = N
+    else -> N
+
   identifyTargets(input, challenge, finalGoal, context):
     policy: LOCKED, EXPLICIT-ONLY
     hostilesInScene.NPC = ALL established, present, living hostile entities in the current scene, whether or not they directly oppose {{user}}'s current action
@@ -192,6 +200,7 @@ function ResolutionEngine(input) {
     activeHostileThreat = activeHostileThreat(input, finalGoal, targets, context)
     intimacyAdvanceExplicit = intimacyAdvanceExplicit(input, finalGoal, challenge, targets, context)
     boundaryViolationExplicit = boundaryViolationExplicit(input, finalGoal, challenge, targets, context)
+    nonLethal = nonLethal(input, finalGoal, challenge, targets, context)
     STAKES = hasStakes(input, finalGoal, challenge, targets, boundaryViolationExplicit, context)
     actions = actionCount(input, challenge)
     if STAKES=N:
@@ -204,7 +213,7 @@ function ResolutionEngine(input) {
         if missing -> targetCore = genStats(first OppTargets.NPC, context)
       outcome = resolveOutcome(input, finalGoal, actions, stats, userCore, targetCore)
     NPCInScene = unique living NPCs from ActionTargets, OppTargets.NPC, BenefitedObservers, HarmedObservers, plus a single pending-offer NPC only when the user gives a clear generic accept/refuse response to that pending offer
-    return {GOAL:finalGoal, actions:actions, intimacyAdvanceExplicit:intimacyAdvanceExplicit, boundaryViolationExplicit:boundaryViolationExplicit, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, hostilesInScene:targets.hostilesInScene, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
+    return {GOAL:finalGoal, actions:actions, intimacyAdvanceExplicit:intimacyAdvanceExplicit, boundaryViolationExplicit:boundaryViolationExplicit, nonLethal:nonLethal, STAKES:STAKES, LandedActions:outcome.LandedActions, OutcomeTier:outcome.OutcomeTier, Outcome:outcome.Outcome, CounterPotential:outcome.CounterPotential, classifyHostilePhysicalIntent:classifyHostilePhysicalIntent, activeHostileThreat:activeHostileThreat, classifyPhysicalBoundaryPressure:classifyPhysicalBoundaryPressure, hostilesInScene:targets.hostilesInScene, ActionTargets:targets.ActionTargets, OppTargets:targets.OppTargets, BenefitedObservers:targets.BenefitedObservers, HarmedObservers:targets.HarmedObservers, NPCInScene:NPCInScene}
 }
 ---------------------------
 function RelationshipEngine(npc, resolutionPacket) {
@@ -1519,7 +1528,7 @@ export function buildPersistencePolicy() {
         staticUntilExplicitChange: ['currentCoreStats.Rank', 'currentCoreStats.MainStat', 'currentCoreStats.PHY', 'currentCoreStats.MND', 'currentCoreStats.CHA'],
         npcPersistentRuleMutated: ['currentDisposition', 'currentRapport', 'rapportCooldownUntilActiveMs', 'userHistory', 'raceProfile', 'personalitySummary', 'hostilePressure', 'hostileLandedPressure', 'dominantLock', 'pressureMode', 'lifecycle', 'condition', 'wounds', 'statusEffects', 'gear'],
         playerPersistentRuleMutated: ['condition', 'wounds', 'statusEffects', 'gear', 'inventory', 'tasks', 'commitments'],
-        perTurn: ['GOAL', 'hostilesInScene', 'ActionTargets', 'OppTargets', 'STAKES', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
+        perTurn: ['GOAL', 'hostilesInScene', 'ActionTargets', 'OppTargets', 'STAKES', 'nonLethal', 'OutcomeTier', 'Outcome', 'LandedActions', 'CounterPotential', 'classifyHostilePhysicalIntent', 'activeHostileThreat', 'classifyPhysicalBoundaryPressure', 'CHAOS', 'proactivityResults', 'aggressionResults'],
     };
 }
 

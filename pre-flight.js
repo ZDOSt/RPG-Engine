@@ -928,7 +928,9 @@ function npcImpairmentGuide(impairment, summaryText) {
 function inflictedNpcInjuryGuide(injuries) {
     if (!Array.isArray(injuries) || !injuries.length) return '';
     return ' ' + injuries.map(injury =>
-        `${valueOrNone(injury.NPC)} receives ${valueOrNone(injury.condition)} condition${injuryDetailPhrase(injury)}. This injury or status is mechanically persistent; narrate it as the concrete lasting result of the landed user action/effect, with severity limiting later offense, defense, movement, focus, or other affected actions. ${valueOrNone(injury.NarrationRule)}`,
+        injury?.condition === 'dead'
+            ? `${valueOrNone(injury.NPC)} receives dead condition. This is a deterministic fatal outcome from the landed user attack. The target is dead; narrate explicit death in the final prose so the tracker delta can record dead. ${valueOrNone(injury.NarrationRule)}`
+            : `${valueOrNone(injury.NPC)} receives ${valueOrNone(injury.condition)} condition${injuryDetailPhrase(injury)}. This injury or status is mechanically persistent; narrate it as the concrete lasting result of the landed user action/effect, with severity limiting later offense, defense, movement, focus, or other affected actions. ${valueOrNone(injury.NarrationRule)}`,
     ).join(' ');
 }
 
@@ -1003,6 +1005,14 @@ function humanizeImpairmentFunctions(value) {
 function naturalOutcomeSummary(resolution) {
     const tier = String(resolution?.OutcomeTier ?? 'NONE');
     const outcome = String(resolution?.Outcome ?? 'no_roll');
+    const fatalInjury = Array.isArray(resolution?.InflictedInjuries)
+        ? resolution.InflictedInjuries.find(injury => injury?.condition === 'dead')
+        : null;
+    if (fatalInjury) {
+        return fatalInjury.FatalityTrigger === 'nat20_critical_success'
+            ? 'an exceptional user-favoring fatal result: natural 20 plus Critical Success kills the target'
+            : 'a user-favoring fatal finish against an already badly wounded or critical target';
+    }
     if (resolution?.STAKES === 'N' || tier === 'NONE' || outcome === 'no_roll') return 'no roll; ordinary scene continuity';
     if (outcome === 'dominant_impact') return 'a decisive user-favoring result with strong visible impact';
     if (outcome === 'solid_impact') return 'a clear user-favoring result with solid visible impact';

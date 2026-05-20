@@ -456,6 +456,8 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
     let combatActionSequence = false;
     let userImpairment = noUserImpairment();
     let npcImpairment = noNpcImpairment();
+    let userAttackDie = null;
+    let primaryOppTarget = null;
 
     if (hasStakes === 'N') {
         userImpairment = evaluateUserImpairment(ledger, context, semantic, goal, null, hasStakes);
@@ -540,6 +542,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
             : noNpcImpairment('no opposing NPC roll');
         const npcImpairmentPenalty = Number(npcImpairment?.AppliedToRoll === 'Y' ? npcImpairment.RollPenalty : 0);
         const atkDie = rollPool[0];
+        userAttackDie = atkDie;
         const defDie = rollPool[1];
         const userStatValue = statValue(userCore, userStat);
         const atkTot = atkDie + userStatValue + impairmentPenalty;
@@ -573,6 +576,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         const npcImpairmentText = npcImpairmentPenalty ? ` + impairment(${npcImpairmentPenalty})` : '';
         const oppStatText = oppStat === 'ENV' ? ' + ENV(0)' : ` + ${oppStat}(${statValue(targetCore, oppStat)})${npcImpairmentText}`;
         resultLine = `1d20(${atkDie}) + ${userStat}(${userStatValue})${impairmentText} = ${atkTot} vs 1d20(${defDie})${oppStatText} = ${defTot} (${margin} - ${outcome.OutcomeTier})`;
+        primaryOppTarget = oppStat !== 'ENV' ? oppTargetsNpcFirst : null;
     }
 
     const boundaryReferee = applyPhysicalBoundaryPressureHardRules(semantic, targets, {
@@ -587,6 +591,12 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         targets,
         outcome,
         hasStakes,
+        combatActionSequence,
+        userAttackDie,
+        nonLethal: bool(semantic.nonLethal) ? 'Y' : 'N',
+        primaryTarget: primaryOppTarget,
+        trackerSnapshot,
+        audit,
     });
 
     const packet = {
@@ -594,6 +604,7 @@ function runResolution(ledger, trackerSnapshot, dice, audit, context, refereeCon
         actions,
         intimacyAdvanceExplicit,
         boundaryViolationExplicit,
+        nonLethal: bool(semantic.nonLethal) ? 'Y' : 'N',
         STAKES: hasStakes,
         LandedActions: outcome.LandedActions,
         OutcomeTier: outcome.OutcomeTier,
@@ -1740,9 +1751,22 @@ function registerGeneratedName(context, name, meta) {
     if (typeof context.saveMetadataDebounced === 'function') context.saveMetadataDebounced();
 }
 
-function deriveInflictedNpcInjuries({ injuryEffectEngine, targets, outcome, hasStakes }) {
+function deriveInflictedNpcInjuries({ injuryEffectEngine, targets, outcome, hasStakes, combatActionSequence = false, userAttackDie = null, nonLethal = 'N', primaryTarget = null, trackerSnapshot = {}, audit = null }) {
     if (hasStakes !== 'Y') return [];
     if (!effectOutcomeLanded(outcome)) return [];
+
+    const fatalInjury = deriveUserAttackFatalInjury({
+        outcome,
+        combatActionSequence,
+        userAttackDie,
+        nonLethal,
+        primaryTarget,
+        trackerSnapshot,
+    });
+    if (fatalInjury) {
+        audit?.push(`2.7p deterministicUserAttackFatality=${compact(fatalInjury)}`);
+        return [fatalInjury];
+    }
 
     const landedCount = Number(outcome?.LandedActions ?? 0);
     const injuries = normalizeInjuryEffectCandidates(injuryEffectEngine)
@@ -1756,6 +1780,37 @@ function deriveInflictedNpcInjuries({ injuryEffectEngine, targets, outcome, hasS
 function effectOutcomeLanded(outcome) {
     const landedCount = Number(outcome?.LandedActions ?? 0);
     return Number.isFinite(landedCount) && landedCount > 0;
+}
+
+function deriveUserAttackFatalInjury({ outcome, combatActionSequence, userAttackDie, nonLethal, primaryTarget, trackerSnapshot }) {
+    if (!combatActionSequence) return null;
+    if (!isReal(primaryTarget)) return null;
+    const nonlethal = String(nonLethal ?? 'N').trim().toUpperCase() === 'Y';
+    if (nonlethal) return null;
+
+    const existingCondition = normalizeTrackerCondition(trackerSnapshot?.[primaryTarget]?.condition);
+    const instantKill = Number(userAttackDie) === 20 && outcome?.OutcomeTier === 'Critical_Success';
+    const finishOffKill = ['badly_wounded', 'critical'].includes(existingCondition);
+    if (!instantKill && !finishOffKill) return null;
+
+    const trigger = instantKill
+        ? 'nat20_critical_success'
+        : `finish_off_${existingCondition}`;
+
+    return {
+        NPC: primaryTarget,
+        condition: 'dead',
+        woundsAdd: [],
+        statusAdd: [],
+        severity: 'fatal',
+        bodyPart: 'body',
+        effectType: 'fatal_user_attack',
+        sourceAction: trigger,
+        FatalityTrigger: trigger,
+        NarrationRule: instantKill
+            ? `${primaryTarget} is killed by this exceptional user attack result: nonLethal=N, natural 20, and Critical_Success. Render the kill as decisive, cinematic, concrete, and rewarding; do not soften it into a wound, near miss, survival, escape, or unresolved struggle. The target is dead.`
+            : `${primaryTarget} was already ${existingCondition}; this landed combat hit deterministically finishes them. Render the result as a clear fatal finish, not another wound or continued fighting. The target is dead.`,
+    };
 }
 
 function classifyCombatActionSequence({ semantic, goal, targets, actions, hostilePhysical, userStat, oppStat, injuryEffectEngine }) {

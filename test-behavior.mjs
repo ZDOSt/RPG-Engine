@@ -4548,6 +4548,205 @@ const tests = [
     },
   },
   {
+    name: '21a lethal nat20 critical user attack kills primary target',
+    run() {
+      const report = runCase({
+        userText: 'I drive my sword through the guard.',
+        dice: [20, 1, 1, 1, 1, 1],
+        tracker: {
+          Guard: trackerEntry({
+            currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 3 },
+          }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'KillGuard',
+            identifyChallenge: 'drive a sword through the guard',
+            explicitMeans: 'drive a sword through the guard',
+            identifyTargets: { hostilesInScene: { NPC: ['Guard'] }, ActionTargets: ['Guard'], OppTargets: { NPC: ['Guard'], ENV: [] }, BenefitedObservers: [], HarmedObservers: [] },
+            nonLethal: false,
+            hasStakes: true,
+            mapStats: { USER: 'PHY', OPP: 'PHY' },
+            classifyHostilePhysicalIntent: true,
+            activeHostileThreat: true,
+            actionCount: ['sword thrust'],
+          },
+          relationshipEngine: [relationship('Guard', {
+            genStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 3 },
+          })],
+        }),
+      });
+      const resolution = report.finalNarrativeHandoff.resolutionPacket;
+      const injuries = resolution.InflictedInjuries;
+      assert.equal(resolution.nonLethal, 'N');
+      assert.equal(resolution.OutcomeTier, 'Critical_Success');
+      assert.equal(injuries.length, 1);
+      assert.equal(injuries[0].NPC, 'Guard');
+      assert.equal(injuries[0].condition, 'dead');
+      assert.equal(injuries[0].FatalityTrigger, 'nat20_critical_success');
+      assert.equal(report.trackerUpdate.npcs.Guard.condition, 'dead');
+      assert.match(auditPrompt(report), /injury\.inflictedNpc: npc:Guard\/condition:dead/);
+      assert.match(prompt(report), /natural 20 plus Critical Success kills the target/);
+      assert.match(prompt(report), /Guard receives dead condition/);
+    },
+  },
+  {
+    name: '21b nonlethal nat20 critical user attack does not kill target',
+    run() {
+      const report = runCase({
+        userText: 'I land a clean training strike on the duelist during sparring.',
+        dice: [20, 1, 1, 1, 1, 1],
+        tracker: {
+          Duelist: trackerEntry({
+            currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 4 },
+          }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'WinSparringExchange',
+            identifyChallenge: 'land a clean training strike during sparring',
+            explicitMeans: 'land a clean training strike during sparring',
+            identifyTargets: { hostilesInScene: { NPC: [] }, ActionTargets: ['Duelist'], OppTargets: { NPC: ['Duelist'], ENV: [] }, BenefitedObservers: [], HarmedObservers: [] },
+            nonLethal: true,
+            hasStakes: true,
+            mapStats: { USER: 'PHY', OPP: 'PHY' },
+            classifyHostilePhysicalIntent: true,
+            actionCount: ['training strike'],
+          },
+          relationshipEngine: [relationship('Duelist', {
+            genStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 4 },
+          })],
+        }),
+      });
+      const resolution = report.finalNarrativeHandoff.resolutionPacket;
+      const injuries = resolution.InflictedInjuries;
+      assert.equal(resolution.nonLethal, 'Y');
+      assert.equal(resolution.OutcomeTier, 'Critical_Success');
+      assert.equal(injuries.some(injury => injury.condition === 'dead'), false);
+      assert.notEqual(report.trackerUpdate.npcs.Duelist.condition, 'dead');
+      assert.doesNotMatch(prompt(report), /receives dead condition/);
+    },
+  },
+  {
+    name: '21c landed lethal hit finishes badly wounded target',
+    run() {
+      const report = runCase({
+        userText: 'I cut the badly wounded guard again.',
+        dice: [10, 10, 1, 1, 1, 1],
+        tracker: {
+          Guard: trackerEntry({
+            condition: 'badly_wounded',
+            wounds: ['deep thigh wound'],
+            currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 3 },
+          }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'FinishGuard',
+            identifyChallenge: 'cut the badly wounded guard again',
+            explicitMeans: 'cut the badly wounded guard again',
+            identifyTargets: { hostilesInScene: { NPC: ['Guard'] }, ActionTargets: ['Guard'], OppTargets: { NPC: ['Guard'], ENV: [] }, BenefitedObservers: [], HarmedObservers: [] },
+            nonLethal: false,
+            hasStakes: true,
+            mapStats: { USER: 'PHY', OPP: 'PHY' },
+            classifyHostilePhysicalIntent: true,
+            activeHostileThreat: true,
+            actionCount: ['cut'],
+          },
+          relationshipEngine: [relationship('Guard', {
+            genStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 3 },
+          })],
+        }),
+      });
+      const resolution = report.finalNarrativeHandoff.resolutionPacket;
+      const injuries = resolution.InflictedInjuries;
+      assert.equal(resolution.LandedActions > 0, true);
+      assert.equal(injuries.length, 1);
+      assert.equal(injuries[0].NPC, 'Guard');
+      assert.equal(injuries[0].condition, 'dead');
+      assert.equal(injuries[0].FatalityTrigger, 'finish_off_badly_wounded');
+      assert.equal(report.trackerUpdate.npcs.Guard.condition, 'dead');
+      assert.match(prompt(report), /fatal finish against an already badly wounded or critical target/);
+    },
+  },
+  {
+    name: '21d landed lethal hit finishes critical target',
+    run() {
+      const report = runCase({
+        userText: 'I stab the critical raider before he can raise the axe.',
+        dice: [10, 10, 1, 1, 1, 1],
+        tracker: {
+          Raider: trackerEntry({
+            condition: 'critical',
+            wounds: ['punctured lung'],
+            currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 3, CHA: 2 },
+          }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'FinishRaider',
+            identifyChallenge: 'stab the critical raider',
+            explicitMeans: 'stab the critical raider',
+            identifyTargets: { hostilesInScene: { NPC: ['Raider'] }, ActionTargets: ['Raider'], OppTargets: { NPC: ['Raider'], ENV: [] }, BenefitedObservers: [], HarmedObservers: [] },
+            nonLethal: false,
+            hasStakes: true,
+            mapStats: { USER: 'PHY', OPP: 'PHY' },
+            classifyHostilePhysicalIntent: true,
+            activeHostileThreat: true,
+            actionCount: ['stab'],
+          },
+          relationshipEngine: [relationship('Raider', {
+            genStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 3, CHA: 2 },
+          })],
+        }),
+      });
+      const injuries = report.finalNarrativeHandoff.resolutionPacket.InflictedInjuries;
+      assert.equal(injuries.length, 1);
+      assert.equal(injuries[0].NPC, 'Raider');
+      assert.equal(injuries[0].condition, 'dead');
+      assert.equal(injuries[0].FatalityTrigger, 'finish_off_critical');
+      assert.equal(report.trackerUpdate.npcs.Raider.condition, 'dead');
+      assert.match(prompt(report), /Raider receives dead condition/);
+    },
+  },
+  {
+    name: '21e ordinary landed lethal hit against healthy target does not auto-kill',
+    run() {
+      const report = runCase({
+        userText: 'I slash the guard with my sword.',
+        dice: [10, 10, 1, 1, 1, 1],
+        tracker: {
+          Guard: trackerEntry({
+            currentCoreStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 3 },
+          }),
+        },
+        ledger: baseLedger({
+          resolutionEngine: {
+            identifyGoal: 'SlashGuard',
+            identifyChallenge: 'slash the guard with a sword',
+            explicitMeans: 'slash the guard with a sword',
+            identifyTargets: { hostilesInScene: { NPC: ['Guard'] }, ActionTargets: ['Guard'], OppTargets: { NPC: ['Guard'], ENV: [] }, BenefitedObservers: [], HarmedObservers: [] },
+            nonLethal: false,
+            hasStakes: true,
+            mapStats: { USER: 'PHY', OPP: 'PHY' },
+            classifyHostilePhysicalIntent: true,
+            activeHostileThreat: true,
+            actionCount: ['slash'],
+          },
+          relationshipEngine: [relationship('Guard', {
+            genStats: { Rank: 'Average', MainStat: 'PHY', PHY: 5, MND: 4, CHA: 3 },
+          })],
+        }),
+      });
+      const resolution = report.finalNarrativeHandoff.resolutionPacket;
+      const injuries = resolution.InflictedInjuries;
+      assert.equal(resolution.OutcomeTier, 'Minor_Success');
+      assert.equal(injuries.some(injury => injury.condition === 'dead'), false);
+      assert.notEqual(report.trackerUpdate.npcs.Guard.condition, 'dead');
+      assert.doesNotMatch(prompt(report), /receives dead condition/);
+    },
+  },
+  {
     name: '22 name generation validates semantic candidates and prompt offers approved pool',
     run() {
       const ctx = context('The butcher smiles and says his name is...');
